@@ -1,10 +1,12 @@
 pub mod kanban;
 pub mod dispatches;
+pub mod pipeline;
+pub mod github;
 
 use axum::{
     Router,
     extract::{Path, State},
-    routing::{get, post},
+    routing::{get, post, delete},
     Json,
 };
 use serde_json::json;
@@ -35,6 +37,12 @@ pub fn api_router(db: Db, engine: PolicyEngine) -> Router {
         // Dispatches
         .route("/dispatches", get(dispatches::list_dispatches).post(dispatches::create_dispatch))
         .route("/dispatches/{id}", get(dispatches::get_dispatch).patch(dispatches::update_dispatch))
+        // Pipeline stages
+        .route("/pipeline-stages", get(pipeline::list_stages).post(pipeline::create_stage))
+        .route("/pipeline-stages/{id}", delete(pipeline::delete_stage))
+        // GitHub repos
+        .route("/github/repos", get(github::list_repos).post(github::register_repo))
+        .route("/github/repos/{owner}/{repo}/sync", post(github::sync_repo))
         .with_state(state)
 }
 
@@ -890,5 +898,239 @@ mod tests {
         let dispatches = json["dispatches"].as_array().unwrap();
         assert_eq!(dispatches.len(), 1);
         assert_eq!(dispatches[0]["id"], "d1");
+    }
+
+    // ── GitHub Repos API tests ────────────────────────────────────
+
+    #[tokio::test]
+    async fn github_repos_empty_list() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        let app = api_router(db, engine);
+
+        let response = app
+            .oneshot(Request::builder().uri("/github/repos").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["repos"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn github_repos_register_and_list() {
+        let db = test_db();
+        let engine = test_engine(&db);
+
+        // Register
+        let app = api_router(db.clone(), engine.clone());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/github/repos")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"id":"owner/repo1"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["repo"]["id"], "owner/repo1");
+
+        // List
+        let app2 = api_router(db, engine);
+        let response2 = app2
+            .oneshot(Request::builder().uri("/github/repos").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        let body2 = axum::body::to_bytes(response2.into_body(), usize::MAX).await.unwrap();
+        let json2: serde_json::Value = serde_json::from_slice(&body2).unwrap();
+        assert_eq!(json2["repos"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn github_repos_register_bad_format() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        let app = api_router(db, engine);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/github/repos")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"id":"noslash"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn github_repos_sync_not_registered() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        let app = api_router(db, engine);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/github/repos/unknown/repo/sync")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    // ── Pipeline Stages API tests ─────────────────────────────────
+
+    #[tokio::test]
+    async fn pipeline_stages_empty_list() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        let app = api_router(db, engine);
+
+        let response = app
+            .oneshot(Request::builder().uri("/pipeline-stages").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["stages"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn pipeline_stages_create_and_list() {
+        let db = test_db();
+        let engine = test_engine(&db);
+
+        // Create
+        let app = api_router(db.clone(), engine.clone());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/pipeline-stages")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"repo_id":"owner/repo","stage_name":"qa-test","stage_order":1,"trigger_after":"review_pass","entry_skill":"test","timeout_minutes":60}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["stage"]["stage_name"], "qa-test");
+        assert_eq!(json["stage"]["trigger_after"], "review_pass");
+        assert_eq!(json["stage"]["timeout_minutes"], 60);
+        let stage_id = json["stage"]["id"].as_i64().unwrap();
+
+        // List with filter
+        let app2 = api_router(db.clone(), engine.clone());
+        let response2 = app2
+            .oneshot(
+                Request::builder()
+                    .uri("/pipeline-stages?repo_id=owner/repo")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let body2 = axum::body::to_bytes(response2.into_body(), usize::MAX).await.unwrap();
+        let json2: serde_json::Value = serde_json::from_slice(&body2).unwrap();
+        assert_eq!(json2["stages"].as_array().unwrap().len(), 1);
+
+        // Delete
+        let app3 = api_router(db, engine);
+        let response3 = app3
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(&format!("/pipeline-stages/{stage_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response3.status(), StatusCode::OK);
+        let body3 = axum::body::to_bytes(response3.into_body(), usize::MAX).await.unwrap();
+        let json3: serde_json::Value = serde_json::from_slice(&body3).unwrap();
+        assert_eq!(json3["deleted"], true);
+    }
+
+    #[tokio::test]
+    async fn pipeline_stages_delete_not_found() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        let app = api_router(db, engine);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/pipeline-stages/9999")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn pipeline_stages_list_filtered_by_repo() {
+        let db = test_db();
+        let engine = test_engine(&db);
+
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO pipeline_stages (repo_id, stage_name, stage_order, trigger_after, timeout_minutes) VALUES ('repo-a', 'test', 1, 'review_pass', 30)",
+                [],
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO pipeline_stages (repo_id, stage_name, stage_order, trigger_after, timeout_minutes) VALUES ('repo-b', 'deploy', 1, 'review_pass', 60)",
+                [],
+            ).unwrap();
+        }
+
+        let app = api_router(db, engine);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/pipeline-stages?repo_id=repo-a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let stages = json["stages"].as_array().unwrap();
+        assert_eq!(stages.len(), 1);
+        assert_eq!(stages[0]["stage_name"], "test");
     }
 }
