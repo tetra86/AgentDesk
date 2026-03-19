@@ -1,0 +1,772 @@
+# AgentDesk Architecture
+
+> AI 에이전트 조직을 원격으로 운영하는 단일 바이너리 오케스트레이션 플랫폼
+
+## 설계 원칙
+
+1. **Single Binary** — Rust 바이너리 하나로 설치/배포
+2. **Single Process** — 프로세스 간 통신 없음, 장애 지점 최소화
+3. **Single DB** — SQLite 하나에 모든 상태
+4. **Hot-Reloadable Policies** — 비즈니스 로직은 JS 파일로 분리, 재빌드 없이 변경
+5. **Self-Contained** — Node.js, Python 등 외부 런타임 불필요
+
+---
+
+## 시스템 구조도
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    AgentDesk Binary (Rust)               │
+│                                                         │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌────────┐  │
+│  │ Discord  │  │ Session  │  │   HTTP   │  │ GitHub │  │
+│  │ Gateway  │  │ Manager  │  │ Server   │  │  Sync  │  │
+│  │ (serenity│  │ (tmux)   │  │ (axum)   │  │ (gh)   │  │
+│  └────┬─────┘  └────┬─────┘  └────┬─────┘  └───┬────┘  │
+│       │              │             │             │       │
+│  ┌────┴──────────────┴─────────────┴─────────────┴────┐  │
+│  │              Core Event Bus (channels)              │  │
+│  └────┬──────────────┬─────────────┬─────────────┬────┘  │
+│       │              │             │             │       │
+│  ┌────┴─────┐  ┌─────┴────┐  ┌────┴─────┐  ┌───┴────┐  │
+│  │ Dispatch │  │  Policy   │  │ Database │  │   WS   │  │
+│  │ Engine   │  │  Engine   │  │ (SQLite) │  │Broadcast│  │
+│  │          │  │(QuickJS)  │  │(rusqlite)│  │        │  │
+│  └──────────┘  └──────────┘  └──────────┘  └────────┘  │
+│                     │                                    │
+│              ┌──────┴──────┐                             │
+│              │  policies/  │  ← JS 파일 (hot-reload)     │
+│              │  *.js       │                             │
+│              └─────────────┘                             │
+└─────────────────────────────────────────────────────────┘
+         │
+    ┌────┴────┐
+    │ Static  │  ← React 프론트엔드 (빌드 산출물)
+    │Dashboard│
+    └─────────┘
+```
+
+---
+
+## 모듈 상세
+
+### 1. Discord Gateway (`src/discord/`)
+
+RCC의 serenity 기반 Discord 봇을 그대로 이관.
+
+| 파일 | 역할 | 출처 |
+|------|------|------|
+| `gateway.rs` | Discord 연결, 이벤트 수신 | RCC `services/discord/mod.rs` |
+| `router.rs` | 메시지 라우팅, intake dedup | RCC `services/discord/router.rs` |
+| `turn_bridge.rs` | 에이전트 턴 관리, 하트비트 | RCC `services/discord/turn_bridge.rs` |
+| `meeting.rs` | 라운드테이블 회의 진행 | RCC `services/discord/meeting.rs` |
+| `multi_bot.rs` | 명령봇/알림봇/프로바이더봇 관리 | RCC 봇 관리 로직 |
+
+**변경점:**
+- `post_pcd_session_status()` HTTP 호출 → 내부 함수 `session::report_status()` 직접 호출
+- `post_meeting_to_pcd()` HTTP 호출 → 내부 함수 `db::save_meeting()` 직접 호출
+- 세션 상태 변경 시 Policy Engine에 이벤트 전파 (칸반 승격 등)
+
+### 2. Session Manager (`src/session/`)
+
+| 파일 | 역할 | 출처 |
+|------|------|------|
+| `tmux.rs` | tmux 세션 생성/파괴/모니터링 | RCC tmux 관리 |
+| `tracker.rs` | 세션 상태 DB 기록, 하트비트 | PCD `dispatched-sync.ts` |
+| `agent_link.rs` | 세션 ↔ 에이전트 매핑 | PCD `remotecc-session.ts` + `role-map.ts` |
+
+**변경점:**
+- `role_map.json` 파일 의존 제거 → DB `agents` 테이블에서 직접 조회
+- 세션 상태 변경 → Core Event Bus를 통해 Policy Engine에 전파
+
+### 3. HTTP Server (`src/server/`)
+
+| 파일 | 역할 | 출처 |
+|------|------|------|
+| `http.rs` | axum 기반 HTTP 서버 + 정적 파일 서빙 | PCD express 서버 |
+| `ws.rs` | WebSocket 브로드캐스트 | PCD `ws.ts` |
+| `auth.rs` | 인증 미들웨어 | PCD `auth.ts` |
+| `routes/` | REST API 엔드포인트 | PCD `routes/` |
+
+**API 목록:**
+```
+# 에이전트
+GET    /api/agents
+GET    /api/agents/:id
+PATCH  /api/agents/:id
+
+# 칸반
+GET    /api/kanban-cards
+POST   /api/kanban-cards
+PATCH  /api/kanban-cards/:id
+POST   /api/kanban-cards/:id/assign
+POST   /api/kanban-cards/:id/retry
+
+# 디스패치
+GET    /api/dispatches
+GET    /api/dispatches/:id
+POST   /api/dispatches            ← 새로 추가 (직접 dispatch 생성)
+
+# 세션
+GET    /api/sessions
+
+# GitHub
+GET    /api/github/repos
+POST   /api/github/repos          ← repo 등록
+GET    /api/github/repos/:id/issues
+
+# 회의
+GET    /api/meetings
+GET    /api/meetings/:id
+
+# 설정
+GET    /api/settings
+PATCH  /api/settings
+
+# 상태
+GET    /api/health
+GET    /api/rate-limits
+
+# Discord 프록시
+POST   /api/discord/send-target   ← 대시보드에서 Discord 메시지 전송
+```
+
+### 4. Policy Engine (`src/engine/`)
+
+QuickJS (rquickjs 크레이트) 기반 내장 JS 런타임.
+
+| 파일 | 역할 |
+|------|------|
+| `runtime.rs` | QuickJS 런타임 초기화, 글로벌 객체 주입 |
+| `ops.rs` | Rust ↔ JS 브릿지 함수 정의 |
+| `loader.rs` | policies/ 디렉토리 감시, 핫 리로드 |
+| `hooks.rs` | 라이프사이클 훅 정의 및 실행 |
+
+#### Bridge Ops (JS에서 호출 가능한 Rust 함수)
+
+```javascript
+// DB 접근
+agentdesk.db.query("SELECT * FROM kanban_cards WHERE status = ?", ["ready"])
+agentdesk.db.execute("UPDATE kanban_cards SET status = ? WHERE id = ?", ["in_progress", id])
+
+// Discord
+agentdesk.discord.send(channelId, "메시지")
+agentdesk.discord.sendToAgent(agentId, "메시지")
+
+// GitHub
+agentdesk.github.closeIssue(repo, number)
+agentdesk.github.comment(repo, number, body)
+agentdesk.github.getIssue(repo, number)
+
+// 디스패치
+agentdesk.dispatch.create({ from, to, type, title, context })
+agentdesk.dispatch.complete(dispatchId, result)
+
+// 칸반 (상태 전환 + 부수효과)
+agentdesk.kanban.transition(cardId, newStatus, reason)
+
+// 에이전트
+agentdesk.agent.get(agentId)
+agentdesk.agent.list({ status: "working" })
+
+// 설정
+agentdesk.config.get("review.maxRounds")
+
+// 실시간
+agentdesk.ws.broadcast("kanban_card_updated", payload)
+
+// 로깅
+agentdesk.log.info("message")
+agentdesk.log.warn("message")
+```
+
+#### 라이프사이클 훅
+
+Policy JS 파일에서 등록하는 이벤트 핸들러:
+
+```javascript
+// policies/kanban-rules.js
+export default {
+  name: "kanban-rules",
+  priority: 10,
+
+  onSessionStatusChange({ agentId, status, dispatchId }) {
+    // working → in_progress 승격
+    if (status === "working" && dispatchId) {
+      const card = agentdesk.kanban.getByDispatchId(dispatchId);
+      if (card && card.status === "requested") {
+        agentdesk.kanban.transition(card.id, "in_progress", "agent_started");
+      }
+    }
+    // idle (from working) → review
+    if (status === "idle" && dispatchId) {
+      const card = agentdesk.kanban.getByDispatchId(dispatchId);
+      if (card && card.status === "in_progress") {
+        agentdesk.kanban.transition(card.id, "review", "agent_completed");
+      }
+    }
+  },
+
+  onCardTransition({ card, from, to }) {
+    // done → GitHub issue close + XP reward
+    if (to === "done" && card.github_issue_url) {
+      agentdesk.github.closeIssue(card.repo, card.issue_number);
+      agentdesk.kanban.reward(card.id);
+    }
+  },
+
+  onDispatchCompleted({ dispatchId, result }) {
+    // follow-up request → auto-chain
+    if (result.follow_up_request) {
+      agentdesk.dispatch.create(result.follow_up_request);
+    }
+  },
+};
+```
+
+```javascript
+// policies/review-policy.js
+export default {
+  name: "counter-model-review",
+  priority: 100,
+
+  onReviewEnter({ card }) {
+    const maxRounds = agentdesk.config.get("review.maxRounds") || 3;
+    if (card.review_round >= maxRounds) {
+      agentdesk.kanban.transition(card.id, "dilemma_pending");
+      return;
+    }
+    // counter-model dispatch
+    const counterChannel = card.provider === "claude" ? card.codex_channel : card.claude_channel;
+    agentdesk.dispatch.create({
+      from: "system",
+      to: counterChannel,
+      type: "review",
+      title: `Review: ${card.title}`,
+      context: card.review_context,
+    });
+  },
+
+  onReviewVerdict({ card, verdict }) {
+    if (verdict.overall === "pass") {
+      agentdesk.kanban.transition(card.id, "done", "review_passed");
+    } else {
+      agentdesk.kanban.transition(card.id, "suggestion_pending", verdict);
+    }
+  },
+};
+```
+
+```javascript
+// policies/auto-queue.js
+export default {
+  name: "auto-queue",
+  priority: 200,
+
+  onCardTerminal({ card }) {
+    // 다음 ready 카드 자동 dispatch
+    const next = agentdesk.db.query(
+      `SELECT * FROM kanban_cards
+       WHERE repo_id = ? AND status = 'ready'
+       ORDER BY priority DESC, created_at ASC LIMIT 1`,
+      [card.repo_id]
+    );
+    if (next) {
+      agentdesk.kanban.transition(next.id, "requested", "auto_queue");
+    }
+  },
+};
+```
+
+```javascript
+// policies/timeout-policy.js
+export default {
+  name: "timeout-policy",
+
+  // 1분 주기로 호출
+  onTick() {
+    const now = Date.now();
+
+    // requested 45분 초과 → failed
+    const staleRequested = agentdesk.db.query(
+      `SELECT * FROM kanban_cards WHERE status = 'requested'
+       AND updated_at < ?`, [now - 45 * 60000]
+    );
+    for (const card of staleRequested) {
+      agentdesk.kanban.transition(card.id, "failed", "timeout_requested");
+    }
+
+    // in_progress 100분 초과 → blocked
+    const staleProgress = agentdesk.db.query(
+      `SELECT * FROM kanban_cards WHERE status = 'in_progress'
+       AND updated_at < ?`, [now - 100 * 60000]
+    );
+    for (const card of staleProgress) {
+      agentdesk.kanban.transition(card.id, "blocked", "timeout_in_progress");
+    }
+  },
+};
+```
+
+### 5. Dispatch Engine (`src/dispatch/`)
+
+| 파일 | 역할 | 출처 |
+|------|------|------|
+| `executor.rs` | 디스패치 생성, 라우팅, Discord 전송 | PCD `dispatch-watcher.ts` |
+| `result.rs` | 결과 수신 및 처리 | PCD `dispatch-watcher.ts` |
+| `chain.rs` | follow-up 자동 chaining | PCD `dispatch-watcher.ts` |
+
+**변경점:**
+- 파일 기반 handoff/result → 직접 함수 호출
+- PCD의 dispatch-watcher 파일 폴링 → Rust 내부 이벤트
+- `createDispatchForKanbanCard()` → Dispatch Engine + Policy 조합
+
+### 6. GitHub Integration (`src/github/`)
+
+| 파일 | 역할 | 출처 |
+|------|------|------|
+| `sync.rs` | issue 상태 양방향 동기화 | PCD `kanban-github.ts` |
+| `triage.rs` | 미분류 이슈 자동 분류 | PCD `issue-triage.ts` |
+| `dod.rs` | DoD 체크리스트 미러링 | PCD `kanban-github.ts` |
+
+**구현:** `gh` CLI 호출 또는 GitHub REST API 직접 호출
+
+### 7. Database (`src/db/`)
+
+| 파일 | 역할 |
+|------|------|
+| `schema.rs` | 테이블 정의 + 마이그레이션 |
+| `dao.rs` | 공통 DAO 함수 |
+| `migration.rs` | 버전 기반 스키마 마이그레이션 |
+
+---
+
+## 통합 DB 스키마
+
+```sql
+-- 에이전트 정의 (기존 PCD agents + RCC org.yaml 통합)
+CREATE TABLE agents (
+  id          TEXT PRIMARY KEY,           -- role_id (예: ch-td)
+  name        TEXT NOT NULL,
+  name_ko     TEXT,
+  department  TEXT,
+  provider    TEXT DEFAULT 'claude',      -- claude/codex/gemini
+  discord_channel_id    TEXT,             -- primary channel (claude)
+  discord_channel_alt   TEXT,             -- alt channel (codex)
+  avatar_emoji TEXT,
+  status      TEXT DEFAULT 'idle',        -- idle/working/offline
+  xp          INTEGER DEFAULT 0,
+  skills      TEXT,                       -- JSON array
+  created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 칸반 카드 (기존 PCD kanban_cards 유지)
+CREATE TABLE kanban_cards (
+  id                  TEXT PRIMARY KEY,
+  repo_id             TEXT,
+  title               TEXT NOT NULL,
+  status              TEXT DEFAULT 'backlog',
+  priority            TEXT DEFAULT 'medium',
+  assigned_agent_id   TEXT REFERENCES agents(id),
+  github_issue_url    TEXT,
+  github_issue_number INTEGER,
+  latest_dispatch_id  TEXT,
+  review_round        INTEGER DEFAULT 0,
+  metadata            TEXT,               -- JSON (review_checklist, reward, etc.)
+  created_at          DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updated_at          DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 디스패치 (기존 PCD task_dispatches 유지)
+CREATE TABLE task_dispatches (
+  id                  TEXT PRIMARY KEY,
+  kanban_card_id      TEXT REFERENCES kanban_cards(id),
+  from_agent_id       TEXT,
+  to_agent_id         TEXT,
+  dispatch_type       TEXT,               -- implementation/review/test/rework
+  status              TEXT DEFAULT 'pending',
+  title               TEXT,
+  context             TEXT,               -- JSON
+  result              TEXT,               -- JSON
+  parent_dispatch_id  TEXT,
+  chain_depth         INTEGER DEFAULT 0,
+  created_at          DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updated_at          DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 세션 (기존 PCD dispatched_sessions 유지)
+CREATE TABLE sessions (
+  id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_key         TEXT UNIQUE,         -- hostname:tmux-session
+  agent_id            TEXT REFERENCES agents(id),
+  provider            TEXT DEFAULT 'claude',
+  status              TEXT DEFAULT 'disconnected',
+  active_dispatch_id  TEXT,
+  model               TEXT,
+  session_info        TEXT,
+  tokens              INTEGER DEFAULT 0,
+  cwd                 TEXT,
+  last_heartbeat      DATETIME,
+  created_at          DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 회의 (기존 PCD meetings 확장)
+CREATE TABLE meetings (
+  id                  TEXT PRIMARY KEY,
+  channel_id          TEXT,
+  title               TEXT,
+  status              TEXT,                -- in_progress/completed/cancelled
+  effective_rounds    INTEGER,
+  started_at          DATETIME,
+  completed_at        DATETIME,
+  summary             TEXT
+);
+
+CREATE TABLE meeting_transcripts (
+  id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+  meeting_id          TEXT REFERENCES meetings(id),
+  seq                 INTEGER,
+  round               INTEGER,
+  speaker_agent_id    TEXT,
+  speaker_name        TEXT,
+  content             TEXT,
+  is_summary          BOOLEAN DEFAULT FALSE
+);
+
+-- GitHub 레포 등록
+CREATE TABLE github_repos (
+  id                  TEXT PRIMARY KEY,    -- owner/repo
+  display_name        TEXT,
+  sync_enabled        BOOLEAN DEFAULT TRUE,
+  last_synced_at      DATETIME
+);
+
+-- 디스패치 큐 (auto-queue)
+CREATE TABLE dispatch_queue (
+  id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+  kanban_card_id      TEXT REFERENCES kanban_cards(id),
+  priority_score      REAL,
+  queued_at           DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 파이프라인 스테이지
+CREATE TABLE pipeline_stages (
+  id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+  repo_id             TEXT,
+  stage_name          TEXT,
+  stage_order         INTEGER,
+  trigger_after       TEXT,                -- review_pass, stage_X_pass
+  entry_skill         TEXT,
+  timeout_minutes     INTEGER DEFAULT 60,
+  on_failure          TEXT DEFAULT 'fail', -- fail/retry/goto
+  skip_condition      TEXT                 -- JSON
+);
+
+-- 스킬
+CREATE TABLE skills (
+  id                  TEXT PRIMARY KEY,
+  name                TEXT,
+  description         TEXT,
+  source_path         TEXT,
+  trigger_patterns    TEXT,                -- JSON array
+  updated_at          DATETIME
+);
+
+CREATE TABLE skill_usage (
+  id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+  skill_id            TEXT,
+  agent_id            TEXT,
+  session_key         TEXT,
+  used_at             DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 메시지 (채팅)
+CREATE TABLE messages (
+  id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+  sender_type         TEXT,                -- ceo/agent/system
+  sender_id           TEXT,
+  receiver_type       TEXT,
+  receiver_id         TEXT,
+  content             TEXT,
+  message_type        TEXT DEFAULT 'chat',
+  created_at          DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 오피스
+CREATE TABLE offices (
+  id                  TEXT PRIMARY KEY,
+  name                TEXT,
+  layout              TEXT                 -- JSON
+);
+
+CREATE TABLE departments (
+  id                  TEXT PRIMARY KEY,
+  name                TEXT,
+  office_id           TEXT REFERENCES offices(id)
+);
+
+-- KV 메타 (설정, 마이그레이션 트래킹)
+CREATE TABLE kv_meta (
+  key                 TEXT PRIMARY KEY,
+  value               TEXT
+);
+
+-- 리뷰 결정
+CREATE TABLE review_decisions (
+  id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+  kanban_card_id      TEXT REFERENCES kanban_cards(id),
+  dispatch_id         TEXT,
+  item_index          INTEGER,
+  decision            TEXT,                -- accept/reject
+  decided_at          DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Rate limit 캐시
+CREATE TABLE rate_limit_cache (
+  provider            TEXT PRIMARY KEY,
+  data                TEXT,                -- JSON
+  fetched_at          INTEGER
+);
+```
+
+---
+
+## 설정 파일
+
+```yaml
+# agentdesk.yaml — 단일 설정 파일
+server:
+  port: 8791
+  host: "0.0.0.0"
+  auth_token: "your-secret-token"
+
+discord:
+  bots:
+    command:
+      token: "MTQ3OT..."
+      description: "에이전트에게 명령 전달"
+    notify:
+      token: "MTQ4MT..."
+      description: "정보 알림 전용"
+  guild_id: "1234567890"
+
+agents:
+  - id: ch-td
+    name: "TD"
+    name_ko: "테크니컬 디렉터"
+    provider: claude
+    channels:
+      claude: "td-cc"
+      codex: "td-cdx"
+    department: engineering
+    avatar_emoji: "🔧"
+
+  - id: ch-dd
+    name: "DD"
+    name_ko: "디자인 디렉터"
+    provider: claude
+    channels:
+      claude: "dd-cc"
+    department: design
+    avatar_emoji: "🎨"
+
+github:
+  repos:
+    - "owner/repo-a"
+    - "owner/repo-b"
+  sync_interval_minutes: 10
+  triage_interval_minutes: 5
+
+policies:
+  dir: "./policies"              # JS 정책 파일 디렉토리
+  hot_reload: true               # 파일 변경 시 자동 리로드
+
+data:
+  dir: "~/.agentdesk"           # DB, 로그, 캐시 저장소
+  db_name: "agentdesk.sqlite"
+
+kanban:
+  timeout_requested_minutes: 45
+  timeout_in_progress_minutes: 100
+  max_review_rounds: 3
+  max_chain_depth: 5
+
+auto_queue:
+  enabled: true
+  dod_timeout_minutes: 15
+
+rate_limits:
+  poll_interval_seconds: 120
+  warning_percent: 60
+  danger_percent: 85
+```
+
+---
+
+## 디렉토리 구조
+
+```
+AgentDesk/
+├── Cargo.toml
+├── Cargo.lock
+├── build.rs                     # 프론트엔드 빌드 + 임베딩
+│
+├── src/
+│   ├── main.rs                  # 엔트리포인트, 모듈 조합
+│   ├── config.rs                # agentdesk.yaml 파싱
+│   │
+│   ├── db/
+│   │   ├── mod.rs
+│   │   ├── schema.rs            # 테이블 + 마이그레이션
+│   │   └── dao.rs               # 공통 쿼리 함수
+│   │
+│   ├── discord/
+│   │   ├── mod.rs
+│   │   ├── gateway.rs           # serenity 봇 (← RCC)
+│   │   ├── router.rs            # 메시지 라우팅 (← RCC)
+│   │   ├── turn_bridge.rs       # 턴 관리 (← RCC)
+│   │   ├── meeting.rs           # 라운드테이블 (← RCC)
+│   │   └── multi_bot.rs         # 다중 봇 관리 (← RCC)
+│   │
+│   ├── session/
+│   │   ├── mod.rs
+│   │   ├── tmux.rs              # tmux 생명주기 (← RCC)
+│   │   ├── tracker.rs           # 세션 상태 추적 (← PCD)
+│   │   └── agent_link.rs        # 세션↔에이전트 매핑 (← PCD)
+│   │
+│   ├── server/
+│   │   ├── mod.rs
+│   │   ├── http.rs              # axum HTTP 서버
+│   │   ├── ws.rs                # WebSocket 브로드캐스트
+│   │   ├── auth.rs              # 인증
+│   │   └── routes/
+│   │       ├── agents.rs
+│   │       ├── kanban.rs
+│   │       ├── dispatches.rs
+│   │       ├── sessions.rs
+│   │       ├── github.rs
+│   │       ├── meetings.rs
+│   │       ├── settings.rs
+│   │       ├── discord_proxy.rs
+│   │       ├── rate_limits.rs
+│   │       └── health.rs
+│   │
+│   ├── engine/
+│   │   ├── mod.rs
+│   │   ├── runtime.rs           # QuickJS 초기화
+│   │   ├── ops.rs               # Rust↔JS 브릿지 (~30 ops)
+│   │   ├── loader.rs            # policies/ 핫 리로드
+│   │   └── hooks.rs             # 라이프사이클 훅 정의
+│   │
+│   ├── dispatch/
+│   │   ├── mod.rs
+│   │   ├── executor.rs          # 생성 + 라우팅 (← PCD)
+│   │   ├── result.rs            # 결과 처리 (← PCD)
+│   │   └── chain.rs             # auto-chaining (← PCD)
+│   │
+│   └── github/
+│       ├── mod.rs
+│       ├── sync.rs              # issue 동기화 (← PCD)
+│       ├── triage.rs            # 자동 분류 (← PCD)
+│       └── dod.rs               # DoD 미러링 (← PCD)
+│
+├── policies/                    # 기본 정책 (JS, 핫 리로드)
+│   ├── kanban-rules.js
+│   ├── review-policy.js
+│   ├── auto-queue.js
+│   ├── pipeline.js
+│   ├── triage-rules.js
+│   ├── reward-policy.js
+│   └── timeout-policy.js
+│
+├── dashboard/                   # React 프론트엔드
+│   ├── src/                     # (← PCD src/ 이관)
+│   ├── package.json
+│   ├── vite.config.ts
+│   └── index.html
+│
+├── migrations/
+│   ├── 001_initial.sql
+│   └── ...
+│
+└── scripts/
+    ├── migrate-from-rcc-pcd.ts  # 레거시 데이터 이관
+    └── install.sh               # curl 기반 설치 스크립트
+```
+
+---
+
+## 데이터 이관 전략
+
+### Phase 1: DB 통합
+```
+PCD SQLite (agents, kanban_cards, task_dispatches, sessions, ...)
+    + RCC org.yaml (agent 정의)
+    + RCC role_map.json (채널 매핑)
+    + PCD .env (봇 토큰)
+    → AgentDesk SQLite + agentdesk.yaml
+```
+
+### Phase 2: 이관 스크립트
+1. PCD SQLite 테이블 → AgentDesk 스키마로 매핑 (대부분 1:1)
+2. org.yaml agents → agentdesk.yaml agents 섹션
+3. role_map.json channels → agents[].channels 필드
+4. .env 토큰 → agentdesk.yaml discord.bots 섹션
+5. rate-limit-cache.json → rate_limit_cache 테이블
+
+### Phase 3: 정책 이관
+```
+PCD kanban-dispatch.ts    → policies/kanban-rules.js
+PCD kanban-review.ts      → policies/review-policy.js
+PCD kanban-timeouts.ts    → policies/timeout-policy.js
+PCD auto-queue.ts         → policies/auto-queue.js
+PCD pipeline.ts           → policies/pipeline.js
+PCD issue-triage.ts       → policies/triage-rules.js
+PCD kanban-crud.ts reward → policies/reward-policy.js
+```
+
+---
+
+## 구현 우선순위 (로드맵)
+
+### Milestone 1: Foundation
+- [ ] Cargo 프로젝트 초기화
+- [ ] config.rs — agentdesk.yaml 파싱
+- [ ] db/ — SQLite 스키마 + 마이그레이션
+- [ ] server/ — axum HTTP + WS + 정적 파일 서빙
+- [ ] 기본 API (agents, health)
+
+### Milestone 2: Policy Engine
+- [ ] engine/ — QuickJS (rquickjs) 런타임 초기화
+- [ ] ops.rs — 브릿지 ops 20~30개 구현
+- [ ] loader.rs — policies/ 디렉토리 감시 + 핫 리로드
+- [ ] hooks.rs — 라이프사이클 훅 시스템
+
+### Milestone 3: Discord + Session
+- [ ] discord/ — serenity 봇 이관 (RCC → AgentDesk)
+- [ ] session/ — tmux 관리 이관
+- [ ] turn_bridge — 턴 관리 이관
+- [ ] 내부 이벤트 버스 연결
+
+### Milestone 4: Kanban + Dispatch
+- [ ] dispatch/ — 디스패치 엔진 (직접 함수 호출)
+- [ ] policies/kanban-rules.js — 상태 전환 정책
+- [ ] policies/review-policy.js — 리뷰 시스템
+- [ ] policies/auto-queue.js — 자동 큐
+
+### Milestone 5: GitHub + Pipeline
+- [ ] github/ — issue sync, triage, DoD
+- [ ] policies/pipeline.js — 다단계 워크플로우
+- [ ] policies/timeout-policy.js — 타임아웃
+
+### Milestone 6: Dashboard
+- [ ] dashboard/ — PCD React 프론트엔드 이관
+- [ ] API 엔드포인트 연결
+- [ ] 빌드 시 정적 파일 임베딩 (include_bytes! 또는 별도 서빙)
+
+### Milestone 7: Migration + Release
+- [ ] migrate-from-rcc-pcd.ts — 데이터 이관 스크립트
+- [ ] install.sh — 원클릭 설치
+- [ ] GitHub Actions CI/CD
+- [ ] README + 문서

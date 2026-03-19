@@ -1,0 +1,37 @@
+server:
+  port: 8791
+  host: "0.0.0.0"
+
+discord:
+  bots:
+    command:
+      token: "YOUR_COMMAND_BOT_TOKEN"
+    notify:
+      token: "YOUR_NOTIFY_BOT_TOKEN"
+  guild_id: "YOUR_GUILD_ID"
+
+agents:
+  - id: ch-td
+    name: "TD"
+    name_ko: "테크니컬 디렉터"
+    provider: claude
+    channels:
+      claude: "td-cc"
+      codex: "td-cdx"
+    department: engineering
+
+github:
+  repos:
+    - "owner/repo"
+
+policies:
+  dir: "./policies"
+  hot_reload: true
+
+data:
+  dir: "~/.agentdesk"
+
+kanban:
+  timeout_requested_minutes: 45
+  timeout_in_progress_minutes: 100
+  max_review_rounds: 3

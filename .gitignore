@@ -1,0 +1,9 @@
+/target
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+.env
+node_modules/
+dashboard/dist/
+.DS_Store
+agentdesk.yaml
