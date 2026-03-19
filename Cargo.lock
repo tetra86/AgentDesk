@@ -32,6 +32,7 @@ dependencies = [
  "serde_yaml",
  "serenity",
  "sha2",
+ "tempfile",
  "textwrap",
  "thiserror 2.0.18",
  "tokio",

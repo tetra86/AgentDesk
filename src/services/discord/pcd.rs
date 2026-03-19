@@ -395,4 +395,64 @@ mod tests {
         );
         assert_eq!(summary, "remotecc 배포 작업 진행 중");
     }
+
+    // ── P0 tests ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_dispatch_id_valid() {
+        use super::parse_dispatch_id;
+        let result =
+            parse_dispatch_id("DISPATCH:550e8400-e29b-41d4-a716-446655440000 - Fix login bug");
+        assert_eq!(
+            result,
+            Some("550e8400-e29b-41d4-a716-446655440000".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_dispatch_id_no_title() {
+        use super::parse_dispatch_id;
+        let result = parse_dispatch_id("DISPATCH:550e8400-e29b-41d4-a716-446655440000");
+        assert_eq!(
+            result,
+            Some("550e8400-e29b-41d4-a716-446655440000".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_dispatch_id_invalid() {
+        use super::parse_dispatch_id;
+        assert_eq!(parse_dispatch_id("random text with no dispatch"), None);
+        assert_eq!(parse_dispatch_id("DISPATCH_WRONG:abc"), None);
+    }
+
+    #[test]
+    fn test_parse_dispatch_id_empty() {
+        use super::parse_dispatch_id;
+        assert_eq!(parse_dispatch_id(""), None);
+        assert_eq!(parse_dispatch_id("DISPATCH:"), None);
+        assert_eq!(parse_dispatch_id("DISPATCH:  "), None);
+    }
+
+    #[test]
+    fn test_derive_session_info_max_chars() {
+        // PCD_SESSION_INFO_MAX_CHARS = 60
+        // A long user text should be truncated to 60 chars (with ellipsis)
+        let long_text = "가나다라마바사아자차카타파하가나다라마바사아자차카타파하가나다라마바사아자차카타파하가나다라마바사아자차카타파하";
+        let summary = derive_pcd_session_info(Some(long_text), None, None);
+        assert!(summary.chars().count() <= 60);
+    }
+
+    #[test]
+    fn test_build_pcd_session_key_format() {
+        // build_pcd_session_key is async and needs SharedData, so test the format
+        // by verifying the components: "hostname:tmux-session"
+        // We test the sub-components instead:
+        use crate::services::provider::ProviderKind;
+        let tmux_name = ProviderKind::Claude.build_tmux_session_name("my-channel");
+        let hostname = "mac-mini";
+        let key = format!("{}:{}", hostname, tmux_name);
+        assert!(key.contains(':'));
+        assert!(key.starts_with("mac-mini:remoteCC-claude-"));
+    }
 }

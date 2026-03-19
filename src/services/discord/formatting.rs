@@ -254,6 +254,82 @@ mod tests {
         let result = convert_markdown_tables(input);
         assert_eq!(result, input);
     }
+
+    // ── P0 tests ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_canonical_tool_name_case_insensitive() {
+        assert_eq!(canonical_tool_name("bash"), Some("Bash"));
+        assert_eq!(canonical_tool_name("BASH"), Some("Bash"));
+        assert_eq!(canonical_tool_name("Bash"), Some("Bash"));
+    }
+
+    #[test]
+    fn test_canonical_tool_name_unknown_none() {
+        assert_eq!(canonical_tool_name("nonexistent-tool"), None);
+        assert_eq!(canonical_tool_name(""), None);
+        assert_eq!(canonical_tool_name("FooBar"), None);
+    }
+
+    #[test]
+    fn test_normalize_allowed_tools_dedupes() {
+        let result = normalize_allowed_tools(["Bash", "bash", "BASH"]);
+        assert_eq!(result, vec!["Bash".to_string()]);
+    }
+
+    #[test]
+    fn test_normalize_allowed_tools_discards_unknown() {
+        let result = normalize_allowed_tools(["Bash", "unknown-tool", "Read"]);
+        assert_eq!(result, vec!["Bash".to_string(), "Read".to_string()]);
+        assert!(!result.iter().any(|t| t == "unknown-tool"));
+    }
+
+    #[test]
+    fn test_extract_skill_description_from_frontmatter() {
+        use super::extract_skill_description;
+
+        let content = "---\ndescription: Build and deploy the project\n---\n# Deploy\nSome body text";
+        assert_eq!(
+            extract_skill_description(content),
+            "Build and deploy the project"
+        );
+    }
+
+    #[test]
+    fn test_extract_skill_description_no_frontmatter() {
+        use super::extract_skill_description;
+
+        let content = "# My Skill\nThis is the body of the skill.";
+        // No frontmatter → falls back to first non-heading line
+        assert_eq!(
+            extract_skill_description(content),
+            "This is the body of the skill."
+        );
+    }
+
+    #[test]
+    fn test_split_message_short_passthrough() {
+        use super::split_message;
+
+        let short = "Hello, world!";
+        let chunks = split_message(short);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0], short);
+    }
+
+    #[test]
+    fn test_split_message_long_produces_multiple_chunks() {
+        use super::{split_message, DISCORD_MSG_LIMIT};
+
+        // Create a message longer than the Discord limit
+        let long_msg: String = "A".repeat(DISCORD_MSG_LIMIT + 500);
+        let chunks = split_message(&long_msg);
+        assert!(chunks.len() >= 2);
+        // Each chunk should be within the limit (with some overhead tolerance)
+        for chunk in &chunks {
+            assert!(chunk.len() <= DISCORD_MSG_LIMIT + 50);
+        }
+    }
 }
 
 pub(super) fn floor_char_boundary(s: &str, index: usize) -> usize {

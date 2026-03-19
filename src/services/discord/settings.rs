@@ -556,7 +556,7 @@ mod tests {
 
     #[test]
     fn test_load_bot_settings_keeps_explicit_empty_allowed_tools() {
-        with_temp_home(|temp_home| {
+        with_temp_home(|temp_home: &TempDir| {
             let settings_dir = temp_home.path().join(".remotecc");
             fs::create_dir_all(&settings_dir).unwrap();
             let token = "test-token";
@@ -587,7 +587,7 @@ mod tests {
 
     #[test]
     fn test_load_bot_settings_normalizes_and_dedupes_tool_names() {
-        with_temp_home(|temp_home| {
+        with_temp_home(|temp_home: &TempDir| {
             let settings_dir = temp_home.path().join(".remotecc");
             fs::create_dir_all(&settings_dir).unwrap();
             let token = "test-token";
@@ -614,7 +614,7 @@ mod tests {
 
     #[test]
     fn test_load_bot_launch_configs_reads_provider() {
-        with_temp_home(|temp_home| {
+        with_temp_home(|temp_home: &TempDir| {
             let settings_dir = temp_home.path().join(".remotecc");
             fs::create_dir_all(&settings_dir).unwrap();
             fs::write(
@@ -636,7 +636,7 @@ mod tests {
 
     #[test]
     fn test_load_bot_settings_accepts_string_encoded_ids() {
-        with_temp_home(|temp_home| {
+        with_temp_home(|temp_home: &TempDir| {
             let settings_dir = temp_home.path().join(".remotecc");
             fs::create_dir_all(&settings_dir).unwrap();
             let token = "test-token";
@@ -664,7 +664,7 @@ mod tests {
 
     #[test]
     fn test_resolve_role_binding_reads_optional_provider() {
-        with_temp_home(|temp_home| {
+        with_temp_home(|temp_home: &TempDir| {
             let settings_dir = temp_home.path().join(".remotecc");
             fs::create_dir_all(&settings_dir).unwrap();
             fs::write(
@@ -703,7 +703,7 @@ mod tests {
 
     #[test]
     fn test_load_peer_agents_reads_meeting_config() {
-        with_temp_home(|temp_home| {
+        with_temp_home(|temp_home: &TempDir| {
             let settings_dir = temp_home.path().join(".remotecc");
             fs::create_dir_all(&settings_dir).unwrap();
             let json = serde_json::json!({
@@ -737,7 +737,7 @@ mod tests {
 
     #[test]
     fn test_render_peer_agent_guidance_excludes_current_role() {
-        with_temp_home(|temp_home| {
+        with_temp_home(|temp_home: &TempDir| {
             let settings_dir = temp_home.path().join(".remotecc");
             fs::create_dir_all(&settings_dir).unwrap();
             let json = serde_json::json!({
@@ -767,5 +767,75 @@ mod tests {
             assert!(!rendered.contains("ch-pd (PD"));
             assert!(rendered.contains("name the 1-2 most suitable peer agents"));
         });
+    }
+
+    // ── P0 tests ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_discord_token_hash_sha256_correct() {
+        let hash = discord_token_hash("my-bot-token");
+        // Must start with "discord_" prefix
+        assert!(hash.starts_with("discord_"));
+        // After prefix: 16 hex chars (8 bytes of SHA-256)
+        let hex_part = &hash["discord_".len()..];
+        assert_eq!(hex_part.len(), 16);
+        assert!(hex_part.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_discord_token_hash_reproducible() {
+        let hash1 = discord_token_hash("same-token-abc");
+        let hash2 = discord_token_hash("same-token-abc");
+        assert_eq!(hash1, hash2);
+    }
+
+    #[test]
+    fn test_discord_token_hash_different_tokens() {
+        let hash1 = discord_token_hash("token-alpha");
+        let hash2 = discord_token_hash("token-beta");
+        assert_ne!(hash1, hash2);
+    }
+
+    #[test]
+    fn test_channel_supports_provider_dm_always_true() {
+        // DM → all supported providers should return true
+        assert!(channel_supports_provider(
+            &ProviderKind::Claude,
+            None,
+            true,
+            None,
+        ));
+        assert!(channel_supports_provider(
+            &ProviderKind::Codex,
+            None,
+            true,
+            None,
+        ));
+    }
+
+    #[test]
+    fn test_channel_supports_provider_cc_claude_only() {
+        use super::RoleBinding;
+
+        let binding = RoleBinding {
+            role_id: "test-role".to_string(),
+            prompt_file: "/tmp/test.md".to_string(),
+            provider: Some(ProviderKind::Claude),
+            model: None,
+        };
+
+        // With a role binding specifying Claude, only Claude should match
+        assert!(channel_supports_provider(
+            &ProviderKind::Claude,
+            Some("test-cc"),
+            false,
+            Some(&binding),
+        ));
+        assert!(!channel_supports_provider(
+            &ProviderKind::Codex,
+            Some("test-cc"),
+            false,
+            Some(&binding),
+        ));
     }
 }

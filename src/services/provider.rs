@@ -146,4 +146,85 @@ mod tests {
             Some((ProviderKind::Claude, "mac-mini".to_string()))
         );
     }
+
+    // ── P0 tests ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_provider_from_str_claude() {
+        assert_eq!(ProviderKind::from_str("claude"), Some(ProviderKind::Claude));
+    }
+
+    #[test]
+    fn test_provider_from_str_codex() {
+        assert_eq!(ProviderKind::from_str("codex"), Some(ProviderKind::Codex));
+    }
+
+    #[test]
+    fn test_provider_from_str_case_insensitive() {
+        assert_eq!(ProviderKind::from_str("Claude"), Some(ProviderKind::Claude));
+        assert_eq!(ProviderKind::from_str("CLAUDE"), Some(ProviderKind::Claude));
+        assert_eq!(ProviderKind::from_str("CODEX"), Some(ProviderKind::Codex));
+        assert_eq!(ProviderKind::from_str("Codex"), Some(ProviderKind::Codex));
+    }
+
+    #[test]
+    fn test_provider_from_str_unknown() {
+        assert_eq!(ProviderKind::from_str("gemini"), None);
+        assert_eq!(ProviderKind::from_str("gpt"), None);
+        assert_eq!(ProviderKind::from_str(""), None);
+    }
+
+    #[test]
+    fn test_build_tmux_session_name() {
+        let name = ProviderKind::Claude.build_tmux_session_name("my-channel");
+        assert!(name.starts_with("remoteCC-claude-"));
+        assert!(name.contains("my-channel"));
+
+        let name2 = ProviderKind::Codex.build_tmux_session_name("dev-cdx");
+        assert!(name2.starts_with("remoteCC-codex-"));
+        assert!(name2.contains("dev-cdx"));
+    }
+
+    #[test]
+    fn test_parse_provider_and_channel_from_tmux_name() {
+        // Roundtrip: build then parse
+        let channel = "my-test-channel";
+        let session = ProviderKind::Claude.build_tmux_session_name(channel);
+        let (provider, parsed_channel) =
+            parse_provider_and_channel_from_tmux_name(&session).unwrap();
+        assert_eq!(provider, ProviderKind::Claude);
+        assert_eq!(parsed_channel, channel);
+
+        let session2 = ProviderKind::Codex.build_tmux_session_name(channel);
+        let (provider2, parsed_channel2) =
+            parse_provider_and_channel_from_tmux_name(&session2).unwrap();
+        assert_eq!(provider2, ProviderKind::Codex);
+        assert_eq!(parsed_channel2, channel);
+    }
+
+    #[test]
+    fn test_is_channel_supported_cc_suffix() {
+        // "-cc" channel → Claude only
+        assert!(ProviderKind::Claude.is_channel_supported(Some("dev-cc"), false));
+        assert!(!ProviderKind::Codex.is_channel_supported(Some("dev-cc"), false));
+    }
+
+    #[test]
+    fn test_is_channel_supported_cdx_suffix() {
+        // "-cdx" channel → Codex only
+        assert!(ProviderKind::Codex.is_channel_supported(Some("dev-cdx"), false));
+        assert!(!ProviderKind::Claude.is_channel_supported(Some("dev-cdx"), false));
+    }
+
+    #[test]
+    fn test_counterpart_provider() {
+        assert_eq!(ProviderKind::Claude.counterpart(), ProviderKind::Codex);
+        assert_eq!(ProviderKind::Codex.counterpart(), ProviderKind::Claude);
+
+        let unsupported = ProviderKind::Unsupported("gemini".to_string());
+        assert_eq!(
+            unsupported.counterpart(),
+            ProviderKind::Unsupported("gemini".to_string())
+        );
+    }
 }

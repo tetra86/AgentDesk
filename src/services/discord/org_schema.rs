@@ -370,7 +370,7 @@ mod tests {
 
     #[test]
     fn test_resolve_role_binding_from_org_schema() {
-        with_temp_root(|temp_home| {
+        with_temp_root(|temp_home: &TempDir| {
             write_org_yaml(
                 temp_home.path(),
                 r#"
@@ -398,7 +398,7 @@ channels:
 
     #[test]
     fn test_resolve_by_channel_name() {
-        with_temp_root(|temp_home| {
+        with_temp_root(|temp_home: &TempDir| {
             write_org_yaml(
                 temp_home.path(),
                 r#"
@@ -427,7 +427,7 @@ channels:
 
     #[test]
     fn test_channel_binding_overrides_agent_defaults() {
-        with_temp_root(|temp_home| {
+        with_temp_root(|temp_home: &TempDir| {
             write_org_yaml(
                 temp_home.path(),
                 r#"
@@ -457,7 +457,7 @@ channels:
 
     #[test]
     fn test_load_peer_agents_from_org_schema() {
-        with_temp_root(|temp_home| {
+        with_temp_root(|temp_home: &TempDir| {
             write_org_yaml(
                 temp_home.path(),
                 r#"
@@ -479,7 +479,7 @@ agents:
 
     #[test]
     fn test_suffix_map_from_org_schema() {
-        with_temp_root(|temp_home| {
+        with_temp_root(|temp_home: &TempDir| {
             write_org_yaml(
                 temp_home.path(),
                 r#"
@@ -512,7 +512,7 @@ suffix_map:
 
     #[test]
     fn test_meeting_available_agents_subset() {
-        with_temp_root(|temp_home| {
+        with_temp_root(|temp_home: &TempDir| {
             write_org_yaml(
                 temp_home.path(),
                 r#"
@@ -557,7 +557,7 @@ channels:
 
     #[test]
     fn test_prompts_root_auto_derive() {
-        with_temp_root(|temp_home| {
+        with_temp_root(|temp_home: &TempDir| {
             write_org_yaml(
                 temp_home.path(),
                 r#"
@@ -580,6 +580,108 @@ channels:
                 "Expected auto-derived prompt path, got: {}",
                 binding.prompt_file
             );
+        });
+    }
+
+    // ── P0 tests ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_lookup_suffix_provider_cc_claude() {
+        with_temp_root(|temp_home: &TempDir| {
+            write_org_yaml(
+                temp_home.path(),
+                r#"
+version: 1
+agents: {}
+suffix_map:
+  "-cc": claude
+  "-cdx": codex
+"#,
+            );
+
+            assert_eq!(
+                lookup_suffix_provider("dev-cc"),
+                Some(ProviderKind::Claude)
+            );
+        });
+    }
+
+    #[test]
+    fn test_lookup_suffix_provider_cdx_codex() {
+        with_temp_root(|temp_home: &TempDir| {
+            write_org_yaml(
+                temp_home.path(),
+                r#"
+version: 1
+agents: {}
+suffix_map:
+  "-cc": claude
+  "-cdx": codex
+"#,
+            );
+
+            assert_eq!(
+                lookup_suffix_provider("dev-cdx"),
+                Some(ProviderKind::Codex)
+            );
+        });
+    }
+
+    #[test]
+    fn test_org_schema_yaml_parsing() {
+        // Test that a full org schema YAML string parses correctly
+        let yaml = r#"
+version: 1
+name: "Test Organization"
+agents:
+  alpha:
+    display_name: "Alpha Agent"
+    keywords: ["search", "index"]
+    provider: claude
+  beta:
+    display_name: "Beta Agent"
+    keywords: ["deploy"]
+    provider: codex
+    workspace: ~/beta-ws
+channels:
+  by_id:
+    "100":
+      agent: alpha
+suffix_map:
+  "-cc": claude
+  "-cdx": codex
+"#;
+        let schema: OrgSchema = serde_yaml::from_str(yaml).expect("YAML should parse");
+        assert_eq!(schema.version, 1);
+        assert_eq!(schema.name.as_deref(), Some("Test Organization"));
+        assert_eq!(schema.agents.len(), 2);
+        assert!(schema.agents.contains_key("alpha"));
+        assert!(schema.agents.contains_key("beta"));
+        assert_eq!(schema.agents["alpha"].display_name, "Alpha Agent");
+        assert_eq!(
+            schema.agents["beta"].provider.as_deref(),
+            Some("codex")
+        );
+        let suffix_map = schema.suffix_map.as_ref().unwrap();
+        assert_eq!(suffix_map.get("-cc").map(String::as_str), Some("claude"));
+        assert_eq!(suffix_map.get("-cdx").map(String::as_str), Some("codex"));
+    }
+
+    #[test]
+    fn test_is_known_agent_from_org_schema() {
+        with_temp_root(|temp_home: &TempDir| {
+            write_org_yaml(
+                temp_home.path(),
+                r#"
+version: 1
+agents:
+  known-agent:
+    display_name: "Known"
+"#,
+            );
+
+            assert_eq!(is_known_agent("known-agent"), Some(true));
+            assert_eq!(is_known_agent("nonexistent-agent"), Some(false));
         });
     }
 }
