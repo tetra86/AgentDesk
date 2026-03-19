@@ -1,0 +1,94 @@
+import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
+import type { CompanySettings, DashboardStats, WSEvent } from "../types";
+import type { UiLanguage } from "../i18n";
+import * as api from "../api/client";
+import { useOffice } from "./OfficeContext";
+
+// ── Context value ──
+
+interface SettingsContextValue {
+  settings: CompanySettings;
+  setSettings: React.Dispatch<React.SetStateAction<CompanySettings>>;
+  stats: DashboardStats | null;
+  refreshStats: () => void;
+  isKo: boolean;
+  locale: UiLanguage;
+  tr: (ko: string, en: string) => string;
+}
+
+const SettingsContext = createContext<SettingsContextValue | null>(null);
+
+// ── Provider (must be nested inside OfficeProvider) ──
+
+interface SettingsProviderProps {
+  initialSettings: CompanySettings;
+  initialStats: DashboardStats | null;
+  children: ReactNode;
+}
+
+export function SettingsProvider({ initialSettings, initialStats, children }: SettingsProviderProps) {
+  const { selectedOfficeId } = useOffice();
+
+  const [settings, setSettings] = useState<CompanySettings>(initialSettings);
+  const [stats, setStats] = useState<DashboardStats | null>(initialStats);
+
+  const refreshStats = useCallback(() => {
+    api.getStats(selectedOfficeId ?? undefined).then(setStats).catch(() => {});
+  }, [selectedOfficeId]);
+
+  // Reload stats when office selection changes (skip mount — bootstrap data is fresh)
+  const mountedRef = useRef(false);
+  useEffect(() => {
+    if (!mountedRef.current) {
+      mountedRef.current = true;
+      return;
+    }
+    refreshStats();
+  }, [refreshStats]);
+
+  // WS events that affect stats
+  useEffect(() => {
+    function handleWs(e: Event) {
+      const event = (e as CustomEvent<WSEvent>).detail;
+      switch (event.type) {
+        case "kanban_card_created":
+        case "kanban_card_updated":
+        case "kanban_card_deleted":
+          refreshStats();
+          break;
+      }
+    }
+    window.addEventListener("pcd-ws-event", handleWs);
+    return () => window.removeEventListener("pcd-ws-event", handleWs);
+  }, [refreshStats]);
+
+  // Auto theme detection from system preference
+  useEffect(() => {
+    if (settings.theme !== "auto") return;
+    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+    const apply = () => {
+      document.documentElement.dataset.theme = mq.matches ? "dark" : "light";
+    };
+    apply();
+    mq.addEventListener("change", apply);
+    return () => mq.removeEventListener("change", apply);
+  }, [settings.theme]);
+
+  const isKo = settings.language === "ko";
+  const locale = settings.language;
+  const tr = useCallback((ko: string, en: string) => (settings.language === "ko" ? ko : en), [settings.language]);
+
+  return (
+    <SettingsContext.Provider value={{ settings, setSettings, stats, refreshStats, isKo, locale, tr }}>
+      {children}
+    </SettingsContext.Provider>
+  );
+}
+
+// ── Hook ──
+
+export function useSettings(): SettingsContextValue {
+  const ctx = useContext(SettingsContext);
+  if (!ctx) throw new Error("useSettings must be used within SettingsProvider");
+  return ctx;
+}

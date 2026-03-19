@@ -1,0 +1,418 @@
+import { useState, useRef, useEffect } from "react";
+import type { Agent, Department, DispatchedSession } from "../../types";
+import { Monitor, MapPin, Clock, Wifi, WifiOff } from "lucide-react";
+import { getRankTier } from "../dashboard/model";
+
+function sessionSpriteNum(s: DispatchedSession): number {
+  if (s.sprite_number != null && s.sprite_number > 0) return s.sprite_number;
+  let hash = 0;
+  for (let i = 0; i < s.id.length; i += 1) {
+    hash = (hash * 31 + s.id.charCodeAt(i)) >>> 0;
+  }
+  return (hash % 12) + 1;
+}
+
+interface Props {
+  sessions: DispatchedSession[];
+  departments: Department[];
+  agents: Agent[];
+  onAssign: (id: string, patch: Partial<DispatchedSession>) => Promise<void>;
+}
+
+export function SessionPanel({ sessions, departments, agents, onAssign }: Props) {
+  const active = sessions.filter((s) => s.status !== "disconnected");
+  const disconnected = sessions.filter((s) => s.status === "disconnected");
+  const [infoSession, setInfoSession] = useState<DispatchedSession | null>(null);
+
+  return (
+    <div
+      className="p-6 max-w-5xl mx-auto h-full overflow-auto pb-40"
+      style={{ paddingBottom: "max(10rem, calc(10rem + env(safe-area-inset-bottom)))" }}
+    >
+      <div className="flex items-center gap-3 mb-6">
+        <Monitor className="text-indigo-400" size={24} />
+        <h1 className="text-2xl font-bold">파견 인력</h1>
+        <span className="bg-emerald-600 text-white text-xs px-2 py-0.5 rounded-full">
+          {active.length} 활성
+        </span>
+      </div>
+
+      <p className="text-gray-400 text-sm mb-6">
+        RemoteCC 세션이 감지되면 파견 인력으로 등록됩니다.
+        각 세션을 부서에 배치하여 오피스에서 시각화할 수 있습니다.
+      </p>
+
+      {active.length === 0 && disconnected.length === 0 && (
+        <div className="text-center py-16 text-gray-500">
+          <Monitor size={48} className="mx-auto mb-4 opacity-30" />
+          <p>현재 활성 세션이 없습니다</p>
+          <p className="text-sm mt-1">RemoteCC 세션이 실행되면 자동으로 표시됩니다</p>
+        </div>
+      )}
+
+      {/* Active sessions */}
+      {active.length > 0 && (
+        <div className="space-y-3 mb-8">
+          {active.map((s) => (
+            <SessionCard
+              key={s.id}
+              session={s}
+              departments={departments}
+              agents={agents}
+              onAssign={onAssign}
+              onSelect={() => setInfoSession(s)}
+            />
+          ))}
+        </div>
+      )}
+
+      {/* Disconnected sessions */}
+      {disconnected.length > 0 && (
+        <>
+          <h2 className="text-sm font-semibold text-gray-500 mb-3 flex items-center gap-2">
+            <WifiOff size={14} />
+            종료된 세션 ({disconnected.length})
+          </h2>
+          <div className="space-y-2 opacity-60">
+            {disconnected.slice(0, 10).map((s) => (
+              <div
+                key={s.id}
+                className="bg-gray-800/50 rounded-lg px-4 py-3 flex items-center gap-3 cursor-pointer hover:bg-gray-800/70 transition-colors"
+                onClick={() => setInfoSession(s)}
+              >
+                <div className="w-7 h-7 rounded-lg overflow-hidden bg-gray-700 flex-shrink-0">
+                  <img
+                    src={`/sprites/${sessionSpriteNum(s)}-D-1.png`}
+                    alt={s.name || ""}
+                    className="w-full h-full object-cover"
+                    style={{ imageRendering: "pixelated" }}
+                  />
+                </div>
+                <span className="flex-1 text-sm text-gray-400">
+                  {s.name || s.session_key.slice(0, 12)}
+                </span>
+                <span className="text-xs text-gray-600">
+                  {s.model || "unknown"}
+                </span>
+                {s.last_seen_at && (
+                  <span className="text-xs text-gray-600">
+                    {formatTimeAgo(s.last_seen_at)}
+                  </span>
+                )}
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+
+      {infoSession && (
+        <SessionInfoCard session={infoSession} departments={departments} onClose={() => setInfoSession(null)} />
+      )}
+    </div>
+  );
+}
+
+function SessionCard({
+  session: s,
+  departments,
+  onAssign,
+  onSelect,
+}: {
+  session: DispatchedSession;
+  departments: Department[];
+  agents: Agent[];
+  onAssign: (id: string, patch: Partial<DispatchedSession>) => Promise<void>;
+  onSelect: () => void;
+}) {
+  const [assigning, setAssigning] = useState(false);
+  const [selectedDept, setSelectedDept] = useState(s.department_id || "");
+
+  const handleAssign = async () => {
+    setAssigning(true);
+    try {
+      await onAssign(s.id, {
+        department_id: selectedDept || null,
+      } as Partial<DispatchedSession>);
+    } finally {
+      setAssigning(false);
+    }
+  };
+
+  const statusColor = s.status === "working" ? "bg-emerald-500" : "bg-amber-500";
+
+  return (
+    <div className="bg-gray-800 rounded-lg p-4 border border-gray-700">
+      <div className="flex items-start gap-3">
+        {/* Avatar + status */}
+        <div className="relative cursor-pointer shrink-0" onClick={onSelect}>
+          <div className="w-10 h-10 rounded-xl overflow-hidden bg-gray-700">
+            <img
+              src={`/sprites/${sessionSpriteNum(s)}-D-1.png`}
+              alt={s.name || ""}
+              className="w-full h-full object-cover"
+              style={{ imageRendering: "pixelated" }}
+            />
+          </div>
+          <span
+            className={`absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full border-2 border-gray-800 ${statusColor}`}
+          />
+        </div>
+
+        {/* Info */}
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="font-medium cursor-pointer hover:text-indigo-400 transition-colors truncate" onClick={onSelect}>
+              {s.name || `Session ${s.session_key.slice(0, 8)}`}
+            </span>
+            <Wifi size={14} className="text-emerald-400 shrink-0" />
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2 text-xs text-gray-400 mt-1">
+            {s.model && (
+              <span className="bg-gray-700 px-1.5 py-0.5 rounded shrink-0">
+                {s.model}
+              </span>
+            )}
+            <span className={`px-1.5 py-0.5 rounded shrink-0 ${s.provider === "codex" ? "bg-sky-900/50 text-sky-300" : "bg-violet-900/50 text-violet-300"}`}>
+              {s.provider === "codex" ? "Codex" : "Claude"}
+            </span>
+            {s.stats_xp > 0 && (
+              <span className="bg-amber-900/50 text-amber-300 px-1.5 py-0.5 rounded shrink-0">
+                ⭐ {s.stats_xp} XP
+              </span>
+            )}
+            {s.session_info && (
+              <span className="truncate max-w-full sm:max-w-[300px]">{s.session_info}</span>
+            )}
+          </div>
+
+          {s.connected_at && (
+            <div className="flex items-center gap-1 text-xs text-gray-500 mt-1">
+              <Clock size={10} className="shrink-0" />
+              <span className="whitespace-nowrap">접속: {formatTimeAgo(s.connected_at)}</span>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Department assignment (mobile-safe row) */}
+      <div className="mt-3 flex items-center gap-2 flex-wrap pl-0 sm:pl-11">
+        <MapPin size={14} className="text-gray-500 shrink-0" />
+        <select
+          value={selectedDept}
+          onChange={(e) => setSelectedDept(e.target.value)}
+          className="bg-gray-700 text-sm rounded px-2 py-1 border border-gray-600 text-gray-200 flex-1 min-w-[120px]"
+        >
+          <option value="">미배정</option>
+          {departments.map((d) => (
+            <option key={d.id} value={d.id}>
+              {d.icon} {d.name_ko || d.name}
+            </option>
+          ))}
+        </select>
+        <button
+          onClick={handleAssign}
+          disabled={assigning || selectedDept === (s.department_id || "")}
+          className="bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-white text-xs px-3 py-1.5 rounded transition-colors shrink-0"
+        >
+          {assigning ? "..." : "배치"}
+        </button>
+      </div>
+
+      {/* Current department badge */}
+      {s.department_id && s.department_name_ko && (
+        <div className="mt-2 sm:ml-11">
+          <span
+            className="text-xs px-2 py-0.5 rounded-full text-white"
+            style={{ backgroundColor: s.department_color || "#6366f1" }}
+          >
+            {s.department_name_ko}에 배치됨
+          </span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function formatTimeAgo(ts: number): string {
+  const diff = Date.now() - ts;
+  const sec = Math.floor(diff / 1000);
+  if (sec < 60) return `${sec}초 전`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}분 전`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}시간 전`;
+  return `${Math.floor(hr / 24)}일 전`;
+}
+
+function formatDuration(ms: number): string {
+  const sec = Math.floor(ms / 1000);
+  if (sec < 60) return `${sec}초`;
+  const min = Math.floor(sec / 60);
+  const hr = Math.floor(min / 60);
+  if (hr > 0) return `${hr}시간 ${min % 60}분`;
+  return `${min}분`;
+}
+
+function SessionInfoCard({
+  session: s,
+  departments,
+  onClose,
+}: {
+  session: DispatchedSession;
+  departments: Department[];
+  onClose: () => void;
+}) {
+  const overlayRef = useRef<HTMLDivElement>(null);
+  const spriteNum = sessionSpriteNum(s);
+  const dept = departments.find((d) => d.id === s.department_id);
+  const tier = getRankTier(s.stats_xp);
+  const isDisconnected = s.status === "disconnected";
+  const uptime = s.connected_at ? Date.now() - s.connected_at : 0;
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [onClose]);
+
+  const statusLabel: Record<string, string> = {
+    working: "작업 중",
+    idle: "대기",
+    disconnected: "연결 종료",
+  };
+
+  return (
+    <div
+      ref={overlayRef}
+      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      style={{ background: "rgba(0,0,0,0.6)" }}
+      onClick={(e) => {
+        if (e.target === overlayRef.current) onClose();
+      }}
+    >
+      <div className="w-full max-w-md rounded-2xl bg-gray-900 border border-gray-700 shadow-2xl overflow-hidden">
+        {/* Header */}
+        <div className="flex items-center gap-4 p-5 border-b border-gray-700">
+          <div className="relative shrink-0">
+            <div className="w-14 h-14 rounded-xl overflow-hidden bg-gray-700">
+              <img
+                src={`/sprites/${spriteNum}-D-1.png`}
+                alt={s.name || ""}
+                className="w-full h-full object-cover"
+                style={{ imageRendering: "pixelated" }}
+              />
+            </div>
+            <span
+              className={`absolute -bottom-0.5 -right-0.5 w-3.5 h-3.5 rounded-full border-2 border-gray-900 ${
+                isDisconnected ? "bg-gray-500" : s.status === "working" ? "bg-emerald-500" : "bg-amber-500"
+              }`}
+            />
+          </div>
+          <div className="flex-1 min-w-0">
+            <div className="font-bold text-base text-gray-100">
+              {s.name || `Session ${s.session_key.slice(0, 8)}`}
+            </div>
+            <div className="flex items-center gap-2 mt-1.5 flex-wrap">
+              <span
+                className="text-[10px] px-2 py-0.5 rounded-full font-medium"
+                style={{
+                  background: isDisconnected ? "rgba(100,116,139,0.15)" :
+                    s.status === "working" ? "rgba(16,185,129,0.15)" : "rgba(245,158,11,0.15)",
+                  color: isDisconnected ? "#94a3b8" :
+                    s.status === "working" ? "#34d399" : "#fbbf24",
+                }}
+              >
+                {statusLabel[s.status] ?? s.status}
+              </span>
+              {dept && (
+                <span
+                  className="text-[10px] px-2 py-0.5 rounded-full text-white"
+                  style={{ backgroundColor: s.department_color || "#6366f1" }}
+                >
+                  {s.department_name_ko || dept.name}
+                </span>
+              )}
+              {!dept && (
+                <span className="text-[10px] px-2 py-0.5 rounded-full bg-gray-800 text-gray-500">
+                  미배정
+                </span>
+              )}
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            className="w-7 h-7 rounded-lg flex items-center justify-center hover:bg-gray-800 transition-colors self-start text-gray-500"
+          >
+            ✕
+          </button>
+        </div>
+
+        {/* Details */}
+        <div className="px-5 py-3 space-y-2.5 border-b border-gray-700">
+          {s.model && (
+            <InfoRow label="모델" value={s.model} />
+          )}
+          {s.session_info && (
+            <InfoRow label="최근 도구" value={s.session_info} />
+          )}
+          <InfoRow label="세션 키" value={s.session_key} mono />
+          {s.connected_at > 0 && (
+            <InfoRow label="접속 시각" value={new Date(s.connected_at).toLocaleString("ko-KR")} />
+          )}
+          {s.connected_at > 0 && !isDisconnected && (
+            <InfoRow label="가동 시간" value={formatDuration(uptime)} />
+          )}
+          {s.last_seen_at && (
+            <InfoRow label="마지막 신호" value={formatTimeAgo(s.last_seen_at)} />
+          )}
+        </div>
+
+        {/* Stats */}
+        <div className="px-5 py-3 flex items-center justify-between border-b border-gray-700">
+          <div className="flex items-center gap-3">
+            <span
+              className="text-xs px-2 py-0.5 rounded font-medium"
+              style={{ background: `${tier.color}20`, color: tier.color }}
+            >
+              {tier.name}
+            </span>
+            <span className="text-xs text-gray-400">
+              XP {s.stats_xp}
+            </span>
+          </div>
+          <span className="text-[10px] font-mono text-gray-600">
+            ID: {s.id.slice(0, 8)}
+          </span>
+        </div>
+
+        {/* Footer */}
+        <div className="flex justify-end px-5 py-3">
+          <button
+            onClick={onClose}
+            className="px-3 py-1.5 rounded-lg text-xs font-medium border border-gray-600 text-gray-400 hover:bg-gray-800 transition-colors"
+          >
+            닫기
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function InfoRow({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
+  return (
+    <div className="flex items-start gap-3">
+      <span className="text-[10px] font-semibold uppercase tracking-widest text-gray-500 w-20 shrink-0 pt-0.5">
+        {label}
+      </span>
+      <span
+        className={`text-xs text-gray-300 break-all ${mono ? "font-mono" : ""}`}
+      >
+        {value}
+      </span>
+    </div>
+  );
+}

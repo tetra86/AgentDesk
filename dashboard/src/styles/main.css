@@ -1,0 +1,281 @@
+@import "tailwindcss";
+
+:root {
+  --color-primary: #6366f1;
+  --color-bg: #0f172a;
+  --color-surface: #1e293b;
+  --color-border: #334155;
+}
+
+/* ── CE Theme Variables (dark) ── */
+[data-theme="dark"], :root {
+  --th-bg-primary: #0b0f1a;
+  --th-bg-surface: #141925;
+  --th-bg-surface-hover: #1c2233;
+  --th-card-bg: #111827;
+  --th-card-border: #1f2937;
+  --th-border: #1f2937;
+  --th-input-bg: #0f172a;
+  --th-input-border: #374151;
+  --th-text-primary: #e2e8f0;
+  --th-text-secondary: #94a3b8;
+  --th-text-muted: #64748b;
+  --th-text-heading: #f1f5f9;
+  --th-modal-overlay: rgba(0, 0, 0, 0.7);
+}
+
+[data-theme="light"] {
+  --th-bg-primary: #f8fafc;
+  --th-bg-surface: #f1f5f9;
+  --th-bg-surface-hover: #e2e8f0;
+  --th-card-bg: #ffffff;
+  --th-card-border: #e2e8f0;
+  --th-border: #e2e8f0;
+  --th-input-bg: #ffffff;
+  --th-input-border: #cbd5e1;
+  --th-text-primary: #1e293b;
+  --th-text-secondary: #475569;
+  --th-text-muted: #94a3b8;
+  --th-text-heading: #0f172a;
+  --th-modal-overlay: rgba(0, 0, 0, 0.4);
+}
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  background: var(--color-bg);
+  color: #e2e8f0;
+  overflow: hidden;
+}
+
+#root {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #475569; border-radius: 3px; }
+
+/* ── CE Dashboard Classes ── */
+.game-panel {
+  background: var(--th-card-bg);
+  border: 1px solid var(--th-card-border);
+  border-radius: 1rem;
+}
+
+.dashboard-title-gradient {
+  background: linear-gradient(135deg, #e2e8f0, #22d3ee, #6366f1);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.dashboard-time-display {
+  color: #22d3ee;
+  text-shadow: 0 0 12px rgba(34, 211, 238, 0.4);
+}
+
+.dashboard-ranking-gradient {
+  background: linear-gradient(135deg, #fbbf24, #f59e0b, #fbbf24);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.xp-bar-fill {
+  position: relative;
+}
+.xp-bar-fill::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent 0%, rgba(255,255,255,0.15) 50%, transparent 100%);
+  animation: xp-shimmer 2s infinite;
+}
+
+@keyframes xp-shimmer {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+
+@keyframes crown-wiggle {
+  0%, 100% { transform: rotate(-3deg); }
+  50% { transform: rotate(3deg); }
+}
+.animate-crown-wiggle { animation: crown-wiggle 2s ease-in-out infinite; }
+
+@keyframes rank-float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-4px); }
+}
+.animate-rank-float { animation: rank-float 3s ease-in-out infinite; }
+
+@keyframes bubble-float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-3px); }
+}
+.animate-bubble-float { animation: bubble-float 2.5s ease-in-out infinite; }
+
+@keyframes status-glow {
+  0%, 100% { box-shadow: 0 0 4px rgba(52, 211, 153, 0.5); }
+  50% { box-shadow: 0 0 10px rgba(52, 211, 153, 0.8); }
+}
+.animate-status-glow { animation: status-glow 2s ease-in-out infinite; }
+
+@keyframes neon-pulse-orange {
+  0%, 100% { box-shadow: 0 0 4px rgba(251, 146, 60, 0.3); }
+  50% { box-shadow: 0 0 12px rgba(251, 146, 60, 0.6); }
+}
+.animate-neon-pulse-orange { animation: neon-pulse-orange 2s ease-in-out infinite; }
+
+@keyframes podium-rise {
+  0% { transform: scaleY(0); transform-origin: bottom; }
+  100% { transform: scaleY(1); transform-origin: bottom; }
+}
+.animate-podium-rise { animation: podium-rise 0.6s ease-out forwards; }
+
+@keyframes cta-glow {
+  0%, 100% { box-shadow: 0 4px 20px rgba(34, 211, 238, 0.35); }
+  50% { box-shadow: 0 4px 30px rgba(34, 211, 238, 0.55); }
+}
+.animate-cta-glow { animation: cta-glow 3s ease-in-out infinite; }
+
+.pcd-markdown {
+  color: inherit;
+  line-height: 1.7;
+  word-break: break-word;
+}
+
+.pcd-markdown > :first-child {
+  margin-top: 0;
+}
+
+.pcd-markdown > :last-child {
+  margin-bottom: 0;
+}
+
+.pcd-markdown h1,
+.pcd-markdown h2,
+.pcd-markdown h3,
+.pcd-markdown h4 {
+  margin: 1rem 0 0.5rem;
+  color: var(--th-text-heading);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.pcd-markdown h1 {
+  font-size: 1.05rem;
+}
+
+.pcd-markdown h2 {
+  font-size: 1rem;
+}
+
+.pcd-markdown h3,
+.pcd-markdown h4 {
+  font-size: 0.92rem;
+}
+
+.pcd-markdown p,
+.pcd-markdown ul,
+.pcd-markdown ol,
+.pcd-markdown blockquote,
+.pcd-markdown pre,
+.pcd-markdown table {
+  margin: 0.65rem 0;
+}
+
+.pcd-markdown ul,
+.pcd-markdown ol {
+  padding-left: 1.2rem;
+}
+
+.pcd-markdown li + li {
+  margin-top: 0.35rem;
+}
+
+.pcd-markdown li > p {
+  margin: 0.2rem 0;
+}
+
+.pcd-markdown hr {
+  margin: 0.9rem 0;
+  border: 0;
+  border-top: 1px solid color-mix(in srgb, var(--th-border) 85%, transparent);
+}
+
+.pcd-markdown blockquote {
+  padding: 0.65rem 0.85rem;
+  border-left: 3px solid rgba(129, 140, 248, 0.5);
+  background: rgba(129, 140, 248, 0.08);
+  border-radius: 0 0.75rem 0.75rem 0;
+  color: var(--th-text-secondary);
+}
+
+.pcd-markdown code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 0.92em;
+  padding: 0.12rem 0.38rem;
+  border-radius: 0.4rem;
+  background: rgba(15, 23, 42, 0.65);
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  color: #c4b5fd;
+}
+
+.pcd-markdown pre {
+  overflow-x: auto;
+  padding: 0.85rem 0.95rem;
+  border-radius: 0.9rem;
+  background: rgba(15, 23, 42, 0.92);
+  border: 1px solid rgba(148, 163, 184, 0.16);
+}
+
+.pcd-markdown pre code {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+}
+
+.pcd-markdown strong {
+  color: var(--th-text-heading);
+  font-weight: 700;
+}
+
+.pcd-markdown a {
+  color: #7dd3fc;
+  text-decoration: underline;
+  text-underline-offset: 0.16em;
+}
+
+.pcd-markdown input[type="checkbox"] {
+  margin-right: 0.45rem;
+  vertical-align: middle;
+  accent-color: #818cf8;
+}
+
+.pcd-markdown table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+}
+
+.pcd-markdown th,
+.pcd-markdown td {
+  padding: 0.55rem 0.7rem;
+  border: 1px solid color-mix(in srgb, var(--th-border) 88%, transparent);
+  text-align: left;
+  white-space: normal;
+  word-break: break-word;
+}
+
+.pcd-markdown th {
+  background: rgba(148, 163, 184, 0.1);
+  color: var(--th-text-heading);
+}

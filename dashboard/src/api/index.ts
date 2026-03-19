@@ -1,0 +1,143 @@
+export {
+  getSession,
+  getOffices,
+  createOffice,
+  updateOffice,
+  deleteOffice,
+  addAgentToOffice,
+  removeAgentFromOffice,
+  updateOfficeAgent,
+  batchAddAgentsToOffice,
+  getAgents,
+  createAgent,
+  updateAgent,
+  deleteAgent,
+  getAgentOffices,
+  getAuditLogs,
+  getDepartments,
+  createDepartment,
+  updateDepartment,
+  deleteDepartment,
+  getSettings,
+  saveSettings,
+  getStats,
+  getKanbanCards,
+  createKanbanCard,
+  updateKanbanCard,
+  deleteKanbanCard,
+  retryKanbanCard,
+  redispatchKanbanCard,
+  patchKanbanDeferDod,
+  assignKanbanIssue,
+  getKanbanRepoSources,
+  addKanbanRepoSource,
+  updateKanbanRepoSource,
+  deleteKanbanRepoSource,
+  getTaskDispatches,
+  getDispatchedSessions,
+  assignDispatchedSession,
+  getAgentCron,
+  getAgentDispatchedSessions,
+  getAgentSkills,
+  getSkillRanking,
+  getDiscordBindings,
+  getCronJobs,
+  getMachineStatus,
+  getActivityHeatmap,
+  getStreaks,
+  getAchievements,
+  getGitHubIssues,
+  closeGitHubIssue,
+  getGitHubRepos,
+  getMessages,
+  sendMessage,
+  getRoundTableMeetings,
+  getRoundTableMeeting,
+  deleteRoundTableMeeting,
+  updateRoundTableMeetingIssueRepo,
+  createRoundTableIssues,
+  startRoundTableMeeting,
+  getSkillCatalog,
+  generateAutoQueue,
+  activateAutoQueue,
+  getAutoQueueStatus,
+  skipAutoQueueEntry,
+  updateAutoQueueRun,
+  getPipelineStages,
+  getPipelineStagesForAgent,
+  savePipelineStages,
+  deletePipelineStages,
+  getCardPipelineStatus,
+  getRuntimeConfig,
+  saveRuntimeConfig,
+  reorderAutoQueueEntries,
+  getKanbanReviews,
+  saveReviewDecisions,
+  triggerDecidedRework,
+  getStalledCards,
+  bulkKanbanAction,
+  getAgentTimeline,
+} from "./client";
+
+export type {
+  AutoQueueRun,
+  AutoQueueStatus,
+  DispatchQueueEntry,
+  CronJob,
+  CronSchedule,
+  CronJobState,
+  AgentSkill,
+  AgentSkillsResponse,
+  AgentOfficeMembership,
+  AuditLogEntry,
+  SkillRankingOverallRow,
+  SkillRankingByAgentRow,
+  SkillRankingResponse,
+  DiscordBinding,
+  CronJobGlobal,
+  MachineStatus,
+  HeatmapData,
+  AgentStreak,
+  Achievement,
+  GitHubIssue,
+  GitHubIssuesResponse,
+  GitHubRepoOption,
+  GitHubReposResponse,
+  KanbanRepoSource,
+  KanbanReview,
+  ChatMessage,
+  RuntimeConfigResponse,
+  TimelineEvent,
+} from "./client";
+
+// ── Sprite processing (stub for PCD — no backend sprite processor) ──
+
+export async function processSprite(
+  _base64: string,
+): Promise<{ previews: Record<string, string>; suggestedNumber: number }> {
+  console.warn("[PCD] processSprite is not supported in dashboard mode");
+  return { previews: {}, suggestedNumber: 1 };
+}
+
+export async function registerSprite(
+  _previews: Record<string, string>,
+  _spriteNum: number,
+): Promise<void> {
+  console.warn("[PCD] registerSprite is not supported in dashboard mode");
+}
+
+// ── Error type guard ──
+
+interface ApiRequestError {
+  code: string;
+  message?: string;
+}
+
+export function isApiRequestError(e: unknown): e is ApiRequestError {
+  return (
+    typeof e === "object" &&
+    e !== null &&
+    "code" in e &&
+    typeof (e as ApiRequestError).code === "string"
+  );
+}
