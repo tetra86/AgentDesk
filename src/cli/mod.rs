@@ -1,5 +1,6 @@
 pub(crate) mod dcserver;
 pub(crate) mod discord;
+pub(crate) mod init;
 pub(crate) mod utils;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -10,3 +11,4 @@ pub use dcserver::{
     remotecc_runtime_root,
 };
 pub use discord::{handle_discord_sendfile, handle_discord_sendmessage, handle_discord_senddm};
+pub use init::handle_init;

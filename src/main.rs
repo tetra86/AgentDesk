@@ -33,6 +33,14 @@ fn main() -> Result<()> {
                 cli::handle_dcserver(token);
                 return Ok(());
             }
+            "--init" | "init" => {
+                cli::handle_init(false);
+                return Ok(());
+            }
+            "--reconfigure" | "reconfigure" => {
+                cli::handle_init(true);
+                return Ok(());
+            }
             "--restart-dcserver" => {
                 let start_index = args.iter().position(|a| a == "--restart-dcserver").unwrap() + 1;
                 match cli::parse_restart_dcserver_report_context(&args, start_index) {
