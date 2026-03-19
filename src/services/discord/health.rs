@@ -275,3 +275,115 @@ pub fn resolve_port() -> u16 {
         .and_then(|s| s.parse().ok())
         .unwrap_or(8793)
 }
+
+/// Parse a /api/send JSON body and extract (target, content, source).
+/// Returns Err with an error message on invalid input.
+/// Factored out of handle_send for testability.
+fn parse_send_body(body: &str) -> Result<(String, String, String), &'static str> {
+    let json: serde_json::Value =
+        serde_json::from_str(body).map_err(|_| "invalid JSON")?;
+    let content = json
+        .get("content")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    if content.is_empty() {
+        return Err("content is required");
+    }
+    let target = json
+        .get("target")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let source = json
+        .get("source")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown")
+        .to_string();
+    Ok((target, content, source))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_send_request_valid_json() {
+        let body = r#"{"target":"channel:123","content":"hello","source":"agent-a"}"#;
+        let result = parse_send_body(body);
+        assert!(result.is_ok(), "Valid JSON should parse successfully");
+        let (target, content, source) = result.unwrap();
+        assert_eq!(target, "channel:123");
+        assert_eq!(content, "hello");
+        assert_eq!(source, "agent-a");
+    }
+
+    #[test]
+    fn test_parse_send_request_missing_content() {
+        let body = r#"{"target":"channel:123"}"#;
+        let result = parse_send_body(body);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "content is required");
+    }
+
+    #[test]
+    fn test_parse_send_request_empty_content() {
+        let body = r#"{"target":"channel:123","content":""}"#;
+        let result = parse_send_body(body);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "content is required");
+    }
+
+    #[test]
+    fn test_parse_send_request_invalid_json() {
+        let body = "not json at all";
+        let result = parse_send_body(body);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "invalid JSON");
+    }
+
+    #[test]
+    fn test_parse_send_request_missing_target_defaults_empty() {
+        let body = r#"{"content":"hello world"}"#;
+        let result = parse_send_body(body);
+        assert!(result.is_ok());
+        let (target, content, source) = result.unwrap();
+        assert_eq!(target, "");
+        assert_eq!(content, "hello world");
+        assert_eq!(source, "unknown");
+    }
+
+    #[test]
+    fn test_parse_send_request_missing_source_defaults_unknown() {
+        let body = r#"{"target":"channel:999","content":"msg"}"#;
+        let result = parse_send_body(body);
+        assert!(result.is_ok());
+        let (_, _, source) = result.unwrap();
+        assert_eq!(source, "unknown");
+    }
+
+    #[test]
+    fn test_resolve_port_default() {
+        // When REMOTECC_HEALTH_PORT is not set, default to 8793
+        // Use env lock to avoid races with other tests
+        let _lock = super::super::runtime_store::test_env_lock().lock().unwrap();
+        unsafe { std::env::remove_var("REMOTECC_HEALTH_PORT") };
+        assert_eq!(resolve_port(), 8793);
+    }
+
+    #[test]
+    fn test_resolve_port_env_override() {
+        let _lock = super::super::runtime_store::test_env_lock().lock().unwrap();
+        unsafe { std::env::set_var("REMOTECC_HEALTH_PORT", "9999") };
+        assert_eq!(resolve_port(), 9999);
+        unsafe { std::env::remove_var("REMOTECC_HEALTH_PORT") };
+    }
+
+    #[test]
+    fn test_resolve_port_invalid_env() {
+        let _lock = super::super::runtime_store::test_env_lock().lock().unwrap();
+        unsafe { std::env::set_var("REMOTECC_HEALTH_PORT", "not-a-number") };
+        assert_eq!(resolve_port(), 8793);
+        unsafe { std::env::remove_var("REMOTECC_HEALTH_PORT") };
+    }
+}

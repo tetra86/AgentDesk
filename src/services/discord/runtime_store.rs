@@ -142,3 +142,151 @@ fn legacy_fallback(new_path: PathBuf, legacy_path: PathBuf) -> PathBuf {
         new_path
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    /// Acquire the shared env lock to avoid races between tests that mutate
+    /// REMOTECC_ROOT_DIR.
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        test_env_lock().lock().unwrap()
+    }
+
+    #[test]
+    fn test_remotecc_root_env_override() {
+        let _lock = env_lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let override_path = tmp.path().join("custom_root");
+        fs::create_dir_all(&override_path).unwrap();
+
+        unsafe { std::env::set_var(REMOTECC_ROOT_DIR_ENV, override_path.to_str().unwrap()) };
+        let root = remotecc_root().expect("should return Some");
+        assert_eq!(root, override_path);
+
+        unsafe { std::env::remove_var(REMOTECC_ROOT_DIR_ENV) };
+    }
+
+    #[test]
+    fn test_remotecc_root_env_empty_falls_back() {
+        let _lock = env_lock();
+        unsafe { std::env::set_var(REMOTECC_ROOT_DIR_ENV, "   ") };
+        // Empty/whitespace-only override should fall back to home-based default
+        let root = remotecc_root().expect("should return Some");
+        let expected = dirs::home_dir().unwrap().join(".remotecc");
+        assert_eq!(root, expected);
+
+        unsafe { std::env::remove_var(REMOTECC_ROOT_DIR_ENV) };
+    }
+
+    #[test]
+    fn test_bot_settings_path_prefers_new_location() {
+        let _lock = env_lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        unsafe { std::env::set_var(REMOTECC_ROOT_DIR_ENV, root.to_str().unwrap()) };
+
+        // Create both new and legacy paths
+        let new_path = root.join("config").join("bot_settings.json");
+        let legacy_path = root.join("bot_settings.json");
+        fs::create_dir_all(new_path.parent().unwrap()).unwrap();
+        fs::write(&new_path, "new").unwrap();
+        fs::write(&legacy_path, "legacy").unwrap();
+
+        let result = bot_settings_path().expect("should return Some");
+        assert_eq!(result, new_path, "Should prefer config/ path when both exist");
+
+        unsafe { std::env::remove_var(REMOTECC_ROOT_DIR_ENV) };
+    }
+
+    #[test]
+    fn test_legacy_fallback_when_new_missing() {
+        let _lock = env_lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        unsafe { std::env::set_var(REMOTECC_ROOT_DIR_ENV, root.to_str().unwrap()) };
+
+        // Create only legacy path (no config/ directory)
+        let legacy_path = root.join("bot_settings.json");
+        fs::write(&legacy_path, "legacy").unwrap();
+
+        let result = bot_settings_path().expect("should return Some");
+        assert_eq!(result, legacy_path, "Should fall back to legacy path when new path doesn't exist");
+
+        unsafe { std::env::remove_var(REMOTECC_ROOT_DIR_ENV) };
+    }
+
+    #[test]
+    fn test_runtime_paths_consistent() {
+        let _lock = env_lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        unsafe { std::env::set_var(REMOTECC_ROOT_DIR_ENV, root.to_str().unwrap()) };
+
+        // All path functions should return paths under the root
+        let paths: Vec<(&str, Option<PathBuf>)> = vec![
+            ("runtime_root", runtime_root()),
+            ("workspace_root", workspace_root()),
+            ("worktrees_root", worktrees_root()),
+            ("discord_uploads_root", discord_uploads_root()),
+            ("discord_inflight_root", discord_inflight_root()),
+            ("discord_restart_reports_root", discord_restart_reports_root()),
+            ("discord_pending_queue_root", discord_pending_queue_root()),
+            ("discord_handoff_root", discord_handoff_root()),
+            ("shared_agent_memory_root", shared_agent_memory_root()),
+            ("last_message_root", last_message_root()),
+        ];
+
+        for (name, path) in paths {
+            let p = path.unwrap_or_else(|| panic!("{} should return Some", name));
+            assert!(
+                p.starts_with(&root),
+                "{} path {:?} should be under root {:?}",
+                name, p, root,
+            );
+        }
+
+        unsafe { std::env::remove_var(REMOTECC_ROOT_DIR_ENV) };
+    }
+
+    #[test]
+    fn test_generation_roundtrip() {
+        let _lock = env_lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        unsafe { std::env::set_var(REMOTECC_ROOT_DIR_ENV, root.to_str().unwrap()) };
+
+        // generation_path uses legacy_fallback — create the runtime dir
+        let runtime_dir = root.join("runtime");
+        fs::create_dir_all(&runtime_dir).unwrap();
+
+        // Initially 0 (file missing)
+        assert_eq!(load_generation(), 0);
+
+        // Increment should return 1
+        assert_eq!(increment_generation(), 1);
+        assert_eq!(load_generation(), 1);
+
+        // Increment again
+        assert_eq!(increment_generation(), 2);
+        assert_eq!(load_generation(), 2);
+
+        unsafe { std::env::remove_var(REMOTECC_ROOT_DIR_ENV) };
+    }
+
+    #[test]
+    fn test_fallback_returns_new_when_neither_exists() {
+        let _lock = env_lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        unsafe { std::env::set_var(REMOTECC_ROOT_DIR_ENV, root.to_str().unwrap()) };
+
+        // Neither config/bot_settings.json nor bot_settings.json exists
+        let result = bot_settings_path().expect("should return Some");
+        let expected_new = root.join("config").join("bot_settings.json");
+        assert_eq!(result, expected_new, "Should return new path when neither exists");
+
+        unsafe { std::env::remove_var(REMOTECC_ROOT_DIR_ENV) };
+    }
+}

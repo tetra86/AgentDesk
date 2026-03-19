@@ -107,3 +107,83 @@ pub(super) fn build_system_prompt(
 
     system_prompt_owned
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Helper: call build_system_prompt with minimal/default arguments.
+    fn call_build(
+        discord_context: &str,
+        current_path: &str,
+        channel_id: u64,
+        token: &str,
+        disabled_notice: &str,
+        skills_notice: &str,
+    ) -> String {
+        build_system_prompt(
+            discord_context,
+            current_path,
+            ChannelId::new(channel_id),
+            token,
+            disabled_notice,
+            skills_notice,
+            None,   // role_binding
+            false,  // queued_turn
+        )
+    }
+
+    #[test]
+    fn test_build_system_prompt_includes_discord_context() {
+        let output = call_build(
+            "Channel: #general (guild: TestServer)",
+            "/tmp/work",
+            123456789,
+            "fake-token",
+            "",
+            "",
+        );
+        assert!(
+            output.contains("Channel: #general (guild: TestServer)"),
+            "System prompt should contain the discord_context string"
+        );
+    }
+
+    #[test]
+    fn test_build_system_prompt_includes_cwd() {
+        let output = call_build(
+            "ctx",
+            "/home/user/projects",
+            1,
+            "tok",
+            "",
+            "",
+        );
+        assert!(
+            output.contains("Current working directory: /home/user/projects"),
+            "System prompt should contain the current working directory"
+        );
+    }
+
+    #[test]
+    fn test_build_system_prompt_includes_file_send_command() {
+        let output = call_build("ctx", "/tmp", 1, "tok", "", "");
+        assert!(
+            output.contains("remotecc --discord-sendfile"),
+            "System prompt should contain the remotecc --discord-sendfile command"
+        );
+    }
+
+    #[test]
+    fn test_build_system_prompt_disables_interactive_tools() {
+        let output = call_build("ctx", "/tmp", 1, "tok", "", "");
+        assert!(
+            output.contains("CANNOT interact with any interactive prompts"),
+            "System prompt should warn that interactive tools are disabled"
+        );
+        assert!(
+            output.contains("Never use tools that expect user interaction"),
+            "System prompt should instruct not to use interactive tools"
+        );
+    }
+}
