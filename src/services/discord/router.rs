@@ -98,6 +98,21 @@ pub(super) async fn handle_event(
                 return Ok(());
             }
 
+            // ── Text commands (!start, !meeting, !stop, !clear) ──
+            // Strip leading bot mention to get the actual command text
+            let cmd_text = {
+                let re = regex::Regex::new(r"^<@!?\d+>\s*").unwrap();
+                re.replace(text, "").to_string()
+            };
+            if cmd_text.starts_with('!') {
+                let handled = handle_text_command(
+                    ctx, new_message, &data, channel_id, &cmd_text,
+                ).await?;
+                if handled {
+                    return Ok(());
+                }
+            }
+
             // Auto-restore session (for threads, fall back to parent channel's session)
             auto_restore_session(&data.shared, channel_id, ctx).await;
             if effective_channel_id != channel_id {
@@ -1256,4 +1271,218 @@ async fn handle_shell_command_raw(
 
     send_long_message_raw(&ctx.http, channel_id, &response, shared).await?;
     Ok(())
+}
+
+/// Handle text-based commands (!start, !meeting, !stop, !clear).
+/// Returns true if the command was handled, false otherwise.
+async fn handle_text_command(
+    ctx: &serenity::Context,
+    msg: &serenity::Message,
+    data: &Data,
+    channel_id: serenity::ChannelId,
+    text: &str,
+) -> Result<bool, Error> {
+    let parts: Vec<&str> = text.splitn(3, char::is_whitespace).collect();
+    let cmd = parts[0];
+    let arg1 = parts.get(1).unwrap_or(&"");
+    let arg2 = parts.get(2).unwrap_or(&"");
+
+    match cmd {
+        "!start" => {
+            let path_str = if arg1.is_empty() { "." } else { arg1 };
+
+            // Resolve path
+            let effective_path = if path_str == "." || path_str.is_empty() {
+                // Use workspace root or current directory
+                let Some(workspace_dir) = runtime_store::workspace_root() else {
+                    let _ = msg.reply(&ctx.http, "Error: cannot determine workspace root.").await;
+                    return Ok(true);
+                };
+                // Create a random workspace for this channel
+                use rand::Rng;
+                let random_name: String = rand::thread_rng()
+                    .sample_iter(&rand::distributions::Alphanumeric)
+                    .take(8)
+                    .map(char::from)
+                    .collect();
+                let ch_name = resolve_channel_category(ctx, channel_id).await.0
+                    .unwrap_or_else(|| format!("ch-{}", channel_id));
+                let dir = workspace_dir.join(format!("{}-{}", ch_name, random_name));
+                std::fs::create_dir_all(&dir).ok();
+                dir.to_string_lossy().to_string()
+            } else if path_str.starts_with('~') {
+                dirs::home_dir()
+                    .map(|h| path_str.replacen('~', &h.to_string_lossy(), 1))
+                    .unwrap_or_else(|| path_str.to_string())
+            } else {
+                path_str.to_string()
+            };
+
+            // Validate path exists
+            if !std::path::Path::new(&effective_path).exists() {
+                let _ = msg.reply(&ctx.http, format!("Error: path `{}` does not exist.", effective_path)).await;
+                return Ok(true);
+            }
+
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            println!("  [{ts}] ◀ [{}] !start path={}", msg.author.name, effective_path);
+
+            // Create session
+            let (ch_name, cat_name) = resolve_channel_category(ctx, channel_id).await;
+            {
+                let mut d = data.shared.core.lock().await;
+                let session = d.sessions.entry(channel_id).or_insert_with(|| DiscordSession {
+                    session_id: None,
+                    current_path: None,
+                    history: Vec::new(),
+                    pending_uploads: Vec::new(),
+                    cleared: false,
+                    channel_name: None,
+                    category_name: None,
+                    remote_profile_name: None,
+                    channel_id: Some(channel_id.get()),
+                    last_active: tokio::time::Instant::now(),
+                    worktree: None,
+                    last_shared_memory_ts: None,
+                    born_generation: runtime_store::load_generation(),
+                });
+                session.current_path = Some(effective_path.clone());
+                session.channel_name = ch_name;
+                session.category_name = cat_name;
+                session.last_active = tokio::time::Instant::now();
+            }
+
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            println!("  [{ts}] ▶ Session started: {}", effective_path);
+            let _ = msg.reply(&ctx.http, format!("Session started at `{}`.", effective_path)).await;
+            return Ok(true);
+        }
+
+        "!meeting" => {
+            let action = if arg1.is_empty() { "start" } else { arg1 };
+            let agenda = if arg2.is_empty() { arg1 } else { arg2 };
+
+            match action {
+                "start" => {
+                    let agenda_text = if agenda.is_empty() || *agenda == "start" {
+                        let _ = msg.reply(&ctx.http, "사용법: `!meeting start <안건>` 또는 `!meeting <안건>`").await;
+                        return Ok(true);
+                    } else {
+                        agenda
+                    };
+
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    println!("  [{ts}] ◀ [{}] !meeting start {}", msg.author.name, agenda_text);
+
+                    let http = ctx.http.clone();
+                    let shared = data.shared.clone();
+                    let provider = data.provider.clone();
+                    let agenda_owned = agenda_text.to_string();
+
+                    let _ = msg.reply(&ctx.http, format!(
+                        "📋 회의를 시작할게. 진행 모델: {} / 교차검증: {}",
+                        provider.display_name(),
+                        provider.counterpart().display_name()
+                    )).await;
+
+                    tokio::spawn(async move {
+                        match meeting::start_meeting(
+                            &*http, channel_id, &agenda_owned, provider, &shared,
+                        ).await {
+                            Ok(Some(id)) => {
+                                let ts = chrono::Local::now().format("%H:%M:%S");
+                                println!("  [{ts}] ✅ Meeting completed: {id}");
+                            }
+                            Ok(None) => {}
+                            Err(e) => {
+                                let ts = chrono::Local::now().format("%H:%M:%S");
+                                println!("  [{ts}] ❌ Meeting error: {e}");
+                            }
+                        }
+                    });
+                    return Ok(true);
+                }
+                "stop" => {
+                    let _ = meeting::cancel_meeting(&ctx.http, channel_id, &data.shared).await;
+                    return Ok(true);
+                }
+                "status" => {
+                    let _ = meeting::meeting_status(&ctx.http, channel_id, &data.shared).await;
+                    return Ok(true);
+                }
+                _ => {
+                    // Treat unknown action as agenda text
+                    let full_agenda = text.trim_start_matches("!meeting").trim();
+                    if full_agenda.is_empty() {
+                        let _ = msg.reply(&ctx.http, "사용법: `!meeting <안건>`").await;
+                        return Ok(true);
+                    }
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    println!("  [{ts}] ◀ [{}] !meeting {}", msg.author.name, full_agenda);
+
+                    let http = ctx.http.clone();
+                    let shared = data.shared.clone();
+                    let provider = data.provider.clone();
+                    let agenda_owned = full_agenda.to_string();
+
+                    let _ = msg.reply(&ctx.http, format!(
+                        "📋 회의를 시작할게. 진행 모델: {} / 교차검증: {}",
+                        provider.display_name(),
+                        provider.counterpart().display_name()
+                    )).await;
+
+                    tokio::spawn(async move {
+                        match meeting::start_meeting(
+                            &*http, channel_id, &agenda_owned, provider, &shared,
+                        ).await {
+                            Ok(Some(id)) => {
+                                let ts = chrono::Local::now().format("%H:%M:%S");
+                                println!("  [{ts}] ✅ Meeting completed: {id}");
+                            }
+                            Ok(None) => {}
+                            Err(e) => {
+                                let ts = chrono::Local::now().format("%H:%M:%S");
+                                println!("  [{ts}] ❌ Meeting error: {e}");
+                            }
+                        }
+                    });
+                    return Ok(true);
+                }
+            }
+        }
+
+        "!stop" => {
+            let mut d = data.shared.core.lock().await;
+            if let Some(token) = d.cancel_tokens.remove(&channel_id) {
+                token.cancel_with_tmux_cleanup();
+                drop(d);
+                let _ = msg.reply(&ctx.http, "Turn cancelled.").await;
+            } else {
+                drop(d);
+                let _ = msg.reply(&ctx.http, "No active turn to stop.").await;
+            }
+            return Ok(true);
+        }
+
+        "!clear" => {
+            let mut d = data.shared.core.lock().await;
+            if let Some(token) = d.cancel_tokens.remove(&channel_id) {
+                token.cancel_with_tmux_cleanup();
+            }
+            if let Some(session) = d.sessions.get_mut(&channel_id) {
+                session.history.clear();
+                session.pending_uploads.clear();
+                session.cleared = true;
+                session.session_id = None;
+            }
+            d.intervention_queue.remove(&channel_id);
+            drop(d);
+            let _ = msg.reply(&ctx.http, "Session cleared.").await;
+            return Ok(true);
+        }
+
+        _ => {}
+    }
+
+    Ok(false)
 }
