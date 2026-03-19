@@ -557,7 +557,7 @@ pub fn handle_restart_dcserver(
         }
     }
 
-    // NOTE: We intentionally do NOT kill remoteCC-* Claude work sessions here.
+    // NOTE: We intentionally do NOT kill AgentDesk-* Claude work sessions here.
     // They will be reconnected by restore_tmux_watchers() after the new dcserver starts.
     // Orphan sessions (channels renamed/deleted) are cleaned up inside the bot event loop.
 
@@ -802,6 +802,9 @@ pub fn handle_dcserver(token: Option<String>) {
             }
         }
 
+        // HTTP API port for self-referencing requests (dcserver → own HTTP server)
+        let api_port = ad_config.server.port;
+
         // ── Discord bot ────────────────────────────────────────────
         // Process-global counters shared across all providers for deferred restart barrier
         let global_active = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -826,6 +829,7 @@ pub fn handle_dcserver(token: Option<String>) {
                     global_finalizing,
                     shutdown_remaining,
                     health_registry,
+                    api_port,
                 )
                 .await;
             }
@@ -860,8 +864,9 @@ pub fn handle_dcserver(token: Option<String>) {
                     let gf = global_finalizing.clone();
                     let sr = shutdown_remaining.clone();
                     let hr = health_registry.clone();
+                    let port = api_port;
                     tasks.push(tokio::spawn(async move {
-                        services::discord::run_bot(&config.token, config.provider, ga, gf, sr, hr).await;
+                        services::discord::run_bot(&config.token, config.provider, ga, gf, sr, hr, port).await;
                     }));
                 }
 

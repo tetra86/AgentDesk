@@ -26,6 +26,19 @@ pub struct UpdateDispatchedSessionBody {
     pub session_info: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct HookSessionBody {
+    pub session_key: String,
+    pub status: Option<String>,
+    pub provider: Option<String>,
+    pub session_info: Option<String>,
+    pub name: Option<String>,
+    pub model: Option<String>,
+    pub tokens: Option<u64>,
+    pub cwd: Option<String>,
+    pub dispatch_id: Option<String>,
+}
+
 // ── Handlers ──────────────────────────────────────────────────
 
 /// GET /api/dispatched-sessions
@@ -117,6 +130,85 @@ pub async fn list_dispatched_sessions(
     };
 
     (StatusCode::OK, Json(json!({"sessions": sessions})))
+}
+
+/// POST /api/hook/session — upsert session from dcserver
+pub async fn hook_session(
+    State(state): State<AppState>,
+    Json(body): Json<HookSessionBody>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let conn = match state.db.lock() {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{e}")})),
+            )
+        }
+    };
+
+    // Resolve agent_id from channel name: check discord_channel_id or discord_channel_alt
+    let agent_id: Option<String> = body.name.as_ref().and_then(|channel_name| {
+        // Try exact match first, then suffix match (e.g. "td-cc" in "cookingheart-td-cc")
+        conn.query_row(
+            "SELECT id FROM agents WHERE discord_channel_id = ?1 OR discord_channel_alt = ?1",
+            [channel_name],
+            |row| row.get(0),
+        )
+        .ok()
+        .or_else(|| {
+            let mut stmt = conn
+                .prepare("SELECT id, discord_channel_id FROM agents")
+                .ok()?;
+            let mut rows = stmt.query([]).ok()?;
+            while let Ok(Some(row)) = rows.next() {
+                let id: String = row.get(0).ok()?;
+                let ch_id: String = row.get::<_, Option<String>>(1).ok()?.unwrap_or_default();
+                if !ch_id.is_empty() && channel_name.contains(&ch_id) {
+                    return Some(id);
+                }
+            }
+            None
+        })
+    });
+
+    let status = body.status.as_deref().unwrap_or("working");
+    let provider = body.provider.as_deref().unwrap_or("claude");
+    let tokens = body.tokens.unwrap_or(0) as i64;
+
+    let result = conn.execute(
+        "INSERT INTO sessions (session_key, agent_id, provider, status, session_info, model, tokens, cwd, active_dispatch_id, last_heartbeat)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, datetime('now'))
+         ON CONFLICT(session_key) DO UPDATE SET
+           status = excluded.status,
+           provider = excluded.provider,
+           session_info = COALESCE(excluded.session_info, sessions.session_info),
+           model = COALESCE(excluded.model, sessions.model),
+           tokens = CASE WHEN excluded.tokens > 0 THEN excluded.tokens ELSE sessions.tokens END,
+           cwd = COALESCE(excluded.cwd, sessions.cwd),
+           active_dispatch_id = COALESCE(excluded.active_dispatch_id, sessions.active_dispatch_id),
+           agent_id = COALESCE(excluded.agent_id, sessions.agent_id),
+           last_heartbeat = datetime('now')",
+        rusqlite::params![
+            body.session_key,
+            agent_id,
+            provider,
+            status,
+            body.session_info,
+            body.model,
+            tokens,
+            body.cwd,
+            body.dispatch_id,
+        ],
+    );
+
+    match result {
+        Ok(_) => (StatusCode::OK, Json(json!({"ok": true}))),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("{e}")})),
+        ),
+    }
 }
 
 /// PATCH /api/dispatched-sessions/:id

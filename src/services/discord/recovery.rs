@@ -191,7 +191,7 @@ pub(super) async fn restore_inflight_turns(
                 .as_deref()
                 .or_else(|| state.channel_name.as_deref())
                 .map(|name| {
-                    if name.starts_with("remoteCC-") {
+                    if name.starts_with(&format!("{}-", crate::services::provider::TMUX_SESSION_PREFIX)) {
                         name.to_string()
                     } else {
                         provider.build_tmux_session_name(name)
@@ -498,6 +498,7 @@ pub(super) async fn restore_inflight_turns(
             None,
             last_path.as_deref(),
             None, // dispatch_id not available during recovery
+            shared.api_port,
         )
         .await;
 

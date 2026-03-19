@@ -389,10 +389,11 @@ pub(super) async fn start_meeting(
         }
     };
 
-    // POST in_progress status to PCD so office view can show active meeting
+    // POST in_progress status to own HTTP server so office view can show active meeting
     if let Some(payload) = pcd_payload {
+        let port = shared.api_port;
         tokio::spawn(async move {
-            let _ = post_meeting_to_pcd(payload).await;
+            let _ = post_meeting_to_pcd(payload, port).await;
         });
     }
 
@@ -1221,10 +1222,11 @@ async fn save_meeting_record(
     let path = meetings_dir.join(format!("{}_{}.md", date_str, meeting_id));
     fs::write(&path, md)?;
 
-    // POST meeting data to PCD (fire-and-forget, ignore errors)
+    // POST meeting data to own HTTP server (fire-and-forget, ignore errors)
     if let Some(payload) = pcd_payload {
+        let port = shared.api_port;
         tokio::spawn(async move {
-            let _ = post_meeting_to_pcd(payload).await;
+            let _ = post_meeting_to_pcd(payload, port).await;
         });
     }
 
@@ -1281,15 +1283,16 @@ fn build_pcd_payload(m: &Meeting) -> Option<serde_json::Value> {
     }))
 }
 
-/// POST meeting data to PCD server
+/// POST meeting data to own HTTP server
 async fn post_meeting_to_pcd(
     payload: serde_json::Value,
+    api_port: u16,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()?;
     let _ = client
-        .post("http://localhost:8791/api/round-table-meetings")
+        .post(format!("http://localhost:{api_port}/api/round-table-meetings"))
         .json(&payload)
         .send()
         .await?;

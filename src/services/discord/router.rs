@@ -876,6 +876,7 @@ pub(super) async fn handle_text_message(
         None,
         Some(&current_path),
         dispatch_id.as_deref(),
+        shared.api_port,
     )
     .await;
 

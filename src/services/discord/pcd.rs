@@ -95,6 +95,7 @@ pub(super) async fn post_pcd_session_status(
     tokens: Option<u64>,
     cwd: Option<&str>,
     dispatch_id: Option<&str>,
+    api_port: u16,
 ) {
     let Some(session_key) = session_key else {
         return;
@@ -124,7 +125,7 @@ pub(super) async fn post_pcd_session_status(
     }
 
     match reqwest::Client::new()
-        .post("http://127.0.0.1:8791/api/hook/session")
+        .post(format!("http://127.0.0.1:{api_port}/api/hook/session"))
         .json(&body)
         .send()
         .await
@@ -453,6 +454,6 @@ mod tests {
         let hostname = "mac-mini";
         let key = format!("{}:{}", hostname, tmux_name);
         assert!(key.contains(':'));
-        assert!(key.starts_with("mac-mini:remoteCC-claude-"));
+        assert!(key.starts_with("mac-mini:AgentDesk-claude-"));
     }
 }

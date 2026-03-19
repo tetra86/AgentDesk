@@ -12,19 +12,18 @@ echo "▸ Building release..."
 cd "$REPO"
 cargo build --release 2>&1 | tail -1
 
-# 2. Stop dev — kill ALL agentdesk dcserver processes to prevent duplicates
+# 2. Stop dev only — leave release untouched
 echo "▸ Stopping dev..."
 launchctl bootout "gui/$(id -u)/$PLIST" 2>/dev/null || true
 sleep 1
 
-# Ensure no orphaned processes remain
-REMAINING=$(pgrep -f 'agentdesk dcserver' 2>/dev/null || true)
+# Kill only dev orphans (match dev binary path, not release)
+REMAINING=$(pgrep -f "$ADK_DEV/bin/agentdesk dcserver" 2>/dev/null || true)
 if [ -n "$REMAINING" ]; then
-    echo "  ▸ Killing orphaned processes: $REMAINING"
+    echo "  ▸ Killing orphaned dev processes: $REMAINING"
     echo "$REMAINING" | xargs kill 2>/dev/null || true
     sleep 2
-    # Force kill if still alive
-    STILL=$(pgrep -f 'agentdesk dcserver' 2>/dev/null || true)
+    STILL=$(pgrep -f "$ADK_DEV/bin/agentdesk dcserver" 2>/dev/null || true)
     if [ -n "$STILL" ]; then
         echo "  ▸ Force killing: $STILL"
         echo "$STILL" | xargs kill -9 2>/dev/null || true

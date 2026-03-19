@@ -315,6 +315,8 @@ pub(super) struct SharedData {
     pub(super) cached_serenity_ctx: tokio::sync::OnceCell<serenity::Context>,
     /// Cached bot token for deferred queue drain.
     pub(super) cached_bot_token: tokio::sync::OnceCell<String>,
+    /// HTTP API port for self-referencing requests (from config server.port).
+    pub(super) api_port: u16,
 }
 
 /// Poise user data type
@@ -1082,6 +1084,7 @@ pub async fn run_bot(
     global_finalizing: Arc<std::sync::atomic::AtomicUsize>,
     shutdown_remaining: Arc<std::sync::atomic::AtomicUsize>,
     health_registry: Arc<health::HealthRegistry>,
+    api_port: u16,
 ) {
     // Initialize debug logging from environment variable
     claude::init_debug_from_env();
@@ -1137,6 +1140,7 @@ pub async fn run_bot(
         turn_start_times: dashmap::DashMap::new(),
         cached_serenity_ctx: tokio::sync::OnceCell::new(),
         cached_bot_token: tokio::sync::OnceCell::new(),
+        api_port,
     });
 
     {

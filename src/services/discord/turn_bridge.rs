@@ -477,6 +477,7 @@ pub(super) fn spawn_turn_bridge(
                     None,
                     pcd_cwd.as_deref(),
                     dispatch_id.as_deref(),
+                    shared_owned.api_port,
                 )
                 .await;
                 last_pcd_heartbeat = std::time::Instant::now();
@@ -496,6 +497,7 @@ pub(super) fn spawn_turn_bridge(
             },
             pcd_cwd.as_deref(),
             dispatch_id.as_deref(),
+            shared_owned.api_port,
         )
         .await;
 

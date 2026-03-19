@@ -107,6 +107,7 @@ pub fn api_router(db: Db, engine: PolicyEngine) -> Router {
         // Dispatched sessions
         .route("/dispatched-sessions", get(dispatched_sessions::list_dispatched_sessions))
         .route("/dispatched-sessions/{id}", patch(dispatched_sessions::update_dispatched_session))
+        .route("/hook/session", post(dispatched_sessions::hook_session))
         // Messages
         .route("/messages", get(messages::list_messages).post(messages::create_message))
         // Discord bindings
