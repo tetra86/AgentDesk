@@ -1,20 +1,27 @@
 // Kanban state machine policy
-export default {
+var rules = {
   name: "kanban-rules",
   priority: 10,
 
-  onSessionStatusChange({ agentId, status, dispatchId }) {
-    if (status === "working" && dispatchId) {
-      const card = agentdesk.kanban.getByDispatchId(dispatchId);
-      if (card && card.status === "requested") {
-        agentdesk.kanban.transition(card.id, "in_progress", "agent_started");
-      }
-    }
+  onTick: function() {
+    agentdesk.log.info("[kanban-rules] tick");
   },
 
-  onCardTerminal({ card }) {
-    if (card.github_issue_url) {
-      agentdesk.github.closeIssue(card.repo_id, card.github_issue_number);
-    }
+  onCardTerminal: function(payload) {
+    agentdesk.log.info("[kanban-rules] card terminal: " + payload.card_id);
   },
+
+  onSessionStatusChange: function(payload) {
+    if (payload.status === "working" && payload.dispatchId) {
+      var rows = agentdesk.db.query(
+        "SELECT id, status FROM kanban_cards WHERE latest_dispatch_id = ?",
+        [payload.dispatchId]
+      );
+      if (rows.length > 0 && rows[0].status === "requested") {
+        agentdesk.log.info("[kanban-rules] promoting card " + rows[0].id + " to in_progress");
+      }
+    }
+  }
 };
+
+agentdesk.registerPolicy(rules);

@@ -1,16 +1,432 @@
+pub mod hooks;
+pub mod loader;
+pub mod ops;
+
+use std::sync::{Arc, Mutex};
+
 use anyhow::Result;
+use rquickjs::{Context, Function, Persistent, Runtime};
+
 use crate::config::Config;
 use crate::db::Db;
 
+use hooks::Hook;
+use loader::PolicyStore;
+
+/// Inner state of the policy engine (not Clone).
+struct PolicyEngineInner {
+    // Order matters for drop: policies (Persistent values) must be dropped
+    // before context and runtime.
+    policies: PolicyStore,
+    context: Context,
+    _runtime: Runtime,
+    // Keep watcher alive so hot-reload continues working
+    _watcher: Option<notify::RecommendedWatcher>,
+}
+
+impl Drop for PolicyEngineInner {
+    fn drop(&mut self) {
+        // Clear all persistent JS values before the runtime is dropped
+        if let Ok(mut guard) = self.policies.lock() {
+            guard.clear();
+        }
+    }
+}
+
+/// Thread-safe handle to the policy engine. Cheap to clone.
 #[derive(Clone)]
 pub struct PolicyEngine {
-    _db: Db,
+    inner: Arc<Mutex<PolicyEngineInner>>,
+}
+
+/// Summary of a loaded policy (for the /api/policies endpoint).
+#[derive(serde::Serialize)]
+pub struct PolicyInfo {
+    pub name: String,
+    pub file: String,
+    pub priority: i32,
+    pub hooks: Vec<String>,
 }
 
 impl PolicyEngine {
+    /// Create a new policy engine, initializing QuickJS and loading policies.
     pub fn new(config: &Config, db: Db) -> Result<Self> {
-        tracing::info!("Policy engine initialized (policies_dir={})", config.policies.dir.display());
-        // TODO: Initialize QuickJS runtime and load policies
-        Ok(Self { _db: db })
+        let runtime = Runtime::new()
+            .map_err(|e| anyhow::anyhow!("QuickJS runtime creation failed: {e}"))?;
+        let context = Context::full(&runtime)
+            .map_err(|e| anyhow::anyhow!("QuickJS context creation failed: {e}"))?;
+
+        // Register bridge ops (agentdesk.*)
+        context.with(|ctx| {
+            ops::register_globals(&ctx, db.clone())
+                .map_err(|e| anyhow::anyhow!("Failed to register bridge ops: {e}"))
+        })?;
+
+        // Load policies from directory
+        let policies_dir = config.policies.dir.clone();
+        let policies = loader::load_policies_from_dir(&context, &policies_dir)?;
+        let policy_count = policies.len();
+        let store: PolicyStore = Arc::new(Mutex::new(policies));
+
+        // Start hot-reload watcher if enabled
+        let watcher = if config.policies.hot_reload {
+            // For hot-reload we need a separate context that shares the same runtime.
+            // The watcher thread will use this context to re-evaluate policies.
+            let reload_ctx = Context::full(&runtime)
+                .map_err(|e| anyhow::anyhow!("QuickJS reload context creation failed: {e}"))?;
+
+            // Register bridge ops in the reload context too
+            reload_ctx.with(|ctx| {
+                ops::register_globals(&ctx, db.clone())
+                    .map_err(|e| anyhow::anyhow!("Failed to register bridge ops in reload ctx: {e}"))
+            })?;
+
+            match loader::start_hot_reload(policies_dir.clone(), reload_ctx, store.clone()) {
+                Ok(w) => {
+                    tracing::info!("Policy hot-reload enabled for {}", policies_dir.display());
+                    Some(w)
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to start policy hot-reload: {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        tracing::info!(
+            "Policy engine initialized (policies_dir={}, loaded={policy_count})",
+            policies_dir.display()
+        );
+
+        Ok(Self {
+            inner: Arc::new(Mutex::new(PolicyEngineInner {
+                _runtime: runtime,
+                context,
+                policies: store,
+                _watcher: watcher,
+            })),
+        })
+    }
+
+    /// Fire a hook with the given JSON payload. All policies that registered
+    /// for this hook are called in priority order.
+    pub fn fire_hook(&self, hook: Hook, payload: serde_json::Value) -> Result<()> {
+        let inner = self.inner.lock()
+            .map_err(|e| anyhow::anyhow!("engine lock poisoned: {e}"))?;
+
+        // Collect the persistent functions for this hook
+        let policies = inner.policies.lock()
+            .map_err(|e| anyhow::anyhow!("policy store lock poisoned: {e}"))?;
+
+        let hook_fns: Vec<(String, Persistent<Function<'static>>)> = policies
+            .iter()
+            .filter_map(|p| {
+                p.hooks.get(&hook).map(|f: &Persistent<Function<'static>>| (p.name.clone(), f.clone()))
+            })
+            .collect();
+        drop(policies);
+
+        if hook_fns.is_empty() {
+            return Ok(());
+        }
+
+        // Execute each hook function in the QuickJS context
+        inner.context.with(|ctx| -> Result<()> {
+            // Convert serde_json::Value to a JS value
+            let js_payload = json_to_js(&ctx, &payload)?;
+
+            for (policy_name, persistent_fn) in &hook_fns {
+                let func = match persistent_fn.clone().restore(&ctx) {
+                    Ok(f) => f,
+                    Err(e) => {
+                        tracing::error!(
+                            "Failed to restore hook {} for policy '{}': {e}",
+                            hook, policy_name
+                        );
+                        continue;
+                    }
+                };
+
+                let result: rquickjs::Result<rquickjs::Value> = func.call((js_payload.clone(),));
+                if let Err(e) = result {
+                    tracing::error!(
+                        "Hook {} in policy '{}' failed: {e}",
+                        hook, policy_name
+                    );
+                }
+            }
+
+            Ok(())
+        })
+    }
+
+    /// List loaded policies (for API endpoint).
+    pub fn list_policies(&self) -> Vec<PolicyInfo> {
+        let inner = match self.inner.lock() {
+            Ok(g) => g,
+            Err(_) => return Vec::new(),
+        };
+        let policies = match inner.policies.lock() {
+            Ok(g) => g,
+            Err(_) => return Vec::new(),
+        };
+
+        policies
+            .iter()
+            .map(|p| PolicyInfo {
+                name: p.name.clone(),
+                file: p.file.display().to_string(),
+                priority: p.priority,
+                hooks: p.hooks.keys().map(|h: &Hook| h.js_name().to_string()).collect(),
+            })
+            .collect()
+    }
+
+    /// Evaluate arbitrary JS in the engine context (useful for testing).
+    #[cfg(test)]
+    pub fn eval_js<T: for<'js> rquickjs::FromJs<'js> + Send>(&self, code: &str) -> Result<T> {
+        let inner = self.inner.lock()
+            .map_err(|e| anyhow::anyhow!("engine lock poisoned: {e}"))?;
+        let code_owned = code.to_string();
+        inner.context.with(|ctx| {
+            let result: T = ctx.eval(code_owned.as_bytes().to_vec())
+                .map_err(|e| anyhow::anyhow!("JS eval error: {e}"))?;
+            Ok(result)
+        })
+    }
+}
+
+/// Convert a serde_json::Value to a rquickjs::Value.
+fn json_to_js<'js>(ctx: &rquickjs::Ctx<'js>, val: &serde_json::Value) -> Result<rquickjs::Value<'js>> {
+    match val {
+        serde_json::Value::Null => Ok(rquickjs::Value::new_null(ctx.clone())),
+        serde_json::Value::Bool(b) => Ok(rquickjs::Value::new_bool(ctx.clone(), *b)),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Ok(rquickjs::Value::new_int(ctx.clone(), i as i32))
+            } else if let Some(f) = n.as_f64() {
+                Ok(rquickjs::Value::new_float(ctx.clone(), f))
+            } else {
+                Ok(rquickjs::Value::new_null(ctx.clone()))
+            }
+        }
+        serde_json::Value::String(s) => {
+            let js_str = rquickjs::String::from_str(ctx.clone(), s)
+                .map_err(|e| anyhow::anyhow!("string conversion: {e}"))?;
+            Ok(js_str.into())
+        }
+        serde_json::Value::Array(arr) => {
+            let js_arr = rquickjs::Array::new(ctx.clone())
+                .map_err(|e| anyhow::anyhow!("array creation: {e}"))?;
+            for (i, item) in arr.iter().enumerate() {
+                let js_item = json_to_js(ctx, item)?;
+                js_arr.set(i, js_item)
+                    .map_err(|e| anyhow::anyhow!("array set: {e}"))?;
+            }
+            Ok(js_arr.into_value())
+        }
+        serde_json::Value::Object(map) => {
+            let obj = rquickjs::Object::new(ctx.clone())
+                .map_err(|e| anyhow::anyhow!("object creation: {e}"))?;
+            for (k, v) in map {
+                let js_v = json_to_js(ctx, v)?;
+                obj.set(&**k, js_v)
+                    .map_err(|e| anyhow::anyhow!("object set: {e}"))?;
+            }
+            Ok(obj.into_value())
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex as StdMutex};
+
+    fn test_db() -> Db {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        crate::db::schema::migrate(&conn).unwrap();
+        Arc::new(StdMutex::new(conn))
+    }
+
+    fn test_config() -> Config {
+        Config {
+            policies: crate::config::PoliciesConfig {
+                dir: std::path::PathBuf::from("/nonexistent"),
+                hot_reload: false,
+            },
+            ..Config::default()
+        }
+    }
+
+    fn test_config_with_dir(dir: &std::path::Path) -> Config {
+        Config {
+            policies: crate::config::PoliciesConfig {
+                dir: dir.to_path_buf(),
+                hot_reload: false,
+            },
+            ..Config::default()
+        }
+    }
+
+    #[test]
+    fn test_engine_creates_runtime() {
+        let db = test_db();
+        let config = test_config();
+        let engine = PolicyEngine::new(&config, db);
+        assert!(engine.is_ok(), "Engine should initialize without error");
+    }
+
+    #[test]
+    fn test_engine_evaluates_js() {
+        let db = test_db();
+        let config = test_config();
+        let engine = PolicyEngine::new(&config, db).unwrap();
+        let result: i32 = engine.eval_js("1 + 2").unwrap();
+        assert_eq!(result, 3);
+    }
+
+    #[test]
+    fn test_engine_db_query_via_engine() {
+        let db = test_db();
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO agents (id, name, provider, status, xp) VALUES ('x1', 'Xbot', 'claude', 'idle', 42)",
+                [],
+            ).unwrap();
+        }
+
+        let config = test_config();
+        let engine = PolicyEngine::new(&config, db).unwrap();
+        let xp: i32 = engine
+            .eval_js(r#"agentdesk.db.query("SELECT xp FROM agents WHERE id = 'x1'")[0].xp"#)
+            .unwrap();
+        assert_eq!(xp, 42);
+    }
+
+    #[test]
+    fn test_engine_load_policy_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let policy_path = dir.path().join("test-policy.js");
+        std::fs::write(
+            &policy_path,
+            r#"
+            var policy = {
+                name: "test-policy",
+                priority: 5,
+                onTick: function() {
+                    agentdesk.log.info("[test-policy] tick fired");
+                }
+            };
+            agentdesk.registerPolicy(policy);
+            "#,
+        )
+        .unwrap();
+
+        let db = test_db();
+        let config = test_config_with_dir(dir.path());
+        let engine = PolicyEngine::new(&config, db).unwrap();
+
+        let policies = engine.list_policies();
+        assert_eq!(policies.len(), 1);
+        assert_eq!(policies[0].name, "test-policy");
+        assert_eq!(policies[0].priority, 5);
+        assert!(policies[0].hooks.contains(&"onTick".to_string()));
+    }
+
+    #[test]
+    fn test_engine_register_and_fire_hook() {
+        let dir = tempfile::tempdir().unwrap();
+        let policy_path = dir.path().join("hook-policy.js");
+        std::fs::write(
+            &policy_path,
+            r#"
+            var policy = {
+                name: "hook-policy",
+                priority: 1,
+                onTick: function(payload) {
+                    // Write a marker into kv_meta to prove this ran
+                    agentdesk.db.execute(
+                        "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('hook_test', 'fired')",
+                        []
+                    );
+                },
+                onCardTerminal: function(payload) {
+                    agentdesk.db.execute(
+                        "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('terminal_card', payload.card_id || 'unknown')",
+                        []
+                    );
+                }
+            };
+            agentdesk.registerPolicy(policy);
+            "#,
+        )
+        .unwrap();
+
+        let db = test_db();
+        let config = test_config_with_dir(dir.path());
+        let engine = PolicyEngine::new(&config, db.clone()).unwrap();
+
+        // Fire onTick
+        engine.fire_hook(Hook::OnTick, serde_json::json!({})).unwrap();
+
+        // Check the marker was written
+        let conn = db.lock().unwrap();
+        let val: String = conn
+            .query_row(
+                "SELECT value FROM kv_meta WHERE key = 'hook_test'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(val, "fired");
+    }
+
+    #[test]
+    fn test_engine_fire_hook_with_payload() {
+        let dir = tempfile::tempdir().unwrap();
+        let policy_path = dir.path().join("payload-policy.js");
+        std::fs::write(
+            &policy_path,
+            r#"
+            var policy = {
+                name: "payload-policy",
+                priority: 1,
+                onCardTerminal: function(payload) {
+                    agentdesk.db.execute(
+                        "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('terminal_id', '" + payload.card_id + "')",
+                        []
+                    );
+                }
+            };
+            agentdesk.registerPolicy(policy);
+            "#,
+        )
+        .unwrap();
+
+        let db = test_db();
+        let config = test_config_with_dir(dir.path());
+        let engine = PolicyEngine::new(&config, db.clone()).unwrap();
+
+        engine
+            .fire_hook(
+                Hook::OnCardTerminal,
+                serde_json::json!({"card_id": "card-123"}),
+            )
+            .unwrap();
+
+        let conn = db.lock().unwrap();
+        let val: String = conn
+            .query_row(
+                "SELECT value FROM kv_meta WHERE key = 'terminal_id'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(val, "card-123");
     }
 }

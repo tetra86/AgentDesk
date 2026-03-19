@@ -24,6 +24,7 @@ pub fn api_router(db: Db, engine: PolicyEngine) -> Router {
         .route("/agents", get(list_agents))
         .route("/agents/{id}", get(get_agent))
         .route("/sessions", get(list_sessions))
+        .route("/policies", get(list_policies))
         .with_state(state)
 }
 
@@ -164,6 +165,22 @@ async fn list_sessions(State(state): State<AppState>) -> Json<serde_json::Value>
     };
 
     Json(json!({ "sessions": sessions }))
+}
+
+async fn list_policies(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let policies = state.engine.list_policies();
+    let items: Vec<serde_json::Value> = policies
+        .into_iter()
+        .map(|p| {
+            json!({
+                "name": p.name,
+                "file": p.file,
+                "priority": p.priority,
+                "hooks": p.hooks,
+            })
+        })
+        .collect();
+    Json(json!({ "policies": items }))
 }
 
 #[cfg(test)]
