@@ -57,13 +57,15 @@ pub async fn list_meetings(State(state): State<AppState>) -> (StatusCode, Json<s
         None => Vec::new(),
     };
 
-    // Attach transcripts to each meeting (+ entries alias for frontend)
+    // Attach transcripts + issue data to each meeting
     for meeting in meetings.iter_mut() {
-        if let Some(meeting_id) = meeting.get("id").and_then(|v| v.as_str()) {
-            let transcripts = load_transcripts(&conn, meeting_id);
+        let meeting_id = meeting.get("id").and_then(|v| v.as_str()).map(|s| s.to_string());
+        if let Some(mid) = meeting_id {
+            let transcripts = load_transcripts(&conn, &mid);
             let obj = meeting.as_object_mut().unwrap();
             obj.insert("transcripts".to_string(), json!(&transcripts));
             obj.insert("entries".to_string(), json!(transcripts));
+            enrich_meeting_with_issue_data(&conn, &mid, obj);
         }
     }
 
@@ -96,6 +98,7 @@ pub async fn get_meeting(
             let obj = meeting.as_object_mut().unwrap();
             obj.insert("transcripts".to_string(), json!(&transcripts));
             obj.insert("entries".to_string(), json!(transcripts));
+            enrich_meeting_with_issue_data(&conn, &id, obj);
             (StatusCode::OK, Json(json!({"meeting": meeting})))
         }
         Err(rusqlite::Error::QueryReturnedNoRows) => (
@@ -256,7 +259,7 @@ pub async fn create_issues(
     let repo: Option<String> = body.repo.clone().or_else(|| {
             conn.query_row(
                 "SELECT value FROM kv_meta WHERE key = ?1",
-                [&format!("meeting:{id}:issue_repo")],
+                [&format!("meeting_issue_repo:{id}")],
                 |row| row.get(0),
             )
             .ok()
@@ -588,6 +591,68 @@ fn meeting_row_to_json(row: &rusqlite::Row) -> rusqlite::Result<serde_json::Valu
         "issue_repo": null,
         "created_at": null,
     }))
+}
+
+/// Enrich meeting JSON with issue_repo, issue_creation_results from kv_meta.
+fn enrich_meeting_with_issue_data(
+    conn: &rusqlite::Connection,
+    meeting_id: &str,
+    obj: &mut serde_json::Map<String, serde_json::Value>,
+) {
+    // issue_repo
+    let issue_repo: Option<String> = conn
+        .query_row(
+            "SELECT value FROM kv_meta WHERE key = ?1",
+            [&format!("meeting_issue_repo:{meeting_id}")],
+            |row| row.get(0),
+        )
+        .ok();
+    if let Some(ref repo) = issue_repo {
+        obj.insert("issue_repo".to_string(), json!(repo));
+    }
+
+    // Collect issue creation results from kv_meta
+    let mut results = Vec::new();
+    let mut i = 0;
+    loop {
+        let key = format!("meeting:{meeting_id}:issue:item-{i}");
+        let url: Option<String> = conn
+            .query_row(
+                "SELECT value FROM kv_meta WHERE key = ?1",
+                [&format!("{key}:url")],
+                |row| row.get(0),
+            )
+            .ok();
+        let discarded: bool = conn
+            .query_row(
+                "SELECT value FROM kv_meta WHERE key = ?1",
+                [&format!("{key}:discarded")],
+                |row| row.get::<_, String>(0),
+            )
+            .ok()
+            .map(|v| v == "true")
+            .unwrap_or(false);
+
+        if url.is_none() && !discarded && i > 0 {
+            break; // No more items
+        }
+        if url.is_some() || discarded {
+            results.push(json!({
+                "key": format!("item-{i}"),
+                "ok": url.is_some(),
+                "discarded": discarded,
+                "issue_url": url,
+            }));
+        }
+        i += 1;
+        if i > 100 {
+            break;
+        } // safety limit
+    }
+
+    if !results.is_empty() {
+        obj.insert("issue_creation_results".to_string(), json!(results));
+    }
 }
 
 fn load_transcripts(conn: &rusqlite::Connection, meeting_id: &str) -> Vec<serde_json::Value> {
