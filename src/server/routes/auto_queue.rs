@@ -645,11 +645,11 @@ pub async fn enqueue(
         }
     };
 
-    // Find or create active run
+    // Find or create active run (filtered by repo/agent)
     let run_id: String = conn
         .query_row(
-            "SELECT id FROM auto_queue_runs WHERE status = 'active' ORDER BY created_at DESC LIMIT 1",
-            [],
+            "SELECT id FROM auto_queue_runs WHERE status = 'active' AND (repo = ?1 OR repo IS NULL) AND (agent_id = ?2 OR agent_id IS NULL) ORDER BY created_at DESC LIMIT 1",
+            rusqlite::params![body.repo, agent_id],
             |row| row.get(0),
         )
         .unwrap_or_else(|_| {

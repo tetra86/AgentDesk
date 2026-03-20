@@ -2,7 +2,8 @@ var autoQueue = {
   name: "auto-queue",
   priority: 500,
 
-  // When a card reaches terminal state, check if agent has next queued work
+  // When a card reaches terminal state, mark queue entry as done
+  // and dispatch next pending entry for the same agent
   onCardTerminal: function(payload) {
     var cards = agentdesk.db.query(
       "SELECT assigned_agent_id FROM kanban_cards WHERE id = ?",
@@ -12,6 +13,12 @@ var autoQueue = {
 
     var agentId = cards[0].assigned_agent_id;
 
+    // Mark queue entry as done
+    agentdesk.db.execute(
+      "UPDATE auto_queue_entries SET status = 'done', completed_at = datetime('now') WHERE kanban_card_id = ? AND status = 'dispatched'",
+      [payload.card_id]
+    );
+
     // Check if agent has any active (non-terminal) cards
     var active = agentdesk.db.query(
       "SELECT COUNT(*) as cnt FROM kanban_cards WHERE assigned_agent_id = ? AND status IN ('requested','in_progress','review')",
@@ -19,34 +26,75 @@ var autoQueue = {
     );
     if (active.length > 0 && active[0].cnt > 0) return;
 
-    // Check dispatch queue for next item
-    var queued = agentdesk.db.query(
-      "SELECT dq.id as queue_id, dq.kanban_card_id, kc.title FROM dispatch_queue dq JOIN kanban_cards kc ON kc.id = dq.kanban_card_id WHERE kc.assigned_agent_id = ? ORDER BY dq.priority_score DESC, dq.queued_at ASC LIMIT 1",
+    // Find next pending entry for this agent from active runs
+    var nextEntry = agentdesk.db.query(
+      "SELECT e.id, e.kanban_card_id, e.run_id, kc.title " +
+      "FROM auto_queue_entries e " +
+      "JOIN auto_queue_runs r ON e.run_id = r.id " +
+      "JOIN kanban_cards kc ON e.kanban_card_id = kc.id " +
+      "WHERE e.agent_id = ? AND e.status = 'pending' AND r.status = 'active' " +
+      "ORDER BY e.priority_rank ASC LIMIT 1",
       [agentId]
     );
-    if (queued.length > 0) {
-      agentdesk.log.info("[auto-queue] Agent " + agentId + " has next queued card: " + queued[0].kanban_card_id);
-      // Remove from queue — the dispatch will be created by the API caller
+
+    if (nextEntry.length > 0) {
+      var entry = nextEntry[0];
+      agentdesk.log.info("[auto-queue] Dispatching next entry for " + agentId + ": " + entry.kanban_card_id);
+
+      // Set card to requested
       agentdesk.db.execute(
-        "DELETE FROM dispatch_queue WHERE id = ?",
-        [queued[0].queue_id]
+        "UPDATE kanban_cards SET status = 'requested', updated_at = datetime('now') WHERE id = ?",
+        [entry.kanban_card_id]
       );
+
+      // Mark entry as dispatched
+      agentdesk.db.execute(
+        "UPDATE auto_queue_entries SET status = 'dispatched', dispatched_at = datetime('now') WHERE id = ?",
+        [entry.id]
+      );
+
+      // Create dispatch
+      try {
+        agentdesk.dispatch.create(
+          entry.kanban_card_id,
+          agentId,
+          "implementation",
+          entry.title
+        );
+      } catch (e) {
+        agentdesk.log.warn("[auto-queue] dispatch failed: " + e);
+      }
+
+      // Check if run is complete
+      var remaining = agentdesk.db.query(
+        "SELECT COUNT(*) as cnt FROM auto_queue_entries WHERE run_id = ? AND status = 'pending'",
+        [entry.run_id]
+      );
+      if (remaining.length > 0 && remaining[0].cnt === 0) {
+        agentdesk.db.execute(
+          "UPDATE auto_queue_runs SET status = 'completed', completed_at = datetime('now') WHERE id = ?",
+          [entry.run_id]
+        );
+      }
     }
   },
 
-  // Periodic: check for idle agents with queued work
+  // Periodic: check for idle agents with pending queue entries
   onTick: function() {
-    // Find agents that are idle and have queued cards
-    var idleAgents = agentdesk.db.query(
-      "SELECT DISTINCT a.id FROM agents a " +
-      "JOIN dispatch_queue dq ON 1=1 " +
-      "JOIN kanban_cards kc ON kc.id = dq.kanban_card_id AND kc.assigned_agent_id = a.id " +
-      "WHERE a.status = 'idle' " +
-      "AND NOT EXISTS (SELECT 1 FROM kanban_cards kc2 WHERE kc2.assigned_agent_id = a.id AND kc2.status IN ('requested','in_progress'))"
+    var idleWithQueue = agentdesk.db.query(
+      "SELECT DISTINCT e.agent_id " +
+      "FROM auto_queue_entries e " +
+      "JOIN auto_queue_runs r ON e.run_id = r.id " +
+      "WHERE e.status = 'pending' AND r.status = 'active' " +
+      "AND NOT EXISTS (" +
+      "  SELECT 1 FROM kanban_cards kc " +
+      "  WHERE kc.assigned_agent_id = e.agent_id " +
+      "  AND kc.status IN ('requested','in_progress')" +
+      ")"
     );
 
-    for (var i = 0; i < idleAgents.length; i++) {
-      agentdesk.log.info("[auto-queue] Idle agent " + idleAgents[i].id + " has queued work");
+    for (var i = 0; i < idleWithQueue.length; i++) {
+      agentdesk.log.info("[auto-queue] Idle agent " + idleWithQueue[i].agent_id + " has pending queue entries");
     }
   }
 };
