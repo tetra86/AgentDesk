@@ -44,6 +44,7 @@ fi
 
 # Start release
 echo "▸ Starting release..."
+xattr -d com.apple.quarantine "$HOME/Library/LaunchAgents/$PLIST_REL.plist" 2>/dev/null || true
 launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/$PLIST_REL.plist"
 sleep 3
 

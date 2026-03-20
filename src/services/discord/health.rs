@@ -320,9 +320,14 @@ async fn handle_send<'a>(registry: &HealthRegistry, body: &str) -> (&'a str, Str
         );
     }
 
-    // Parse "channel:<id>" format
+    // Parse "channel:<id>" or "channel:<name>" format
     let channel_id_raw = if let Some(id_str) = target.strip_prefix("channel:") {
-        id_str.trim().parse::<u64>().ok()
+        let trimmed = id_str.trim();
+        // Try numeric first, then resolve name via role_map.json
+        trimmed
+            .parse::<u64>()
+            .ok()
+            .or_else(|| crate::server::routes::dispatches::resolve_channel_alias_pub(trimmed))
     } else {
         target.trim().parse::<u64>().ok()
     };
@@ -330,7 +335,7 @@ async fn handle_send<'a>(registry: &HealthRegistry, body: &str) -> (&'a str, Str
     let Some(channel_id_raw) = channel_id_raw else {
         return (
             "400 Bad Request",
-            r#"{"ok":false,"error":"invalid target format (use channel:<id>)"}"#.to_string(),
+            r#"{"ok":false,"error":"invalid target format (use channel:<id> or channel:<name>)"}"#.to_string(),
         );
     };
 

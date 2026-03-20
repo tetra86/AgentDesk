@@ -341,22 +341,9 @@ fn register_dispatch_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
             agentdesk.dispatch.create = function(cardId, agentId, dispatchType, title) {
                 var result = JSON.parse(raw(cardId, agentId, dispatchType || "implementation", title || "Dispatch"));
                 if (result.error) throw new Error(result.error);
-                // Fire Discord notification via local API (best-effort, non-blocking from JS perspective)
-                try {
-                    var port = agentdesk.config.get("health_port") || 8793;
-                    var channel = agentdesk.db.query(
-                        "SELECT discord_channel_id FROM agents WHERE id = ?", [agentId]
-                    );
-                    if (channel.length > 0 && channel[0].discord_channel_id) {
-                        agentdesk.http.post("http://127.0.0.1:" + port + "/api/send", {
-                            target: "channel:" + channel[0].discord_channel_id,
-                            content: "[Dispatch] " + (title || "Dispatch") + (result.issue_url ? "\n" + result.issue_url : ""),
-                            source: agentId
-                        });
-                    }
-                } catch(e) {
-                    agentdesk.log.warn("[dispatch] Discord send failed: " + e.message);
-                }
+                // Discord notification is handled by the Rust handler after fire_hook returns
+                // (async via send_dispatch_to_discord). Do NOT call ureq from QuickJS — it
+                // deadlocks the tokio runtime because the health server shares the same runtime.
                 return result.dispatch_id;
             };
         })();
