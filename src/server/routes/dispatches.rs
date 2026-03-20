@@ -510,6 +510,104 @@ pub(super) async fn send_dispatch_to_discord(
     }
 }
 
+/// Send review result notification to the agent's PRIMARY channel.
+/// Called after a counter-model review dispatch completes.
+pub(super) async fn send_review_result_to_primary(
+    db: &crate::db::Db,
+    card_id: &str,
+    verdict: &str,
+) {
+    // Look up card info
+    let (agent_id, title, issue_url, channel_id): (String, String, Option<String>, String) = {
+        let conn = match db.lock() {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let result = conn.query_row(
+            "SELECT kc.assigned_agent_id, kc.title, kc.github_issue_url, a.discord_channel_id \
+             FROM kanban_cards kc \
+             JOIN agents a ON kc.assigned_agent_id = a.id \
+             WHERE kc.id = ?1",
+            [card_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        );
+        match result {
+            Ok(r) => r,
+            Err(_) => return,
+        }
+    };
+
+    // Resolve channel ID (may be a name alias)
+    let channel_id_num: u64 = match channel_id.parse() {
+        Ok(n) => n,
+        Err(_) => match resolve_channel_alias(&channel_id) {
+            Some(n) => n,
+            None => return,
+        },
+    };
+
+    let verdict_emoji = match verdict {
+        "pass" | "accept" | "approved" => "✅",
+        "improve" | "rework" => "📝",
+        "reject" => "❌",
+        _ => "❓",
+    };
+
+    let action_guide = if verdict == "pass" || verdict == "accept" || verdict == "approved" {
+        "리뷰 통과 — 카드가 done으로 이동합니다.".to_string()
+    } else {
+        format!(
+            "GitHub 이슈 코멘트를 확인하고 다음 중 하나를 선택하세요:\n\
+             • **수용** → 리뷰 내용을 반영하여 수정 후 `/review-decision accept`\n\
+             • **반론** → GitHub 코멘트로 이의 제기 후 `/review-decision dispute`\n\
+             • **불수용** → 리뷰 무시 `/review-decision dismiss`"
+        )
+    };
+
+    let url_line = issue_url.map(|u| format!("\n{u}")).unwrap_or_default();
+    let message = format!(
+        "{verdict_emoji} [리뷰 완료] {title}\n\
+         verdict: **{verdict}**\n\
+         {action_guide}{url_line}"
+    );
+
+    // Send to primary channel
+    let config = crate::config::load_graceful();
+    let token = match config
+        .discord
+        .bots
+        .get("announce")
+        .or_else(|| config.discord.bots.get("command"))
+    {
+        Some(bot) => bot.token.clone(),
+        None => return,
+    };
+
+    let url = format!(
+        "https://discord.com/api/v10/channels/{}/messages",
+        channel_id_num
+    );
+    let client = reqwest::Client::new();
+    match client
+        .post(&url)
+        .header("Authorization", format!("Bot {}", token))
+        .json(&serde_json::json!({"content": message}))
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => {
+            tracing::info!("[review] Sent review result to {agent_id} (channel {channel_id})");
+        }
+        Ok(resp) => {
+            let status = resp.status();
+            tracing::warn!("[review] Discord API error {status}");
+        }
+        Err(e) => {
+            tracing::warn!("[review] Request failed: {e}");
+        }
+    }
+}
+
 /// Resolve a channel name alias (e.g. "adk-cc") to a numeric channel ID
 /// by reading role_map.json's byChannelName section.
 pub fn resolve_channel_alias_pub(alias: &str) -> Option<u64> {

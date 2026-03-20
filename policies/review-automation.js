@@ -165,39 +165,16 @@ function processVerdict(cardId, verdict, result) {
       );
     }
 
-    // Set review_status to suggestion_pending (agent decision phase)
+    // Set review_status to suggestion_pending — agent must decide: accept/dispute/dismiss
     agentdesk.db.execute(
       "UPDATE kanban_cards SET review_status = 'suggestion_pending', updated_at = datetime('now') WHERE id = ?",
       [cardId]
     );
-    agentdesk.log.info("[review] Card " + cardId + " needs rework → suggestion_pending");
+    agentdesk.log.info("[review] Card " + cardId + " needs review decision → suggestion_pending");
 
-    // Auto-create rework dispatch to original agent
-    var cards = agentdesk.db.query(
-      "SELECT assigned_agent_id, title FROM kanban_cards WHERE id = ?", [cardId]
-    );
-    if (cards.length > 0 && cards[0].assigned_agent_id) {
-      try {
-        var reworkId = agentdesk.dispatch.create(
-          cardId,
-          cards[0].assigned_agent_id,
-          "rework",
-          "[Rework] " + (cards[0].title || cardId)
-        );
-        agentdesk.db.execute(
-          "UPDATE kanban_cards SET status = 'in_progress', review_status = 'rework_pending', updated_at = datetime('now') WHERE id = ?",
-          [cardId]
-        );
-        agentdesk.log.info("[review] Rework dispatch " + reworkId + " created for " + cardId);
-      } catch (e) {
-        agentdesk.log.warn("[review] Rework dispatch failed: " + e);
-        // Fallback: back to ready
-        agentdesk.db.execute(
-          "UPDATE kanban_cards SET status = 'ready', review_status = NULL, updated_at = datetime('now') WHERE id = ?",
-          [cardId]
-        );
-      }
-    }
+    // Notification to original agent's primary channel is handled by Rust
+    // (dispatched_sessions.rs / dispatches.rs sends async Discord message after OnDispatchCompleted)
+    // Rework dispatch is NOT auto-created — agent decides after reading review comments.
 
   } else {
     agentdesk.log.warn("[review] Unknown verdict '" + verdict + "' for card " + cardId);
