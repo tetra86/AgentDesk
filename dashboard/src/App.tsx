@@ -122,7 +122,7 @@ export default function App() {
           auditLogs: logs,
           kanbanCards: cards,
           taskDispatches: dispatches,
-          selectedOfficeId: off.length > 0 ? off[0].id : null,
+          selectedOfficeId: defaultOfficeId ?? null,
         });
       } catch (e) {
         console.error("Bootstrap failed:", e);

@@ -371,12 +371,14 @@ async fn send_dispatch_to_discord(db: &crate::db::Db, agent_id: &str, title: &st
         format!("[Dispatch] {title}")
     };
 
-    // Send via Discord HTTP API using the "command" (announce) bot
+    // Send via Discord HTTP API using the announce bot
     let config = crate::config::load_graceful();
-    let token = match config.discord.bots.get("command") {
+    let token = match config.discord.bots.get("announce")
+        .or_else(|| config.discord.bots.get("command"))
+    {
         Some(bot) => bot.token.clone(),
         None => {
-            tracing::warn!("[dispatch] No 'command' (announce) bot configured");
+            tracing::warn!("[dispatch] No 'announce' bot configured");
             return;
         }
     };

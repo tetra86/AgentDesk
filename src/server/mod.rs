@@ -1,7 +1,9 @@
 pub mod routes;
+pub mod ws;
 
 use anyhow::Result;
 use axum::Router;
+use axum::routing::get;
 use tower_http::services::ServeDir;
 
 use crate::config::Config;
@@ -24,7 +26,10 @@ pub async fn run(config: Config, db: Db, engine: PolicyEngine) -> Result<()> {
         .unwrap_or_else(|| std::path::PathBuf::from("dashboard/dist"));
     tracing::info!("Serving dashboard from {:?}", dashboard_dir);
 
+    let broadcast_tx = ws::new_broadcast();
+
     let app = Router::new()
+        .route("/ws", get(ws::ws_handler).with_state(broadcast_tx.clone()))
         .nest("/api", routes::api_router(db.clone(), engine.clone()))
         .fallback_service(ServeDir::new(&dashboard_dir));
 

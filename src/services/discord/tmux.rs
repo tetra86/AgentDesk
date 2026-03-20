@@ -632,8 +632,8 @@ pub(super) fn process_watcher_lines(
     (found_result, is_prompt_too_long, is_auth_error)
 }
 
-/// On startup, scan for surviving tmux sessions (remoteCC-*) and restore watchers.
-/// This handles the case where RemoteCC was restarted but tmux sessions are still alive.
+/// On startup, scan for surviving tmux sessions (AgentDesk-*) and restore watchers.
+/// This handles the case where AgentDesk was restarted but tmux sessions are still alive.
 pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &Arc<SharedData>) {
     let provider = shared.settings.read().await.provider.clone();
 
@@ -894,7 +894,7 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
     }
 }
 
-/// Kill orphan tmux sessions (remoteCC-*) that don't map to any known channel.
+/// Kill orphan tmux sessions (AgentDesk-*) that don't map to any known channel.
 /// Called after restore_tmux_watchers to clean up sessions from renamed/deleted channels.
 pub(super) async fn cleanup_orphan_tmux_sessions(shared: &Arc<SharedData>) {
     let provider = shared.settings.read().await.provider.clone();

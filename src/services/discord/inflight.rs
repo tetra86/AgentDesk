@@ -222,7 +222,7 @@ mod tests {
             999,
             "hello".to_string(),
             Some("session-1".to_string()),
-            Some("remoteCC-codex-remotecc-cdx".to_string()),
+            Some("AgentDesk-codex-remotecc-cdx".to_string()),
             Some("/tmp/out.jsonl".to_string()),
             Some("/tmp/in.fifo".to_string()),
             42,

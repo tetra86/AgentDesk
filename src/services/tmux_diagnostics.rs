@@ -115,7 +115,7 @@ mod tests {
 
     #[test]
     fn test_tmux_exit_reason_round_trip() {
-        let session = format!("remoteCC-test-{}", std::process::id());
+        let session = format!("AgentDesk-test-{}", std::process::id());
         clear_tmux_exit_reason(&session);
         record_tmux_exit_reason(&session, "explicit cleanup: /stop");
         let diag = build_tmux_death_diagnostic(&session, None).unwrap();

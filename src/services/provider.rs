@@ -1,5 +1,21 @@
 use crate::utils::format::safe_prefix;
 
+/// Tmux session name prefix — always "AgentDesk".
+pub const TMUX_SESSION_PREFIX: &str = "AgentDesk";
+
+/// Tmux session name suffix for dev/release isolation.
+/// Dev environment (`~/.adk/dev`) appends "-dev"; release has no suffix.
+pub fn tmux_env_suffix() -> &'static str {
+    use std::sync::OnceLock;
+    static SUFFIX: OnceLock<String> = OnceLock::new();
+    SUFFIX.get_or_init(|| {
+        match std::env::var("REMOTECC_ROOT_DIR").ok() {
+            Some(root) if root.contains(".adk/dev") => "-dev".to_string(),
+            _ => String::new(),
+        }
+    })
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProviderKind {
     Claude,
@@ -83,21 +99,29 @@ impl ProviderKind {
             })
             .collect();
         let trimmed = safe_prefix(&sanitized, 44);
-        format!("remoteCC-{}-{}", self.as_str(), trimmed)
+        format!("{}-{}-{}{}", TMUX_SESSION_PREFIX, self.as_str(), trimmed, tmux_env_suffix())
     }
 }
 
 pub fn parse_provider_and_channel_from_tmux_name(
     session_name: &str,
 ) -> Option<(ProviderKind, String)> {
-    let stripped = session_name.strip_prefix("remoteCC-")?;
-    if let Some(rest) = stripped.strip_prefix("claude-") {
+    let prefix = format!("{}-", TMUX_SESSION_PREFIX);
+    let stripped = session_name.strip_prefix(&prefix)?;
+    // Strip env suffix (e.g. "-dev") from the end before parsing
+    let suffix = tmux_env_suffix();
+    let without_suffix = if !suffix.is_empty() {
+        stripped.strip_suffix(suffix).unwrap_or(stripped)
+    } else {
+        stripped
+    };
+    if let Some(rest) = without_suffix.strip_prefix("claude-") {
         return Some((ProviderKind::Claude, rest.to_string()));
     }
-    if let Some(rest) = stripped.strip_prefix("codex-") {
+    if let Some(rest) = without_suffix.strip_prefix("codex-") {
         return Some((ProviderKind::Codex, rest.to_string()));
     }
-    Some((ProviderKind::Claude, stripped.to_string()))
+    Some((ProviderKind::Claude, without_suffix.to_string()))
 }
 
 #[cfg(test)]
@@ -134,15 +158,15 @@ mod tests {
     #[test]
     fn test_tmux_name_parse_supports_legacy_and_provider_aware_names() {
         assert_eq!(
-            parse_provider_and_channel_from_tmux_name("remoteCC-claude-cookingheart-dev-cc"),
+            parse_provider_and_channel_from_tmux_name("AgentDesk-claude-cookingheart-dev-cc"),
             Some((ProviderKind::Claude, "cookingheart-dev-cc".to_string()))
         );
         assert_eq!(
-            parse_provider_and_channel_from_tmux_name("remoteCC-codex-cookingheart-dev-cdx"),
+            parse_provider_and_channel_from_tmux_name("AgentDesk-codex-cookingheart-dev-cdx"),
             Some((ProviderKind::Codex, "cookingheart-dev-cdx".to_string()))
         );
         assert_eq!(
-            parse_provider_and_channel_from_tmux_name("remoteCC-mac-mini"),
+            parse_provider_and_channel_from_tmux_name("AgentDesk-mac-mini"),
             Some((ProviderKind::Claude, "mac-mini".to_string()))
         );
     }
@@ -177,11 +201,11 @@ mod tests {
     #[test]
     fn test_build_tmux_session_name() {
         let name = ProviderKind::Claude.build_tmux_session_name("my-channel");
-        assert!(name.starts_with("remoteCC-claude-"));
+        assert!(name.starts_with("AgentDesk-claude-"));
         assert!(name.contains("my-channel"));
 
         let name2 = ProviderKind::Codex.build_tmux_session_name("dev-cdx");
-        assert!(name2.starts_with("remoteCC-codex-"));
+        assert!(name2.starts_with("AgentDesk-codex-"));
         assert!(name2.contains("dev-cdx"));
     }
 

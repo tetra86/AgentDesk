@@ -28,6 +28,16 @@ echo "▸ Copying binary from dev..."
 cp "$ADK_DEV/bin/agentdesk" "$ADK_REL/bin/agentdesk"
 chmod +x "$ADK_REL/bin/agentdesk"
 
+# Copy dashboard from dev
+echo "▸ Copying dashboard from dev..."
+mkdir -p "$ADK_REL/dashboard"
+rm -rf "$ADK_REL/dashboard/dist"
+cp -r "$ADK_DEV/dashboard/dist" "$ADK_REL/dashboard/dist"
+
+# Copy database from dev
+echo "▸ Copying database from dev..."
+cp "$ADK_DEV/data/agentdesk.sqlite" "$ADK_REL/data/agentdesk.sqlite"
+
 # Start release
 echo "▸ Starting release..."
 launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/$PLIST_REL.plist"

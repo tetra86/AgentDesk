@@ -17,7 +17,7 @@ pub fn print_help() {
     println!("    --discord-sendmessage --channel <ID> --message <TEXT> [--key <HASH>]");
     println!("    --discord-senddm --user <ID> --message <TEXT> [--key <HASH>]");
     println!(
-        "    --reset-tmux             Kill all remoteCC-* tmux sessions"
+        "    --reset-tmux             Kill all AgentDesk-* tmux sessions"
     );
     println!("    --ismcptool <TOOL>...    Check if MCP tool(s) are registered in .claude/settings.json (CWD)");
     println!(
@@ -142,11 +142,11 @@ pub fn handle_reset_tmux() {
         .map(|s| s.trim().to_string())
         .unwrap_or_else(|| "local".to_string());
 
-    // Kill local remoteCC-* sessions
-    println!("[{}] Cleaning remoteCC-* tmux sessions...", hostname);
-    let killed = kill_remotecc_tmux_sessions_local();
+    // Kill local AgentDesk-* sessions (also cleans legacy remoteCC-* sessions)
+    println!("[{}] Cleaning AgentDesk-* tmux sessions...", hostname);
+    let killed = kill_agentdesk_tmux_sessions_local();
     if killed == 0 {
-        println!("   No remoteCC-* sessions found.");
+        println!("   No AgentDesk-* sessions found.");
     } else {
         println!("   Killed {} session(s).", killed);
     }
@@ -160,7 +160,7 @@ pub fn handle_reset_tmux() {
     println!("Done.");
 }
 
-fn kill_remotecc_tmux_sessions_local() -> usize {
+fn kill_agentdesk_tmux_sessions_local() -> usize {
     let output = match std::process::Command::new("tmux")
         .args(["list-sessions", "-F", "#{session_name}"])
         .output()
@@ -172,7 +172,7 @@ fn kill_remotecc_tmux_sessions_local() -> usize {
     let mut count = 0;
     for line in output.lines() {
         let name = line.trim();
-        if name.starts_with("remoteCC-") {
+        if name.starts_with("AgentDesk-") || name.starts_with("remoteCC-") {
             if std::process::Command::new("tmux")
                 .args(["kill-session", "-t", name])
                 .status()
