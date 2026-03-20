@@ -91,10 +91,10 @@ pub(super) struct TurnBridgeContext {
     pub(super) serenity_ctx: Option<serenity::Context>,
     pub(super) token: Option<String>,
     pub(super) role_binding: Option<RoleBinding>,
-    pub(super) pcd_session_key: Option<String>,
-    pub(super) pcd_session_name: Option<String>,
-    pub(super) pcd_session_info: Option<String>,
-    pub(super) pcd_cwd: Option<String>,
+    pub(super) adk_session_key: Option<String>,
+    pub(super) adk_session_name: Option<String>,
+    pub(super) adk_session_info: Option<String>,
+    pub(super) adk_cwd: Option<String>,
     pub(super) dispatch_id: Option<String>,
     pub(super) current_msg_id: MessageId,
     pub(super) response_sent_offset: usize,
@@ -124,10 +124,10 @@ pub(super) fn spawn_turn_bridge(
         let serenity_ctx = bridge.serenity_ctx.clone();
         let token = bridge.token.clone();
         let role_binding = bridge.role_binding.clone();
-        let pcd_session_key = bridge.pcd_session_key.clone();
-        let pcd_session_name = bridge.pcd_session_name.clone();
-        let pcd_session_info = bridge.pcd_session_info.clone();
-        let pcd_cwd = bridge.pcd_cwd.clone();
+        let adk_session_key = bridge.adk_session_key.clone();
+        let adk_session_name = bridge.adk_session_name.clone();
+        let adk_session_info = bridge.adk_session_info.clone();
+        let adk_cwd = bridge.adk_cwd.clone();
         let dispatch_id = bridge.dispatch_id.clone();
 
         let mut full_response = bridge.full_response.clone();
@@ -143,7 +143,7 @@ pub(super) fn spawn_turn_bridge(
         let mut spin_idx: usize = 0;
         let mut restart_followup_pending = false;
         let mut tmux_handed_off = false;
-        let mut last_pcd_heartbeat = std::time::Instant::now();
+        let mut last_adk_heartbeat = std::time::Instant::now();
         let current_msg_id = bridge.current_msg_id;
         let response_sent_offset = bridge.response_sent_offset;
         let mut tmux_last_offset = bridge.tmux_last_offset;
@@ -230,7 +230,7 @@ pub(super) fn spawn_turn_bridge(
                                     ),
                                 );
                                 report.current_msg_id = Some(current_msg_id.get());
-                                report.channel_name = pcd_session_name.clone();
+                                report.channel_name = adk_session_name.clone();
                                 if save_restart_report(&report).is_ok() {
                                     restart_followup_pending = true;
 
@@ -238,14 +238,14 @@ pub(super) fn spawn_turn_bridge(
                                     let handoff = HandoffRecord::new(
                                         &provider,
                                         channel_id.get(),
-                                        pcd_session_name.clone(),
+                                        adk_session_name.clone(),
                                         "재시작 후 수정 내용 확인 및 후속 작업 이어서 진행",
                                         format!(
                                             "재시작 전 사용자 요청: {}\n\n이전 턴의 응답 요약: {}",
                                             user_text_owned,
                                             tail_with_ellipsis(&full_response, 500),
                                         ),
-                                        pcd_cwd.clone(),
+                                        adk_cwd.clone(),
                                         Some(user_msg_id.get()),
                                     );
                                     if let Err(e) = save_handoff(&handoff) {
@@ -480,36 +480,36 @@ pub(super) fn spawn_turn_bridge(
                 let _ = save_inflight_state(&inflight_state);
             }
 
-            if last_pcd_heartbeat.elapsed() >= std::time::Duration::from_secs(30) {
-                post_pcd_session_status(
-                    pcd_session_key.as_deref(),
-                    pcd_session_name.as_deref(),
+            if last_adk_heartbeat.elapsed() >= std::time::Duration::from_secs(30) {
+                post_adk_session_status(
+                    adk_session_key.as_deref(),
+                    adk_session_name.as_deref(),
                     Some(provider.as_str()),
                     "working",
                     &provider,
-                    pcd_session_info.as_deref(),
+                    adk_session_info.as_deref(),
                     None,
-                    pcd_cwd.as_deref(),
+                    adk_cwd.as_deref(),
                     dispatch_id.as_deref(),
                     shared_owned.api_port,
                 )
                 .await;
-                last_pcd_heartbeat = std::time::Instant::now();
+                last_adk_heartbeat = std::time::Instant::now();
             }
         }
 
-        post_pcd_session_status(
-            pcd_session_key.as_deref(),
-            pcd_session_name.as_deref(),
+        post_adk_session_status(
+            adk_session_key.as_deref(),
+            adk_session_name.as_deref(),
             Some(provider.as_str()),
             "idle",
             &provider,
-            pcd_session_info.as_deref(),
+            adk_session_info.as_deref(),
             {
                 let total = accumulated_input_tokens + accumulated_output_tokens;
                 (total > 0).then_some(total)
             },
-            pcd_cwd.as_deref(),
+            adk_cwd.as_deref(),
             dispatch_id.as_deref(),
             shared_owned.api_port,
         )

@@ -487,20 +487,20 @@ pub(super) async fn restore_inflight_turns(
         }
 
         let role_binding = resolve_role_binding(channel_id, channel_name.as_deref());
-        let pcd_session_key = build_pcd_session_key(shared, channel_id, provider).await;
-        let pcd_session_name = channel_name.clone();
-        let pcd_session_info = derive_pcd_session_info(
+        let adk_session_key = build_adk_session_key(shared, channel_id, provider).await;
+        let adk_session_name = channel_name.clone();
+        let adk_session_info = derive_adk_session_info(
             Some(&state.user_text),
             channel_name.as_deref(),
             last_path.as_deref(),
         );
-        post_pcd_session_status(
-            pcd_session_key.as_deref(),
-            pcd_session_name.as_deref(),
+        post_adk_session_status(
+            adk_session_key.as_deref(),
+            adk_session_name.as_deref(),
             Some(provider.as_str()),
             "working",
             provider,
-            Some(&pcd_session_info),
+            Some(&adk_session_info),
             None,
             last_path.as_deref(),
             None, // dispatch_id not available during recovery
@@ -565,10 +565,10 @@ pub(super) async fn restore_inflight_turns(
                 serenity_ctx: None,
                 token: None,
                 role_binding,
-                pcd_session_key,
-                pcd_session_name,
-                pcd_session_info: Some(pcd_session_info),
-                pcd_cwd: last_path.clone(),
+                adk_session_key,
+                adk_session_name,
+                adk_session_info: Some(adk_session_info),
+                adk_cwd: last_path.clone(),
                 dispatch_id: None,
                 current_msg_id,
                 response_sent_offset: state.response_sent_offset,

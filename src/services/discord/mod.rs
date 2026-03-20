@@ -6,7 +6,7 @@ mod inflight;
 mod meeting;
 mod metrics;
 mod org_schema;
-mod pcd;
+mod adk_session;
 mod prompt_builder;
 mod recovery;
 pub(crate) mod restart_report;
@@ -48,8 +48,8 @@ use handoff::{clear_handoff, load_handoffs, update_handoff_state};
 use inflight::{
     InflightTurnState, clear_inflight_state, load_inflight_states, save_inflight_state,
 };
-use pcd::{
-    build_pcd_session_key, derive_pcd_session_info, parse_dispatch_id, post_pcd_session_status,
+use adk_session::{
+    build_adk_session_key, derive_adk_session_info, parse_dispatch_id, post_adk_session_status,
 };
 use prompt_builder::build_system_prompt;
 use recovery::restore_inflight_turns;

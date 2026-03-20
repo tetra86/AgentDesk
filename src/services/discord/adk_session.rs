@@ -24,7 +24,7 @@ pub(super) fn parse_dispatch_id(text: &str) -> Option<String> {
     Some(id.to_string())
 }
 
-pub(super) async fn build_pcd_session_key(
+pub(super) async fn build_adk_session_key(
     shared: &Arc<SharedData>,
     channel_id: serenity::ChannelId,
     provider: &ProviderKind,
@@ -49,7 +49,7 @@ pub(super) async fn build_pcd_session_key(
     Some(format!("{}:{}", hostname, tmux_name))
 }
 
-pub(super) fn derive_pcd_session_info(
+pub(super) fn derive_adk_session_info(
     user_text: Option<&str>,
     channel_name: Option<&str>,
     current_path: Option<&str>,
@@ -85,7 +85,7 @@ pub(super) fn derive_pcd_session_info(
     "AgentDesk 작업 진행 중".to_string()
 }
 
-pub(super) async fn post_pcd_session_status(
+pub(super) async fn post_adk_session_status(
     session_key: Option<&str>,
     name: Option<&str>,
     model: Option<&str>,
@@ -356,11 +356,11 @@ fn clean_nonempty(value: &str) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
-    use super::derive_pcd_session_info;
+    use super::derive_adk_session_info;
 
     #[test]
     fn derive_uses_user_text_when_human_readable() {
-        let summary = derive_pcd_session_info(
+        let summary = derive_adk_session_info(
             Some("회의록 일감 전체 폐기 기능 구현해줘"),
             Some("adk-cdx"),
             Some("/repo"),
@@ -370,7 +370,7 @@ mod tests {
 
     #[test]
     fn derive_skips_raw_commands_and_falls_back() {
-        let summary = derive_pcd_session_info(
+        let summary = derive_adk_session_info(
             Some("cargo test --no-run"),
             Some("adk-cdx"),
             Some("/Users/me/AgentDesk"),
@@ -381,14 +381,14 @@ mod tests {
     #[test]
     fn derive_maps_short_generic_request_to_actionable_fallback() {
         let summary =
-            derive_pcd_session_info(Some("맞춰줘"), Some("adk-cdx"), Some("/Users/me/AgentDesk"));
+            derive_adk_session_info(Some("맞춰줘"), Some("adk-cdx"), Some("/Users/me/AgentDesk"));
         assert_eq!(summary, "AgentDesk 개선 작업 진행 중");
     }
 
     #[test]
     fn derive_maps_short_deploy_request_to_deploy_fallback() {
         let summary =
-            derive_pcd_session_info(Some("배포해"), Some("adk-cdx"), Some("/Users/me/AgentDesk"));
+            derive_adk_session_info(Some("배포해"), Some("adk-cdx"), Some("/Users/me/AgentDesk"));
         assert_eq!(summary, "AgentDesk 배포 작업 진행 중");
     }
 
@@ -435,13 +435,13 @@ mod tests {
         // SESSION_INFO_MAX_CHARS = 60
         // A long user text should be truncated to 60 chars (with ellipsis)
         let long_text = "가나다라마바사아자차카타파하가나다라마바사아자차카타파하가나다라마바사아자차카타파하가나다라마바사아자차카타파하";
-        let summary = derive_pcd_session_info(Some(long_text), None, None);
+        let summary = derive_adk_session_info(Some(long_text), None, None);
         assert!(summary.chars().count() <= 60);
     }
 
     #[test]
-    fn test_build_pcd_session_key_format() {
-        // build_pcd_session_key is async and needs SharedData, so test the format
+    fn test_build_adk_session_key_format() {
+        // build_adk_session_key is async and needs SharedData, so test the format
         // by verifying the components: "hostname:tmux-session"
         // We test the sub-components instead:
         use crate::services::provider::ProviderKind;

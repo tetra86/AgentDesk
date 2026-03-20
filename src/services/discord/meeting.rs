@@ -378,23 +378,23 @@ pub(super) async fn start_meeting(
         .await;
 
     // Update meeting state and notify ADK
-    let pcd_payload = {
+    let adk_payload = {
         let mut core = shared.core.lock().await;
         match core.active_meetings.get_mut(&channel_id) {
             Some(m) if m.id == meeting_id => {
                 m.participants = participants;
                 m.status = MeetingStatus::InProgress;
-                build_pcd_payload(m)
+                build_meeting_status_payload(m)
             }
             _ => return Ok(None),
         }
     };
 
     // POST in_progress status to own HTTP server so office view can show active meeting
-    if let Some(payload) = pcd_payload {
+    if let Some(payload) = adk_payload {
         let port = shared.api_port;
         tokio::spawn(async move {
-            let _ = post_meeting_to_pcd(payload, port).await;
+            let _ = post_meeting_status(payload, port).await;
         });
     }
 
@@ -1202,7 +1202,7 @@ async fn save_meeting_record(
     channel_id: ChannelId,
     expected_id: Option<&str>,
 ) -> Result<bool, Error> {
-    let (md, meeting_id, pcd_payload) = {
+    let (md, meeting_id, adk_payload) = {
         let core = shared.core.lock().await;
         let Some(m) = core
             .active_meetings
@@ -1212,7 +1212,7 @@ async fn save_meeting_record(
             return Ok(false);
         };
 
-        let payload = build_pcd_payload(m);
+        let payload = build_meeting_status_payload(m);
         (build_meeting_markdown(m), m.id.clone(), payload)
     };
 
@@ -1226,10 +1226,10 @@ async fn save_meeting_record(
     fs::write(&path, md)?;
 
     // POST meeting data to own HTTP server (fire-and-forget, ignore errors)
-    if let Some(payload) = pcd_payload {
+    if let Some(payload) = adk_payload {
         let port = shared.api_port;
         tokio::spawn(async move {
-            let _ = post_meeting_to_pcd(payload, port).await;
+            let _ = post_meeting_status(payload, port).await;
         });
     }
 
@@ -1237,7 +1237,7 @@ async fn save_meeting_record(
 }
 
 /// Build ADK API payload from meeting
-fn build_pcd_payload(m: &Meeting) -> Option<serde_json::Value> {
+fn build_meeting_status_payload(m: &Meeting) -> Option<serde_json::Value> {
     let status_str = match &m.status {
         MeetingStatus::Completed => "completed",
         MeetingStatus::Cancelled => "cancelled",
@@ -1287,7 +1287,7 @@ fn build_pcd_payload(m: &Meeting) -> Option<serde_json::Value> {
 }
 
 /// POST meeting data to own HTTP server
-async fn post_meeting_to_pcd(
+async fn post_meeting_status(
     payload: serde_json::Value,
     api_port: u16,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -1472,7 +1472,7 @@ pub(super) async fn handle_meeting_command(
 mod tests {
     use super::{
         ActiveMeetingSlot, Meeting, MeetingStatus, MeetingUtterance, ProviderKind,
-        build_pcd_payload, effective_round_count, meeting_slot_state, parse_meeting_start_text,
+        build_meeting_status_payload, effective_round_count, meeting_slot_state, parse_meeting_start_text,
     };
     use serde_json::json;
 
@@ -1555,7 +1555,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_pcd_payload_uses_effective_round_count() {
+    fn test_build_meeting_status_payload_uses_effective_round_count() {
         let mut meeting = fixture_meeting("mtg-a", MeetingStatus::Cancelled);
         meeting.current_round = 0;
         meeting.transcript.push(MeetingUtterance {
@@ -1565,7 +1565,7 @@ mod tests {
             content: "late round one".to_string(),
         });
 
-        let payload = build_pcd_payload(&meeting).expect("payload");
+        let payload = build_meeting_status_payload(&meeting).expect("payload");
         assert_eq!(payload.get("total_rounds"), Some(&json!(1)));
     }
 }

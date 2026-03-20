@@ -139,7 +139,7 @@ pub(super) async fn handle_event(
             // Prevents the same bot dispatch from starting two parallel turns
             // when Discord delivers the message twice in rapid succession.
             if new_message.author.bot {
-                let dedup_key = if let Some(dispatch_id) = super::pcd::parse_dispatch_id(text) {
+                let dedup_key = if let Some(dispatch_id) = super::adk_session::parse_dispatch_id(text) {
                     format!("dispatch:{}", dispatch_id)
                 } else {
                     use std::hash::{Hash, Hasher};
@@ -881,21 +881,21 @@ pub(super) async fn handle_text_message(
             .map(|name| provider.build_tmux_session_name(name));
         (channel_name, tmux_session_name)
     };
-    let pcd_session_key = build_pcd_session_key(shared, channel_id, &provider).await;
-    let pcd_session_name = channel_name.clone();
-    let pcd_session_info = derive_pcd_session_info(
+    let adk_session_key = build_adk_session_key(shared, channel_id, &provider).await;
+    let adk_session_name = channel_name.clone();
+    let adk_session_info = derive_adk_session_info(
         Some(user_text),
         channel_name.as_deref(),
         Some(&current_path),
     );
     let dispatch_id = parse_dispatch_id(user_text);
-    post_pcd_session_status(
-        pcd_session_key.as_deref(),
-        pcd_session_name.as_deref(),
+    post_adk_session_status(
+        adk_session_key.as_deref(),
+        adk_session_name.as_deref(),
         Some(provider.as_str()),
         "working",
         &provider,
-        Some(&pcd_session_info),
+        Some(&adk_session_info),
         None,
         Some(&current_path),
         dispatch_id.as_deref(),
@@ -1101,10 +1101,10 @@ pub(super) async fn handle_text_message(
             serenity_ctx: Some(ctx.clone()),
             token: Some(token.to_string()),
             role_binding: role_binding.clone(),
-            pcd_session_key,
-            pcd_session_name,
-            pcd_session_info: Some(pcd_session_info),
-            pcd_cwd: Some(current_path.clone()),
+            adk_session_key,
+            adk_session_name,
+            adk_session_info: Some(adk_session_info),
+            adk_cwd: Some(current_path.clone()),
             dispatch_id,
             current_msg_id: placeholder_msg_id,
             response_sent_offset: 0,
