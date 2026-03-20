@@ -258,6 +258,7 @@ pub fn api_router(db: Db, engine: PolicyEngine) -> Router {
         .route("/docs", get(docs::api_docs))
         // Review verdict
         .route("/review-verdict", post(review_verdict::submit_verdict))
+        .layer(axum::middleware::from_fn(auth::auth_middleware))
         .with_state(state)
 }
 
