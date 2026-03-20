@@ -52,7 +52,7 @@ pub fn api_router(db: Db, engine: PolicyEngine) -> Router {
             get(get_agent).patch(update_agent).delete(delete_agent),
         )
         .route("/agents/{id}/offices", get(agents::agent_offices))
-        .route("/agents/{id}/cron", get(agents::agent_cron))
+        .route("/agents/{id}/cron", get(cron_api::agent_cron_jobs))
         .route("/agents/{id}/skills", get(agents::agent_skills))
         .route(
             "/agents/{id}/dispatched-sessions",
