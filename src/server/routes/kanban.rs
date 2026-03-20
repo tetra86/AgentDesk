@@ -570,34 +570,74 @@ pub async fn retry_card(
             );
         }
 
-        // Reset to 'ready' + optionally update assignee
-        // Update assignee if provided, then set status to "requested"
-        // The OnCardTransition hook (kanban-rules.js) will create the dispatch + Discord message
-        let old_status: String = conn
+        // Cancel existing pending dispatch
+        let existing_dispatch_id: Option<String> = conn
             .query_row(
-                "SELECT status FROM kanban_cards WHERE id = ?1",
+                "SELECT latest_dispatch_id FROM kanban_cards WHERE id = ?1",
                 [&id],
                 |row| row.get(0),
             )
-            .unwrap_or_else(|_| "unknown".to_string());
-
-        if let Some(ref agent_id) = body.assignee_agent_id {
+            .ok()
+            .flatten();
+        if let Some(ref did) = existing_dispatch_id {
             conn.execute(
-                "UPDATE kanban_cards SET status = 'requested', assigned_agent_id = ?1, updated_at = datetime('now') WHERE id = ?2",
-                rusqlite::params![agent_id, id],
-            ).ok();
-        } else {
-            conn.execute(
-                "UPDATE kanban_cards SET status = 'requested', updated_at = datetime('now') WHERE id = ?1",
-                [&id],
+                "UPDATE task_dispatches SET status = 'cancelled', updated_at = datetime('now') WHERE id = ?1 AND status = 'pending'",
+                [did],
             ).ok();
         }
 
-        // Fire OnCardTransition hook → policy creates dispatch
-        let _ = state.engine.fire_hook(
-            crate::engine::hooks::Hook::OnCardTransition,
-            json!({ "card_id": id, "from": old_status, "to": "requested" }),
+        // Update assignee if provided, then set status to "requested"
+        let agent_id_for_dispatch: String = if let Some(ref agent_id) = body.assignee_agent_id {
+            conn.execute(
+                "UPDATE kanban_cards SET status = 'requested', assigned_agent_id = ?1, latest_dispatch_id = NULL, updated_at = datetime('now') WHERE id = ?2",
+                rusqlite::params![agent_id, id],
+            ).ok();
+            agent_id.clone()
+        } else {
+            let current: String = conn
+                .query_row("SELECT COALESCE(assigned_agent_id, '') FROM kanban_cards WHERE id = ?1", [&id], |row| row.get(0))
+                .unwrap_or_default();
+            conn.execute(
+                "UPDATE kanban_cards SET status = 'requested', latest_dispatch_id = NULL, updated_at = datetime('now') WHERE id = ?1",
+                [&id],
+            ).ok();
+            current
+        };
+
+        // Get card info for dispatch creation
+        let (card_title, card_id_owned) = (
+            conn.query_row("SELECT title FROM kanban_cards WHERE id = ?1", [&id], |row| row.get::<_, String>(0)).unwrap_or_default(),
+            id.clone(),
         );
+        drop(conn);
+
+        // Create dispatch directly (bypass policy to avoid from===requested skip)
+        if !agent_id_for_dispatch.is_empty() {
+            let _ = crate::dispatch::create_dispatch(
+                &state.db, &state.engine,
+                &card_id_owned, &agent_id_for_dispatch, "implementation", &card_title,
+                &json!({"retry": true}),
+            );
+            // Async Discord notification
+            let db_clone = state.db.clone();
+            tokio::spawn(async move {
+                let dispatch_info: Option<(String, String)> = {
+                    let conn = match db_clone.lock() {
+                        Ok(c) => c,
+                        Err(_) => return,
+                    };
+                    conn.query_row(
+                        "SELECT latest_dispatch_id, title FROM kanban_cards WHERE id = ?1",
+                        [&card_id_owned], |row| Ok((row.get(0)?, row.get(1)?)),
+                    ).ok()
+                };
+                if let Some((dispatch_id, title)) = dispatch_info {
+                    super::dispatches::send_dispatch_to_discord(
+                        &db_clone, &agent_id_for_dispatch, &title, &card_id_owned, &dispatch_id,
+                    ).await;
+                }
+            });
+        }
     } // drop conn lock
 
     // Return updated card
@@ -665,13 +705,45 @@ pub async fn redispatch_card(
             Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("{e}")}))),
         }
 
+        // Get agent + title for direct dispatch creation
+        let (agent_id, card_title): (String, String) = conn
+            .query_row(
+                "SELECT COALESCE(assigned_agent_id, ''), title FROM kanban_cards WHERE id = ?1",
+                [&id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap_or_default();
+        let card_id_owned = id.clone();
         drop(conn);
 
-        // Fire hook → policy creates dispatch
-        let _ = state.engine.fire_hook(
-            crate::engine::hooks::Hook::OnCardTransition,
-            json!({ "card_id": id, "from": old_status, "to": "requested" }),
-        );
+        // Create dispatch directly (bypass policy to avoid from===requested skip)
+        if !agent_id.is_empty() {
+            let _ = crate::dispatch::create_dispatch(
+                &state.db, &state.engine,
+                &card_id_owned, &agent_id, "implementation", &card_title,
+                &json!({"redispatch": true}),
+            );
+            // Async Discord notification
+            let db_clone = state.db.clone();
+            let agent_id_clone = agent_id.clone();
+            tokio::spawn(async move {
+                let dispatch_info: Option<(String, String)> = {
+                    let conn = match db_clone.lock() {
+                        Ok(c) => c,
+                        Err(_) => return,
+                    };
+                    conn.query_row(
+                        "SELECT latest_dispatch_id, title FROM kanban_cards WHERE id = ?1",
+                        [&card_id_owned], |row| Ok((row.get(0)?, row.get(1)?)),
+                    ).ok()
+                };
+                if let Some((dispatch_id, title)) = dispatch_info {
+                    super::dispatches::send_dispatch_to_discord(
+                        &db_clone, &agent_id_clone, &title, &card_id_owned, &dispatch_id,
+                    ).await;
+                }
+            });
+        }
     }
 
     // 2. Return updated card

@@ -1869,32 +1869,34 @@ export default function KanbanTab({
               <div className="rounded-2xl border p-4 bg-white/5 space-y-3" style={{ borderColor: "rgba(148,163,184,0.18)" }}>
                 <div>
                   <h4 className="font-medium" style={{ color: "var(--th-text-heading)" }}>
-                    {tr("재디스패치", "Redispatch")}
+                    {tr("이슈 변경 후 재전송", "Resend with Updated Issue")}
                   </h4>
                   <p className="text-xs" style={{ color: "var(--th-text-muted)" }}>
                     {tr(
-                      "현재 dispatch를 취소하고 업데이트된 이슈 본문으로 새 dispatch를 생성합니다.",
-                      "Cancel current dispatch and create a new one from the updated issue body.",
+                      "이슈 본문을 수정한 뒤, 기존 dispatch를 취소하고 새로 전송합니다.",
+                      "Cancel current dispatch and resend with the updated issue body.",
                     )}
                   </p>
                 </div>
-                <input
-                  type="text"
-                  placeholder={tr("사유 (선택)", "Reason (optional)")}
-                  value={redispatchReason}
-                  onChange={(e) => setRedispatchReason(e.target.value)}
-                  className="w-full rounded-xl px-3 py-2 text-sm bg-white/6 border"
-                  style={{ borderColor: "rgba(148,163,184,0.24)", color: "var(--th-text-primary)" }}
-                />
-                <button
-                  type="button"
-                  onClick={() => void handleRedispatch()}
-                  disabled={redispatching}
-                  className="rounded-xl px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
-                  style={{ backgroundColor: "#d97706" }}
-                >
-                  {redispatching ? tr("재디스패치 중...", "Redispatching...") : tr("재디스패치", "Redispatch")}
-                </button>
+                <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto]">
+                  <input
+                    type="text"
+                    placeholder={tr("사유 (선택)", "Reason (optional)")}
+                    value={redispatchReason}
+                    onChange={(e) => setRedispatchReason(e.target.value)}
+                    className="w-full rounded-xl px-3 py-2 text-sm bg-white/6 border"
+                    style={{ borderColor: "rgba(148,163,184,0.24)", color: "var(--th-text-primary)" }}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => void handleRedispatch()}
+                    disabled={redispatching}
+                    className="rounded-xl px-4 py-2 text-sm font-medium text-white disabled:opacity-50 whitespace-nowrap"
+                    style={{ backgroundColor: "#d97706" }}
+                  >
+                    {redispatching ? tr("전송 중...", "Sending...") : tr("재전송", "Resend")}
+                  </button>
+                </div>
               </div>
             )}
 
@@ -1902,10 +1904,10 @@ export default function KanbanTab({
               <div className="rounded-2xl border p-4 bg-white/5 space-y-3" style={{ borderColor: "rgba(148,163,184,0.18)" }}>
                 <div>
                   <h4 className="font-medium" style={{ color: "var(--th-text-heading)" }}>
-                    {tr("Retry / Failover", "Retry / Failover")}
+                    {tr("재시도 / 담당자 변경", "Retry / Change Assignee")}
                   </h4>
                   <p className="text-xs" style={{ color: "var(--th-text-muted)" }}>
-                    {tr("같은 담당자에게 재요청하거나 다른 담당자로 failover할 수 있습니다.", "Retry with the same assignee or fail over to another agent.")}
+                    {tr("동일 내용으로 재전송하거나 다른 에이전트에게 전환합니다.", "Resend as-is or switch to another agent.")}
                   </p>
                 </div>
                 <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto]">
@@ -1923,10 +1925,10 @@ export default function KanbanTab({
                     type="button"
                     onClick={() => void handleRetryCard()}
                     disabled={retryingCard || !(retryAssigneeId || selectedCard.assignee_agent_id)}
-                    className="rounded-xl px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+                    className="rounded-xl px-4 py-2 text-sm font-medium text-white disabled:opacity-50 whitespace-nowrap"
                     style={{ backgroundColor: "#7c3aed" }}
                   >
-                    {retryingCard ? tr("재요청 중", "Retrying") : tr("즉시 재요청", "Retry now")}
+                    {retryingCard ? tr("전송 중...", "Sending...") : tr("재시도", "Retry")}
                   </button>
                 </div>
               </div>
