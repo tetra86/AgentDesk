@@ -524,6 +524,55 @@ pub async fn get_card_pipeline(
     )
 }
 
+/// GET /api/pipeline/cards/{cardId}/history
+pub async fn get_card_history(
+    State(state): State<AppState>,
+    Path(card_id): Path<String>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let conn = match state.db.lock() {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{e}")})),
+            )
+        }
+    };
+
+    let mut stmt = match conn.prepare(
+        "SELECT id, dispatch_type, status, from_agent_id, to_agent_id, title, result, created_at, updated_at
+         FROM task_dispatches WHERE kanban_card_id = ?1 ORDER BY created_at ASC",
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("prepare: {e}")})),
+            )
+        }
+    };
+
+    let history: Vec<serde_json::Value> = stmt
+        .query_map([&card_id], |row| {
+            Ok(json!({
+                "id": row.get::<_, String>(0)?,
+                "dispatch_type": row.get::<_, Option<String>>(1)?,
+                "status": row.get::<_, Option<String>>(2)?,
+                "from_agent_id": row.get::<_, Option<String>>(3)?,
+                "to_agent_id": row.get::<_, Option<String>>(4)?,
+                "title": row.get::<_, Option<String>>(5)?,
+                "result": row.get::<_, Option<String>>(6)?,
+                "created_at": row.get::<_, Option<String>>(7)?,
+                "updated_at": row.get::<_, Option<String>>(8)?,
+            }))
+        })
+        .ok()
+        .map(|iter| iter.filter_map(|r| r.ok()).collect())
+        .unwrap_or_default();
+
+    (StatusCode::OK, Json(json!({"history": history})))
+}
+
 // ── Helpers ────────────────────────────────────────────────────
 
 fn stage_row_to_json(row: &rusqlite::Row) -> rusqlite::Result<serde_json::Value> {

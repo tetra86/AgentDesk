@@ -3,6 +3,7 @@ use axum::{
     http::StatusCode,
     Json,
 };
+use rusqlite::params;
 use serde::Deserialize;
 use serde_json::json;
 
@@ -26,6 +27,17 @@ pub struct CreateDepartmentBody {
 pub struct UpdateDepartmentBody {
     pub name: Option<String>,
     pub office_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ReorderBody {
+    pub order: Vec<ReorderItem>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ReorderItem {
+    pub id: String,
+    pub sort_order: i32,
 }
 
 // ── Handlers ──────────────────────────────────────────────────
@@ -248,4 +260,53 @@ pub async fn delete_department(
             Json(json!({"error": format!("{e}")})),
         ),
     }
+}
+
+/// PATCH /api/departments/reorder
+pub async fn reorder_departments(
+    State(state): State<AppState>,
+    Json(body): Json<ReorderBody>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let conn = match state.db.lock() {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{e}")})),
+            )
+        }
+    };
+
+    if let Err(e) = conn.execute_batch("BEGIN TRANSACTION") {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("begin tx: {e}")})),
+        );
+    }
+
+    let mut updated = 0usize;
+    for item in &body.order {
+        match conn.execute(
+            "UPDATE departments SET sort_order = ?1 WHERE id = ?2",
+            params![item.sort_order, item.id],
+        ) {
+            Ok(n) => updated += n,
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("update id={}: {e}", item.id)})),
+                );
+            }
+        }
+    }
+
+    if let Err(e) = conn.execute_batch("COMMIT") {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("commit: {e}")})),
+        );
+    }
+
+    (StatusCode::OK, Json(json!({"ok": true, "updated": updated})))
 }

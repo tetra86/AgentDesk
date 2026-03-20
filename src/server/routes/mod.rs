@@ -19,6 +19,8 @@ pub mod skills_api;
 pub mod cron_api;
 pub mod auto_queue;
 pub mod analytics;
+pub mod docs;
+pub mod review_verdict;
 
 use axum::{
     Router,
@@ -82,6 +84,7 @@ pub fn api_router(db: Db, engine: PolicyEngine) -> Router {
         // Pipeline stages (dashboard v2 path)
         .route("/pipeline/stages", get(pipeline::get_stages).put(pipeline::put_stages).delete(pipeline::delete_stages))
         .route("/pipeline/cards/{cardId}", get(pipeline::get_card_pipeline))
+        .route("/pipeline/cards/{cardId}/history", get(pipeline::get_card_history))
         // GitHub repos
         .route("/github/repos", get(github::list_repos).post(github::register_repo))
         .route("/github/repos/{owner}/{repo}/sync", post(github::sync_repo))
@@ -98,6 +101,7 @@ pub fn api_router(db: Db, engine: PolicyEngine) -> Router {
         .route("/offices/{id}/agents/{agentId}", delete(offices::remove_agent).patch(offices::update_office_agent))
         // Departments
         .route("/departments", get(departments::list_departments).post(departments::create_department))
+        .route("/departments/reorder", patch(departments::reorder_departments))
         .route("/departments/{id}", patch(departments::update_department).delete(departments::delete_department))
         // Stats
         .route("/stats", get(stats::get_stats))
@@ -106,6 +110,7 @@ pub fn api_router(db: Db, engine: PolicyEngine) -> Router {
         .route("/settings/runtime-config", get(settings::get_runtime_config).put(settings::put_runtime_config))
         // Dispatched sessions
         .route("/dispatched-sessions", get(dispatched_sessions::list_dispatched_sessions))
+        .route("/dispatched-sessions/cleanup", delete(dispatched_sessions::cleanup_sessions))
         .route("/dispatched-sessions/{id}", patch(dispatched_sessions::update_dispatched_session))
         .route("/hook/session", post(dispatched_sessions::hook_session))
         // Messages
@@ -132,11 +137,19 @@ pub fn api_router(db: Db, engine: PolicyEngine) -> Router {
         .route("/auto-queue/entries/{id}/skip", patch(auto_queue::skip_entry))
         .route("/auto-queue/runs/{id}", patch(auto_queue::update_run))
         .route("/auto-queue/reorder", patch(auto_queue::reorder))
+        .route("/auto-queue/enqueue", post(auto_queue::enqueue))
         // Analytics
         .route("/streaks", get(analytics::streaks))
         .route("/achievements", get(analytics::achievements))
         .route("/activity-heatmap", get(analytics::activity_heatmap))
         .route("/audit-logs", get(analytics::audit_logs))
+        .route("/machine-status", get(analytics::machine_status))
+        .route("/rate-limits", get(analytics::rate_limits))
+        .route("/skills-trend", get(analytics::skills_trend))
+        // Docs
+        .route("/docs", get(docs::api_docs))
+        // Review verdict
+        .route("/review-verdict", post(review_verdict::submit_verdict))
         .with_state(state)
 }
 

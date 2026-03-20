@@ -211,6 +211,29 @@ pub async fn hook_session(
     }
 }
 
+/// DELETE /api/dispatched-sessions/cleanup
+pub async fn cleanup_sessions(
+    State(state): State<AppState>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let conn = match state.db.lock() {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{e}")})),
+            )
+        }
+    };
+
+    match conn.execute("DELETE FROM dispatched_sessions WHERE status = 'disconnected'", []) {
+        Ok(n) => (StatusCode::OK, Json(json!({"ok": true, "deleted": n}))),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("{e}")})),
+        ),
+    }
+}
+
 /// PATCH /api/dispatched-sessions/:id
 pub async fn update_dispatched_session(
     State(state): State<AppState>,

@@ -25,6 +25,9 @@ pub struct HealthRegistry {
     /// Dedicated HTTP client for the announce bot (agent-to-agent routing).
     /// This bot's messages are accepted by all agents' allowed_bot_ids.
     announce_http: tokio::sync::Mutex<Option<Arc<serenity::Http>>>,
+    /// Dedicated HTTP client for the notify bot (info-only notifications).
+    /// Agents do NOT process notify bot messages — use for non-actionable alerts.
+    notify_http: tokio::sync::Mutex<Option<Arc<serenity::Http>>>,
 }
 
 impl HealthRegistry {
@@ -34,6 +37,7 @@ impl HealthRegistry {
             started_at: Instant::now(),
             discord_http: tokio::sync::Mutex::new(Vec::new()),
             announce_http: tokio::sync::Mutex::new(None),
+            notify_http: tokio::sync::Mutex::new(None),
         }
     }
 
@@ -49,20 +53,23 @@ impl HealthRegistry {
 /// Start the health check HTTP server on the given port.
 /// Runs forever — intended to be spawned as a background tokio task.
 pub async fn serve(registry: Arc<HealthRegistry>, port: u16) {
-    // Load announce bot token for agent-to-agent routing.
-    // This bot is separate from claude/codex bots — its messages are in
-    // every agent's allowed_bot_ids, so agents process them.
+    // Load announce + notify bot tokens for message routing.
+    // Announce bot: agent-to-agent (agents process these messages)
+    // Notify bot: info-only alerts (agents do NOT respond)
     if let Some(root) = super::runtime_store::remotecc_root() {
-        let new_path = root.join("credential").join("announce_bot_token");
-        let legacy = root.join("announce_bot_token");
-        let token_path = if new_path.exists() { new_path } else if legacy.exists() { legacy } else { new_path };
-        if let Ok(token) = std::fs::read_to_string(&token_path) {
-            let token = token.trim().to_string();
-            if !token.is_empty() {
-                let http = Arc::new(serenity::Http::new(&format!("Bot {token}")));
-                *registry.announce_http.lock().await = Some(http);
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                println!("  [{ts}] 📢 Announce bot loaded for /api/send routing");
+        for (bot_name, field) in [("announce", &registry.announce_http), ("notify", &registry.notify_http)] {
+            let new_path = root.join("credential").join(format!("{bot_name}_bot_token"));
+            let legacy = root.join(format!("{bot_name}_bot_token"));
+            let token_path = if new_path.exists() { new_path } else if legacy.exists() { legacy } else { new_path };
+            if let Ok(token) = std::fs::read_to_string(&token_path) {
+                let token = token.trim().to_string();
+                if !token.is_empty() {
+                    let http = Arc::new(serenity::Http::new(&format!("Bot {token}")));
+                    *field.lock().await = Some(http);
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    let emoji = if bot_name == "announce" { "📢" } else { "🔔" };
+                    println!("  [{ts}] {emoji} {bot_name} bot loaded for /api/send routing");
+                }
             }
         }
     }
@@ -205,8 +212,29 @@ fn is_healthy_inner(providers: &[ProviderEntry]) -> bool {
     true
 }
 
+/// Resolve the bot HTTP client by name (announce or notify).
+async fn resolve_bot_http(registry: &HealthRegistry, bot: &str) -> Result<Arc<serenity::Http>, (&'static str, String)> {
+    let (lock, bot_label) = match bot {
+        "notify" => (&registry.notify_http, "notify"),
+        _ => (&registry.announce_http, "announce"),
+    };
+    let guard = lock.lock().await;
+    match guard.as_ref() {
+        Some(http) => {
+            let http = http.clone();
+            drop(guard);
+            Ok(http)
+        }
+        None => {
+            drop(guard);
+            Err(("503 Service Unavailable",
+                format!(r#"{{"ok":false,"error":"{bot_label} bot not configured (missing credential/{bot_label}_bot_token)"}}"#)))
+        }
+    }
+}
+
 /// Handle POST /api/send — agent-to-agent native routing.
-/// Accepts JSON: {"target":"channel:<id>", "content":"...", "source":"role-id"}
+/// Accepts JSON: {"target":"channel:<id>", "content":"...", "source":"role-id", "bot":"announce|notify"}
 async fn handle_send<'a>(registry: &HealthRegistry, body: &str) -> (&'a str, String) {
     let Ok(json) = serde_json::from_str::<serde_json::Value>(body) else {
         return ("400 Bad Request", r#"{"ok":false,"error":"invalid JSON"}"#.to_string());
@@ -215,6 +243,7 @@ async fn handle_send<'a>(registry: &HealthRegistry, body: &str) -> (&'a str, Str
     let target = json.get("target").and_then(|v| v.as_str()).unwrap_or("");
     let content = json.get("content").and_then(|v| v.as_str()).unwrap_or("");
     let source = json.get("source").and_then(|v| v.as_str()).unwrap_or("unknown");
+    let bot = json.get("bot").and_then(|v| v.as_str()).unwrap_or("announce");
 
     if content.is_empty() {
         return ("400 Bad Request", r#"{"ok":false,"error":"content is required"}"#.to_string());
@@ -246,16 +275,11 @@ async fn handle_send<'a>(registry: &HealthRegistry, body: &str) -> (&'a str, Str
         return ("403 Forbidden", r#"{"ok":false,"error":"channel not in role-map"}"#.to_string());
     }
 
-    // Use the dedicated announce bot for agent-to-agent routing.
-    // The announce bot is in every agent's allowed_bot_ids, so agents process
-    // its messages. Claude/codex bots ignore their own messages (mod.rs:552).
-    let announce = registry.announce_http.lock().await;
-    let Some(http) = announce.as_ref() else {
-        return ("503 Service Unavailable",
-            r#"{"ok":false,"error":"announce bot not configured (missing ~/.remotecc/credential/announce_bot_token)"}"#.to_string());
+    // Select bot: "announce" (default, agents respond) or "notify" (info-only, agents ignore)
+    let http = match resolve_bot_http(registry, bot).await {
+        Ok(h) => h,
+        Err(resp) => return resp,
     };
-    let http = http.clone();
-    drop(announce); // Release lock before await
 
     match channel_id
         .say(&*http, content)
@@ -263,8 +287,9 @@ async fn handle_send<'a>(registry: &HealthRegistry, body: &str) -> (&'a str, Str
     {
         Ok(_) => {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            println!("  [{ts}] 📨 ROUTE: [{source}] → channel {channel_id}");
-            ("200 OK", format!(r#"{{"ok":true,"target":"channel:{}","source":"{}"}}"#, channel_id, source))
+            let emoji = if bot == "notify" { "🔔" } else { "📨" };
+            println!("  [{ts}] {emoji} ROUTE: [{source}] → channel {channel_id} (bot={bot})");
+            ("200 OK", format!(r#"{{"ok":true,"target":"channel:{}","source":"{}","bot":"{}"}}"#, channel_id, source, bot))
         }
         Err(e) => {
             let ts = chrono::Local::now().format("%H:%M:%S");
@@ -274,15 +299,15 @@ async fn handle_send<'a>(registry: &HealthRegistry, body: &str) -> (&'a str, Str
     }
 }
 
-/// Handle POST /api/senddm — send a DM to a Discord user via the announce bot.
-/// When the user replies, the bot's event handler creates a Claude session.
+/// Handle POST /api/senddm — send a DM to a Discord user.
+/// Accepts JSON: {"user_id":"...", "content":"...", "bot":"announce|notify"}
+/// When using announce bot, user replies trigger a Claude session.
 async fn handle_senddm(registry: &HealthRegistry, body: &str) -> (&'static str, String) {
     let parsed: serde_json::Value = match serde_json::from_str(body) {
         Ok(v) => v,
         Err(_) => return ("400 Bad Request", r#"{"ok":false,"error":"invalid JSON"}"#.to_string()),
     };
 
-    let user_id_str = parsed["user_id"].as_str().or_else(|| parsed["user_id"].as_u64().map(|_| "")).unwrap_or("");
     let user_id_raw: u64 = parsed["user_id"]
         .as_str()
         .and_then(|s| s.parse().ok())
@@ -297,13 +322,11 @@ async fn handle_senddm(registry: &HealthRegistry, body: &str) -> (&'static str, 
         _ => return ("400 Bad Request", r#"{"ok":false,"error":"content required"}"#.to_string()),
     };
 
-    let announce = registry.announce_http.lock().await;
-    let Some(http) = announce.as_ref() else {
-        return ("503 Service Unavailable",
-            r#"{"ok":false,"error":"announce bot not configured"}"#.to_string());
+    let bot = parsed["bot"].as_str().unwrap_or("announce");
+    let http = match resolve_bot_http(registry, bot).await {
+        Ok(h) => h,
+        Err(resp) => return resp,
     };
-    let http = http.clone();
-    drop(announce);
 
     use poise::serenity_prelude::{UserId, CreateMessage};
     let user_id = UserId::new(user_id_raw);

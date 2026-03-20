@@ -5,6 +5,7 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::json;
+use std::process::Command;
 
 use super::AppState;
 
@@ -325,4 +326,91 @@ pub async fn audit_logs(
     };
 
     (StatusCode::OK, Json(json!({ "logs": logs })))
+}
+
+/// GET /api/machine-status
+pub async fn machine_status() -> (StatusCode, Json<serde_json::Value>) {
+    let result = tokio::task::spawn_blocking(|| {
+        let machines = vec![
+            ("mac-mini", "mac-mini.local"),
+            ("mac-book", "mac-book.local"),
+        ];
+        let mut results = Vec::new();
+        for (name, host) in machines {
+            let online = Command::new("ping")
+                .args(["-c1", "-W2", host])
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+            results.push(json!({"name": name, "online": online}));
+        }
+        results
+    })
+    .await;
+
+    let machines = result.unwrap_or_default();
+    (StatusCode::OK, Json(json!({"machines": machines})))
+}
+
+/// GET /api/rate-limits (stub)
+pub async fn rate_limits() -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::OK,
+        Json(json!({"rate_limits": [], "note": "not yet implemented"})),
+    )
+}
+
+/// GET /api/skills-trend?days=30
+#[derive(Debug, Deserialize)]
+pub struct SkillsTrendQuery {
+    days: Option<i64>,
+}
+
+pub async fn skills_trend(
+    State(state): State<AppState>,
+    Query(params): Query<SkillsTrendQuery>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let days = params.days.unwrap_or(30).min(90).max(1);
+
+    let conn = match state.db.lock() {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{e}")})),
+            )
+        }
+    };
+
+    let mut stmt = match conn.prepare(
+        "SELECT DATE(used_at) as day, COUNT(*) as count
+         FROM skill_usage
+         WHERE used_at >= datetime('now', '-' || ?1 || ' days')
+         GROUP BY DATE(used_at)
+         ORDER BY day",
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("query prepare failed: {e}")})),
+            )
+        }
+    };
+
+    let rows = stmt
+        .query_map([days], |row| {
+            Ok(json!({
+                "day": row.get::<_, String>(0)?,
+                "count": row.get::<_, i64>(1)?,
+            }))
+        })
+        .ok();
+
+    let trend = match rows {
+        Some(iter) => iter.filter_map(|r| r.ok()).collect::<Vec<_>>(),
+        None => Vec::new(),
+    };
+
+    (StatusCode::OK, Json(json!({"trend": trend})))
 }

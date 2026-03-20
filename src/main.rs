@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 mod cli;
 mod config;
 mod db;
