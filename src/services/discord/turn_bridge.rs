@@ -724,7 +724,9 @@ pub(super) fn spawn_turn_bridge(
             }
         }
 
-        {
+        // Update in-memory session under lock, then do file I/O outside the
+        // lock to avoid blocking other tasks (including health checks).
+        let file_save_info = {
             let mut data = shared_owned.core.lock().await;
             if let Some(session) = data.sessions.get_mut(&channel_id) {
                 if !session.cleared && !is_prompt_too_long {
@@ -741,26 +743,35 @@ pub(super) fn spawn_turn_bridge(
                     });
                     let current_path = session.current_path.clone();
                     let channel_name = session.channel_name.clone();
-                    if let Some(ref path) = current_path {
-                        if let Some(binding) = role_binding.as_ref() {
-                            if let Err(e) = append_shared_memory_turn(
-                                &binding.role_id,
-                                &provider,
-                                channel_id,
-                                channel_name.as_deref(),
-                                path,
-                                Some(request_owner_name.as_str()),
-                                &user_text_owned,
-                                &full_response,
-                            ) {
-                                let ts = chrono::Local::now().format("%H:%M:%S");
-                                println!("  [{ts}]   ⚠ shared memory save failed: {e}");
-                            }
-                        }
-                        save_session_to_file(session, path);
-                    }
+                    current_path.map(|path| {
+                        let snapshot = session.clone();
+                        (path, channel_name, snapshot)
+                    })
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
+        // File I/O runs without holding core lock
+        if let Some((path, channel_name, session_snapshot)) = file_save_info {
+            if let Some(binding) = role_binding.as_ref() {
+                if let Err(e) = append_shared_memory_turn(
+                    &binding.role_id,
+                    &provider,
+                    channel_id,
+                    channel_name.as_deref(),
+                    &path,
+                    Some(request_owner_name.as_str()),
+                    &user_text_owned,
+                    &full_response,
+                ) {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    println!("  [{ts}]   ⚠ shared memory save failed: {e}");
                 }
             }
+            save_session_to_file(&session_snapshot, &path);
         }
 
         // Clear restart report BEFORE clearing inflight state (which removes

@@ -165,6 +165,7 @@ pub(super) fn check_deferred_restart(shared: &SharedData) {
 }
 
 /// Per-channel session state
+#[derive(Clone)]
 pub(super) struct DiscordSession {
     pub(super) session_id: Option<String>,
     pub(super) current_path: Option<String>,

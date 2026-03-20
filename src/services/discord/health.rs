@@ -160,11 +160,26 @@ async fn build_health_json(registry: &HealthRegistry) -> String {
     let mut provider_entries = Vec::new();
 
     for entry in providers.iter() {
-        let data = entry.shared.core.lock().await;
-        let active_turns = data.cancel_tokens.len();
-        let queue_depth: usize = data.intervention_queue.values().map(|q| q.len()).sum();
-        let session_count = data.sessions.len();
-        drop(data);
+        // Use try_lock to avoid blocking the health endpoint when core is
+        // held by a long-running turn.  Fall back to atomic counters so the
+        // health server always responds promptly.
+        let (active_turns, queue_depth, session_count) = match entry.shared.core.try_lock() {
+            Ok(data) => {
+                let at = data.cancel_tokens.len();
+                let qd: usize = data.intervention_queue.values().map(|q| q.len()).sum();
+                let sc = data.sessions.len();
+                (at, qd, sc)
+            }
+            Err(_) => {
+                // Lock contended — approximate from atomics
+                let at = entry
+                    .shared
+                    .global_active
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                    as usize;
+                (at, 0, 0)
+            }
+        };
 
         let restart_pending = entry
             .shared

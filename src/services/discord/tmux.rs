@@ -84,12 +84,17 @@ pub(super) async fn tmux_output_watcher(
         // Snapshot pause epoch — if this changes later, a Discord turn claimed this data
         let epoch_snapshot = pause_epoch.load(Ordering::Relaxed);
 
-        // Check if tmux session is still alive
-        let alive = tokio::task::spawn_blocking({
-            let name = tmux_session_name.clone();
-            move || tmux_session_has_live_pane(&name)
-        })
+        // Check if tmux session is still alive (with timeout to prevent
+        // blocking thread pool exhaustion if tmux hangs)
+        let alive = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            tokio::task::spawn_blocking({
+                let name = tmux_session_name.clone();
+                move || tmux_session_has_live_pane(&name)
+            }),
+        )
         .await
+        .unwrap_or(Ok(false))
         .unwrap_or(false);
 
         if !alive {
@@ -132,23 +137,27 @@ pub(super) async fn tmux_output_watcher(
         }
 
         // Try to read new data from output file
-        let read_result = tokio::task::spawn_blocking({
-            let path = output_path.clone();
-            let offset = current_offset;
-            move || -> Result<(Vec<u8>, u64), String> {
-                let mut file = std::fs::File::open(&path).map_err(|e| format!("open: {}", e))?;
-                file.seek(SeekFrom::Start(offset))
-                    .map_err(|e| format!("seek: {}", e))?;
-                let mut buf = vec![0u8; 16384];
-                let n = file.read(&mut buf).map_err(|e| format!("read: {}", e))?;
-                buf.truncate(n);
-                Ok((buf, offset + n as u64))
-            }
-        })
+        let read_result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            tokio::task::spawn_blocking({
+                let path = output_path.clone();
+                let offset = current_offset;
+                move || -> Result<(Vec<u8>, u64), String> {
+                    let mut file =
+                        std::fs::File::open(&path).map_err(|e| format!("open: {}", e))?;
+                    file.seek(SeekFrom::Start(offset))
+                        .map_err(|e| format!("seek: {}", e))?;
+                    let mut buf = vec![0u8; 16384];
+                    let n = file.read(&mut buf).map_err(|e| format!("read: {}", e))?;
+                    buf.truncate(n);
+                    Ok((buf, offset + n as u64))
+                }
+            }),
+        )
         .await;
 
         let (data, new_offset) = match read_result {
-            Ok(Ok((data, off))) => (data, off),
+            Ok(Ok(Ok((data, off)))) => (data, off),
             _ => {
                 tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
                 continue;
@@ -207,24 +216,27 @@ pub(super) async fn tmux_output_watcher(
                     break;
                 }
 
-                let read_more = tokio::task::spawn_blocking({
-                    let path = output_path.clone();
-                    let offset = current_offset;
-                    move || -> Result<(Vec<u8>, u64), String> {
-                        let mut file =
-                            std::fs::File::open(&path).map_err(|e| format!("open: {}", e))?;
-                        file.seek(SeekFrom::Start(offset))
-                            .map_err(|e| format!("seek: {}", e))?;
-                        let mut buf = vec![0u8; 16384];
-                        let n = file.read(&mut buf).map_err(|e| format!("read: {}", e))?;
-                        buf.truncate(n);
-                        Ok((buf, offset + n as u64))
-                    }
-                })
+                let read_more = tokio::time::timeout(
+                    std::time::Duration::from_secs(10),
+                    tokio::task::spawn_blocking({
+                        let path = output_path.clone();
+                        let offset = current_offset;
+                        move || -> Result<(Vec<u8>, u64), String> {
+                            let mut file =
+                                std::fs::File::open(&path).map_err(|e| format!("open: {}", e))?;
+                            file.seek(SeekFrom::Start(offset))
+                                .map_err(|e| format!("seek: {}", e))?;
+                            let mut buf = vec![0u8; 16384];
+                            let n = file.read(&mut buf).map_err(|e| format!("read: {}", e))?;
+                            buf.truncate(n);
+                            Ok((buf, offset + n as u64))
+                        }
+                    }),
+                )
                 .await;
 
                 match read_more {
-                    Ok(Ok((chunk, off))) if !chunk.is_empty() => {
+                    Ok(Ok(Ok((chunk, off)))) if !chunk.is_empty() => {
                         current_offset = off;
                         all_data.push_str(&String::from_utf8_lossy(&chunk));
                         let (fr, ptl, ae) = process_watcher_lines(
@@ -311,12 +323,15 @@ pub(super) async fn tmux_output_watcher(
             prompt_too_long_killed = true;
 
             let sess = tmux_session_name.clone();
-            let _ = tokio::task::spawn_blocking(move || {
-                record_tmux_exit_reason(&sess, "watcher cleanup: prompt too long");
-                let _ = std::process::Command::new("tmux")
-                    .args(["kill-session", "-t", &sess])
-                    .status();
-            })
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                tokio::task::spawn_blocking(move || {
+                    record_tmux_exit_reason(&sess, "watcher cleanup: prompt too long");
+                    let _ = std::process::Command::new("tmux")
+                        .args(["kill-session", "-t", &sess])
+                        .status();
+                }),
+            )
             .await;
 
             let notice = "⚠️ 컨텍스트 한도 초과로 세션을 초기화했습니다. 다음 메시지부터 새 세션으로 처리됩니다.";
@@ -344,12 +359,15 @@ pub(super) async fn tmux_output_watcher(
             prompt_too_long_killed = true; // reuse flag to suppress duplicate "session ended" message
 
             let sess = tmux_session_name.clone();
-            let _ = tokio::task::spawn_blocking(move || {
-                record_tmux_exit_reason(&sess, "watcher cleanup: authentication failed");
-                let _ = std::process::Command::new("tmux")
-                    .args(["kill-session", "-t", &sess])
-                    .status();
-            })
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                tokio::task::spawn_blocking(move || {
+                    record_tmux_exit_reason(&sess, "watcher cleanup: authentication failed");
+                    let _ = std::process::Command::new("tmux")
+                        .args(["kill-session", "-t", &sess])
+                        .status();
+                }),
+            )
             .await;
 
             let notice = "⚠️ 인증이 만료되었습니다. 세션을 종료합니다.\n관리자가 CLI에서 재인증(`/login`)을 완료한 후 다시 시도해주세요.";
@@ -650,15 +668,18 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
     let provider = shared.settings.read().await.provider.clone();
 
     // List tmux sessions matching our naming convention
-    let output = match tokio::task::spawn_blocking(|| {
-        std::process::Command::new("tmux")
-            .args(["list-sessions", "-F", "#{session_name}"])
-            .output()
-    })
+    let output = match tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        tokio::task::spawn_blocking(|| {
+            std::process::Command::new("tmux")
+                .args(["list-sessions", "-F", "#{session_name}"])
+                .output()
+        }),
+    )
     .await
     {
-        Ok(Ok(o)) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
-        _ => return, // No tmux or no sessions
+        Ok(Ok(Ok(o))) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
+        _ => return, // No tmux, timeout, or no sessions
     };
 
     let agent_sessions: Vec<&str> = output
@@ -913,14 +934,17 @@ pub(super) async fn cleanup_orphan_tmux_sessions(shared: &Arc<SharedData>) {
     let provider = shared.settings.read().await.provider.clone();
     let current_owner_marker = current_tmux_owner_marker();
 
-    let output = match tokio::task::spawn_blocking(|| {
-        std::process::Command::new("tmux")
-            .args(["list-sessions", "-F", "#{session_name}"])
-            .output()
-    })
+    let output = match tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        tokio::task::spawn_blocking(|| {
+            std::process::Command::new("tmux")
+                .args(["list-sessions", "-F", "#{session_name}"])
+                .output()
+        }),
+    )
     .await
     {
-        Ok(Ok(o)) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
+        Ok(Ok(Ok(o))) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
         _ => return,
     };
 
@@ -971,15 +995,19 @@ pub(super) async fn cleanup_orphan_tmux_sessions(shared: &Arc<SharedData>) {
 
     for name in &orphans {
         let name_clone = name.clone();
-        let killed = tokio::task::spawn_blocking(move || {
-            record_tmux_exit_reason(&name_clone, "orphan cleanup: no owning channel session");
-            std::process::Command::new("tmux")
-                .args(["kill-session", "-t", &name_clone])
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false)
-        })
+        let killed = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            tokio::task::spawn_blocking(move || {
+                record_tmux_exit_reason(&name_clone, "orphan cleanup: no owning channel session");
+                std::process::Command::new("tmux")
+                    .args(["kill-session", "-t", &name_clone])
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false)
+            }),
+        )
         .await
+        .unwrap_or(Ok(false))
         .unwrap_or(false);
 
         if killed {
