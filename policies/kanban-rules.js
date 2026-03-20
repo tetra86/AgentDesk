@@ -14,7 +14,7 @@
 function sendDiscordNotification(target, content, bot) {
   try {
     var port = agentdesk.config.get("health_port") || 8798;
-    var body = { target: target, content: content };
+    var body = { target: target, content: content, source: "kanban-rules" };
     if (bot) body.bot = bot;
     agentdesk.http.post("http://127.0.0.1:" + port + "/api/send", body);
   } catch (e) {
@@ -167,20 +167,12 @@ var rules = {
       }
     }
 
-    // ── Gate passed → review or done ──
-    if (card.deferred_dod_json) {
-      agentdesk.db.execute(
-        "UPDATE kanban_cards SET status = 'review', updated_at = datetime('now') WHERE id = ?",
-        [card.id]
-      );
-      agentdesk.log.info("[kanban] " + card.id + " → review (has DoD)");
-    } else {
-      agentdesk.db.execute(
-        "UPDATE kanban_cards SET status = 'done', completed_at = datetime('now'), updated_at = datetime('now') WHERE id = ?",
-        [card.id]
-      );
-      agentdesk.log.info("[kanban] " + card.id + " → done (no DoD)");
-    }
+    // ── Gate passed → always review (counter-model review) ──
+    agentdesk.db.execute(
+      "UPDATE kanban_cards SET status = 'review', updated_at = datetime('now') WHERE id = ?",
+      [card.id]
+    );
+    agentdesk.log.info("[kanban] " + card.id + " → review");
   },
 
   // ── Card Transition — side effects ────────────────────────
@@ -208,27 +200,8 @@ var rules = {
               cards[0].title
             );
             agentdesk.log.info("[kanban] dispatch created: " + dispatchId);
-
-            // Discord notification to assigned agent
-            try {
-              var agentRow = agentdesk.db.query(
-                "SELECT discord_channel_id FROM agents WHERE id = ?",
-                [cards[0].assigned_agent_id]
-              );
-              if (agentRow.length > 0 && agentRow[0].discord_channel_id) {
-                var issueUrl = agentdesk.db.query(
-                  "SELECT github_issue_url FROM kanban_cards WHERE id = ?", [payload.card_id]
-                );
-                var url = (issueUrl.length > 0 && issueUrl[0].github_issue_url) ? "\n" + issueUrl[0].github_issue_url : "";
-                sendDiscordNotification(
-                  "channel:" + agentRow[0].discord_channel_id,
-                  "[Dispatch] " + (cards[0].title || "Dispatch") + url,
-                  "announce"
-                );
-              }
-            } catch (sendErr) {
-              agentdesk.log.warn("[kanban] Discord send failed: " + sendErr);
-            }
+            // Discord notification is handled by the Rust handler (async send_dispatch_to_discord)
+            // to avoid ureq deadlock on tokio runtime.
           } catch (e) {
             agentdesk.log.warn("[kanban] dispatch creation failed: " + e);
           }
