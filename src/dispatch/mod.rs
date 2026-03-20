@@ -45,7 +45,7 @@ pub fn create_dispatch(
 
     // Update kanban card
     conn.execute(
-        "UPDATE kanban_cards SET latest_dispatch_id = ?1, status = 'requested', updated_at = datetime('now') WHERE id = ?2",
+        "UPDATE kanban_cards SET latest_dispatch_id = ?1, status = 'requested', requested_at = datetime('now'), updated_at = datetime('now') WHERE id = ?2",
         rusqlite::params![dispatch_id, kanban_card_id],
     )?;
 
