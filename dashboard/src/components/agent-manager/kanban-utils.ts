@@ -104,7 +104,9 @@ export function formatTs(value: number | null | undefined, locale: UiLanguage): 
   }).format(value);
 }
 
-export function formatIso(value: string | null | undefined, locale: UiLanguage): string {
+export function formatIso(value: string | number | null | undefined, locale: UiLanguage): string {
+  if (value == null) return "-";
+  if (typeof value === "number") return value ? formatTs(value, locale) : "-";
   if (!value) return "-";
   const parsed = new Date(value).getTime();
   if (Number.isNaN(parsed)) return value;

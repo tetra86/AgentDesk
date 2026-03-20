@@ -1895,19 +1895,19 @@ export default function KanbanTab({
             <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4 text-sm">
               <div className="rounded-2xl border p-3 bg-white/5" style={{ borderColor: "rgba(148,163,184,0.18)" }}>
                 <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>{tr("생성", "Created")}</div>
-                <div style={{ color: "var(--th-text-primary)" }}>{formatTs(selectedCard.created_at, locale)}</div>
+                <div style={{ color: "var(--th-text-primary)" }}>{formatIso(selectedCard.created_at, locale)}</div>
               </div>
               <div className="rounded-2xl border p-3 bg-white/5" style={{ borderColor: "rgba(148,163,184,0.18)" }}>
                 <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>{tr("요청", "Requested")}</div>
-                <div style={{ color: "var(--th-text-primary)" }}>{formatTs(selectedCard.requested_at, locale)}</div>
+                <div style={{ color: "var(--th-text-primary)" }}>{formatIso(selectedCard.requested_at, locale)}</div>
               </div>
               <div className="rounded-2xl border p-3 bg-white/5" style={{ borderColor: "rgba(148,163,184,0.18)" }}>
                 <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>{tr("시작", "Started")}</div>
-                <div style={{ color: "var(--th-text-primary)" }}>{formatTs(selectedCard.started_at, locale)}</div>
+                <div style={{ color: "var(--th-text-primary)" }}>{formatIso(selectedCard.started_at, locale)}</div>
               </div>
               <div className="rounded-2xl border p-3 bg-white/5" style={{ borderColor: "rgba(148,163,184,0.18)" }}>
                 <div className="text-xs" style={{ color: "var(--th-text-muted)" }}>{tr("완료", "Completed")}</div>
-                <div style={{ color: "var(--th-text-primary)" }}>{formatTs(selectedCard.completed_at, locale)}</div>
+                <div style={{ color: "var(--th-text-primary)" }}>{formatIso(selectedCard.completed_at, locale)}</div>
               </div>
             </div>
 
