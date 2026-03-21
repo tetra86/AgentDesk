@@ -6,6 +6,7 @@ mod dispatch;
 mod engine;
 mod error;
 mod github;
+pub(crate) mod kanban;
 mod server;
 mod services;
 mod ui;

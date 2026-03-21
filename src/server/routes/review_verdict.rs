@@ -184,11 +184,17 @@ pub async fn submit_review_decision(
                 )
                 .unwrap_or_default();
 
-            conn.execute(
-                "UPDATE kanban_cards SET status = 'in_progress', review_status = 'rework_pending', updated_at = datetime('now') WHERE id = ?1",
-                [&body.card_id],
-            ).ok();
             drop(conn);
+            let _ = crate::kanban::transition_status(
+                &state.db, &state.engine, &body.card_id, "in_progress",
+            );
+            // Set review_status separately (transition_status handles core status only)
+            if let Ok(conn) = state.db.lock() {
+                conn.execute(
+                    "UPDATE kanban_cards SET review_status = 'rework_pending' WHERE id = ?1",
+                    [&body.card_id],
+                ).ok();
+            }
 
             // Create rework dispatch so agent gets a session to do the fix
             if !agent_id.is_empty() {
@@ -267,10 +273,10 @@ pub async fn submit_review_decision(
         }
         "dismiss" => {
             // Agent dismisses review → go to done
-            conn.execute(
-                "UPDATE kanban_cards SET status = 'done', review_status = NULL, completed_at = datetime('now'), updated_at = datetime('now') WHERE id = ?1",
-                [&body.card_id],
-            ).ok();
+            drop(conn);
+            let _ = crate::kanban::transition_status(
+                &state.db, &state.engine, &body.card_id, "done",
+            );
         }
         _ => {}
     }

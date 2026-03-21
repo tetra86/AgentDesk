@@ -350,49 +350,18 @@ pub async fn update_card(
     let new_status = body.status.clone();
     drop(conn);
 
-    // Fire hooks if status changed
+    // Fire hooks if status changed — centralized via kanban::fire_transition_hooks
     if let Some(ref new_s) = new_status {
         if new_s != &old_status {
-            let _ = state.engine.fire_hook(
-                Hook::OnCardTransition,
-                json!({
-                    "card_id": id,
-                    "from": old_status,
-                    "to": new_s,
-                }),
+            crate::kanban::fire_transition_hooks(
+                &state.db, &state.engine, &id, &old_status, new_s,
             );
 
-            // Terminal states
-            let terminal = ["done"];
-            if terminal.contains(&new_s.as_str()) {
-                let _ = state.engine.fire_hook(
-                    Hook::OnCardTerminal,
-                    json!({
-                        "card_id": id,
-                        "status": new_s,
-                    }),
-                );
-            }
-
-            // Fire OnReviewEnter when transitioning to review
-            if new_s == "review" {
-                let _ = state.engine.fire_hook(
-                    Hook::OnReviewEnter,
-                    json!({
-                        "card_id": id,
-                        "from": old_status,
-                    }),
-                );
-            }
-
-            // After hook fires, send Discord notification asynchronously for new dispatches.
-            // Policy creates the dispatch record synchronously; we handle async Discord send here
-            // to avoid ureq deadlock (synchronous HTTP from QuickJS blocks the tokio runtime).
+            // Send Discord notification for new dispatches created by hooks
             if new_s == "requested" || new_s == "review" {
                 let db_clone = state.db.clone();
                 let card_id = id.clone();
                 tokio::spawn(async move {
-                    // Check if the hook created a new dispatch
                     let dispatch_info: Option<(String, String, String)> = {
                         let conn = match db_clone.lock() {
                             Ok(c) => c,

@@ -109,6 +109,19 @@ pub fn complete_dispatch(
         )
         .ok();
 
+    // Capture card status BEFORE hooks fire (so we can detect changes after)
+    let old_status: String = kanban_card_id
+        .as_ref()
+        .and_then(|cid| {
+            conn.query_row(
+                "SELECT status FROM kanban_cards WHERE id = ?1",
+                [cid],
+                |row| row.get(0),
+            )
+            .ok()
+        })
+        .unwrap_or_default();
+
     drop(conn);
 
     // Fire OnDispatchCompleted hook
@@ -121,36 +134,29 @@ pub fn complete_dispatch(
         }),
     );
 
-    // If the policy transitioned the card to "review" (via direct SQL UPDATE),
-    // fire OnReviewEnter so review-automation.js can create a counter-model review.
-    // This is needed because direct DB updates from policies don't trigger Rust hooks.
+    // After OnDispatchCompleted, policies may have changed the card status via kanban.setStatus.
+    // Since setStatus fires hooks internally (via fire_transition_hooks in the wrapper),
+    // we only need to check for status changes made by the wrapper that need post-processing.
+    // The kanban.setStatus wrapper handles OnCardTransition, OnCardTerminal, OnReviewEnter.
+    // However, if the policy used setStatus, the hooks already fired during the hook execution.
+    // We still check for review/done to handle edge cases where hooks create new dispatches.
+    // After OnDispatchCompleted, policies change card status via kanban.setStatus (DB only).
+    // We need to fire transition hooks for the new status since setStatus can't call
+    // engine.fire_hook (it runs inside a hook, no engine reference).
     if let Some(ref card_id) = kanban_card_id {
-        let conn = db.lock().map_err(|e| anyhow::anyhow!("DB lock: {e}"))?;
-        let card_status: Option<String> = conn
-            .query_row(
+        let new_status: Option<String> = {
+            let conn = db.lock().map_err(|e| anyhow::anyhow!("DB lock: {e}"))?;
+            conn.query_row(
                 "SELECT status FROM kanban_cards WHERE id = ?1",
                 [card_id],
                 |row| row.get(0),
             )
-            .ok();
-        drop(conn);
-        if card_status.as_deref() == Some("review") {
-            let _ = engine.fire_hook(
-                Hook::OnReviewEnter,
-                json!({
-                    "card_id": card_id,
-                    "from": "in_progress",
-                }),
-            );
-        }
-        if card_status.as_deref() == Some("done") {
-            let _ = engine.fire_hook(
-                Hook::OnCardTerminal,
-                json!({
-                    "card_id": card_id,
-                    "status": "done",
-                }),
-            );
+            .ok()
+        };
+        if let Some(ref new_s) = new_status {
+            if new_s != &old_status {
+                crate::kanban::fire_transition_hooks(db, engine, card_id, &old_status, new_s);
+            }
         }
     }
 
