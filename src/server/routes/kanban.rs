@@ -388,7 +388,7 @@ pub async fn update_card(
             // After hook fires, send Discord notification asynchronously for new dispatches.
             // Policy creates the dispatch record synchronously; we handle async Discord send here
             // to avoid ureq deadlock (synchronous HTTP from QuickJS blocks the tokio runtime).
-            if new_s == "requested" {
+            if new_s == "requested" || new_s == "review" {
                 let db_clone = state.db.clone();
                 let card_id = id.clone();
                 tokio::spawn(async move {
