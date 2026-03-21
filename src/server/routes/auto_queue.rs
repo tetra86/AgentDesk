@@ -215,6 +215,80 @@ pub async fn generate(
 
     let mode = body.mode.as_deref().unwrap_or("priority-sort");
 
+    // PM-assisted mode: send card list to PMD for async analysis
+    if mode == "pm-assisted" {
+        // Create pending run
+        let run_id = uuid::Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO auto_queue_runs (id, repo, agent_id, status, ai_model, ai_rationale) VALUES (?1, ?2, ?3, 'pending', 'pm-assisted', ?4)",
+            rusqlite::params![run_id, body.repo, body.agent_id, format!("PMD 분석 대기 중 — {}개 카드 제출", cards.len())],
+        ).ok();
+
+        // Collect card info for PMD request
+        let mut card_summaries = Vec::new();
+        for (card_id, agent_id, priority) in &cards {
+            let (title, issue_num): (String, Option<i64>) = conn
+                .query_row(
+                    "SELECT title, github_issue_number FROM kanban_cards WHERE id = ?1",
+                    [card_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap_or_default();
+            card_summaries.push(format!(
+                "- #{} {} (priority: {}, agent: {})",
+                issue_num.unwrap_or(0), title, priority, agent_id
+            ));
+        }
+
+        let run_id_for_spawn = run_id.clone();
+        let card_list_text = card_summaries.join("\n");
+        let repo_name = body.repo.clone().unwrap_or_else(|| "all".to_string());
+        drop(stmt);
+        let run = run_to_json(&conn, &run_id);
+        drop(conn);
+
+        // Async: send PMD request via announce bot
+        tokio::spawn(async move {
+            let config = crate::config::load_graceful();
+            let token = match config.discord.bots.get("announce").or_else(|| config.discord.bots.get("command")) {
+                Some(bot) => bot.token.clone(),
+                None => return,
+            };
+
+            // PMD channel ID (cookingheart-pm-cc)
+            let pmd_channel = "1478652416533463101";
+            let message = format!(
+                "[ADK → PMD] 자동큐 순서 분석 요청\n\n\
+                 repo: {}\n\
+                 run_id: {}\n\n\
+                 아래 일감들의 실행 순서를 분석해주세요.\n\
+                 의존관계, 긴급도, 작업 내용을 고려하여 순서를 결정하고,\n\
+                 `POST /api/auto-queue/runs/{}/order`에 결과를 전달해주세요.\n\n\
+                 {}\n\n\
+                 ---\n\
+                 회신: channel:1479671298497183835 | 접두어: [PMD → ADK]",
+                repo_name, run_id_for_spawn, run_id_for_spawn, card_list_text
+            );
+
+            let client = reqwest::Client::new();
+            let _ = client
+                .post(format!("https://discord.com/api/v10/channels/{pmd_channel}/messages"))
+                .header("Authorization", format!("Bot {}", token))
+                .json(&serde_json::json!({"content": message}))
+                .send()
+                .await;
+        });
+
+        return (
+            StatusCode::OK,
+            Json(json!({
+                "run": run,
+                "entries": [],
+                "message": "PMD 분석 요청 전송됨. 응답 대기 중.",
+            })),
+        );
+    }
+
     // Dependency-aware mode: filter out cards with incomplete dependencies
     let (filtered_cards, excluded_count) = if mode == "dependency-aware" {
         let mut filtered = Vec::new();
@@ -887,5 +961,102 @@ pub async fn enqueue(
     (
         StatusCode::OK,
         Json(json!({"ok": true, "card_id": card_id, "agent_id": agent_id})),
+    )
+}
+
+// ── PM-assisted callback ─────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct OrderBody {
+    /// Ordered list of GitHub issue numbers (or card IDs)
+    pub order: Vec<serde_json::Value>,
+    pub rationale: Option<String>,
+}
+
+/// POST /api/auto-queue/runs/:id/order
+/// Callback from PMD: provides the ordered card list for a pending run.
+pub async fn submit_order(
+    State(state): State<AppState>,
+    Path(run_id): Path<String>,
+    Json(body): Json<OrderBody>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let conn = match state.db.lock() {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{e}")})),
+            )
+        }
+    };
+    ensure_tables(&conn);
+
+    // Verify run exists and is pending
+    let run_status: Option<String> = conn
+        .query_row(
+            "SELECT status FROM auto_queue_runs WHERE id = ?1",
+            [&run_id],
+            |row| row.get(0),
+        )
+        .ok();
+
+    if run_status.as_deref() != Some("pending") {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "run not found or not pending"})),
+        );
+    }
+
+    // Create entries from the ordered list
+    let mut created = 0;
+    for (rank, item) in body.order.iter().enumerate() {
+        // Item can be issue number (i64) or card_id (string)
+        let card_id: Option<String> = if let Some(num) = item.as_i64() {
+            conn.query_row(
+                "SELECT id FROM kanban_cards WHERE github_issue_number = ?1",
+                [num],
+                |row| row.get(0),
+            )
+            .ok()
+        } else if let Some(id) = item.as_str() {
+            Some(id.to_string())
+        } else {
+            None
+        };
+
+        let Some(card_id) = card_id else { continue };
+
+        let agent_id: String = conn
+            .query_row(
+                "SELECT COALESCE(assigned_agent_id, '') FROM kanban_cards WHERE id = ?1",
+                [&card_id],
+                |row| row.get(0),
+            )
+            .unwrap_or_default();
+
+        let entry_id = uuid::Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, priority_rank)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![entry_id, run_id, card_id, agent_id, rank as i64],
+        )
+        .ok();
+        created += 1;
+    }
+
+    // Update run: pending → active, set rationale
+    let rationale = body
+        .rationale
+        .as_deref()
+        .unwrap_or("PMD 분석 완료");
+    conn.execute(
+        "UPDATE auto_queue_runs SET status = 'active', ai_rationale = ?1 WHERE id = ?2",
+        rusqlite::params![rationale, run_id],
+    )
+    .ok();
+
+    (
+        StatusCode::OK,
+        Json(json!({"ok": true, "created": created, "run_id": run_id})),
     )
 }
