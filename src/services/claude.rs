@@ -77,6 +77,7 @@ fn get_claude_path() -> Option<&'static str> {
     CLAUDE_PATH.get_or_init(|| resolve_claude_path()).as_deref()
 }
 
+#[cfg(unix)]
 use crate::services::tmux_common::{tmux_owner_path, write_tmux_owner_marker};
 
 /// Global runtime debug flag — togglable via `/debug` command or COKACDIR_DEBUG=1 env var.
@@ -260,6 +261,7 @@ fn tmux_capture_indicates_ready_for_input(capture: &str) -> bool {
         .any(|l| l.contains("Ready for input (type message + Enter)"))
 }
 
+#[cfg(unix)]
 pub(crate) fn tmux_session_ready_for_input(tmux_session_name: &str) -> bool {
     Command::new("tmux")
         .args(["capture-pane", "-p", "-t", tmux_session_name, "-S", "-80"])
@@ -271,6 +273,11 @@ pub(crate) fn tmux_session_ready_for_input(tmux_session_name: &str) -> bool {
             tmux_capture_indicates_ready_for_input(&stdout)
         })
         .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+pub(crate) fn tmux_session_ready_for_input(_tmux_session_name: &str) -> bool {
+    false
 }
 
 /// Token for cooperative cancellation of streaming requests.
@@ -299,10 +306,17 @@ impl CancelToken {
         self.cancelled
             .store(true, std::sync::atomic::Ordering::Relaxed);
         if let Some(name) = self.tmux_session.lock().unwrap().take() {
-            record_tmux_exit_reason(&name, "explicit cleanup via cancel_with_tmux_cleanup");
-            let _ = Command::new("tmux")
-                .args(["kill-session", "-t", &name])
-                .output();
+            #[cfg(unix)]
+            {
+                record_tmux_exit_reason(&name, "explicit cleanup via cancel_with_tmux_cleanup");
+                let _ = Command::new("tmux")
+                    .args(["kill-session", "-t", &name])
+                    .output();
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = &name; // suppress unused warning
+            }
         }
     }
 }
@@ -673,12 +687,41 @@ IMPORTANT: Format your responses using Markdown for better readability:
         args.push("--input-format".to_string());
         args.push("stream-json".to_string());
 
-        if let Some(profile) = remote_profile {
-            // Remote sessions always use tmux (TmuxBackend only)
-            if is_tmux_available() {
-                debug_log(&format!("Remote tmux session: {}", tmux_name));
-                return execute_streaming_remote_tmux(
-                    profile,
+        #[cfg(unix)]
+        {
+            if let Some(profile) = remote_profile {
+                // Remote sessions always use tmux (TmuxBackend only)
+                if is_tmux_available() {
+                    debug_log(&format!("Remote tmux session: {}", tmux_name));
+                    return execute_streaming_remote_tmux(
+                        profile,
+                        &args,
+                        prompt,
+                        working_dir,
+                        sender,
+                        cancel_token,
+                        tmux_name,
+                    );
+                } else {
+                    debug_log("Remote session requested but tmux not available");
+                }
+            } else if is_tmux_available() {
+                // Local with tmux → TmuxBackend (existing path)
+                debug_log(&format!("TmuxBackend session: {}", tmux_name));
+                return execute_streaming_local_tmux(
+                    &args,
+                    prompt,
+                    working_dir,
+                    sender,
+                    cancel_token,
+                    tmux_name,
+                    report_channel_id,
+                    report_provider,
+                );
+            } else {
+                // Local without tmux → ProcessBackend (new path)
+                debug_log(&format!("ProcessBackend session (no tmux): {}", tmux_name));
+                return execute_streaming_local_process(
                     &args,
                     prompt,
                     working_dir,
@@ -686,25 +729,13 @@ IMPORTANT: Format your responses using Markdown for better readability:
                     cancel_token,
                     tmux_name,
                 );
-            } else {
-                debug_log("Remote session requested but tmux not available");
             }
-        } else if is_tmux_available() {
-            // Local with tmux → TmuxBackend (existing path)
-            debug_log(&format!("TmuxBackend session: {}", tmux_name));
-            return execute_streaming_local_tmux(
-                &args,
-                prompt,
-                working_dir,
-                sender,
-                cancel_token,
-                tmux_name,
-                report_channel_id,
-                report_provider,
-            );
-        } else {
-            // Local without tmux → ProcessBackend (new path)
-            debug_log(&format!("ProcessBackend session (no tmux): {}", tmux_name));
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = remote_profile;
+            // No tmux on non-Unix — fall through to ProcessBackend
+            debug_log(&format!("ProcessBackend session (non-unix): {}", tmux_name));
             return execute_streaming_local_process(
                 &args,
                 prompt,
@@ -1846,12 +1877,22 @@ pub(crate) struct SessionProbe {
 
 impl SessionProbe {
     /// Create a tmux-based probe (existing behavior).
+    #[cfg(unix)]
     pub fn tmux(session_name: String) -> Self {
         let name_alive = session_name.clone();
         let name_ready = session_name;
         Self {
             is_alive: Box::new(move || tmux_session_alive(&name_alive)),
             is_ready_for_input: Box::new(move || tmux_session_ready_for_input(&name_ready)),
+        }
+    }
+
+    /// Non-unix stub: tmux is not available.
+    #[cfg(not(unix))]
+    pub fn tmux(_session_name: String) -> Self {
+        Self {
+            is_alive: Box::new(|| false),
+            is_ready_for_input: Box::new(|| false),
         }
     }
 

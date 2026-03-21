@@ -15,6 +15,11 @@ use crate::services::provider::ProviderKind;
 #[cfg(unix)]
 use crate::services::tmux_diagnostics::{tmux_session_exists, tmux_session_has_live_pane};
 
+#[cfg(not(unix))]
+fn tmux_session_has_live_pane(_name: &str) -> bool { false }
+#[cfg(not(unix))]
+fn tmux_session_exists(_name: &str) -> bool { false }
+
 pub(in crate::services::discord) async fn build_health_report(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,

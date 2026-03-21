@@ -4,6 +4,16 @@ use super::*;
 #[cfg(unix)]
 use crate::services::tmux_diagnostics::{build_tmux_death_diagnostic, tmux_session_has_live_pane};
 
+#[cfg(not(unix))]
+fn tmux_session_has_live_pane(_name: &str) -> bool {
+    false
+}
+
+#[cfg(not(unix))]
+fn build_tmux_death_diagnostic(_name: &str, _output_path: Option<&str>) -> Option<String> {
+    None
+}
+
 fn output_has_result_after_offset(output_path: &str, start_offset: u64) -> bool {
     let Ok(bytes) = std::fs::read(output_path) else {
         return false;
@@ -257,12 +267,12 @@ pub(super) async fn restore_inflight_turns(
             .output_path
             .clone()
             .filter(|s| !s.is_empty())
-            .or_else(|| (!fallback_output.is_empty()).then_some(fallback_output.clone()));
+            .or_else(|| if !fallback_output.is_empty() { Some(fallback_output.clone()) } else { None });
         let input_fifo_path = state
             .input_fifo_path
             .clone()
             .filter(|s| !s.is_empty())
-            .or_else(|| (!fallback_input.is_empty()).then_some(fallback_input.clone()));
+            .or_else(|| if !fallback_input.is_empty() { Some(fallback_input.clone()) } else { None });
         // Check exit reason file for post-mortem diagnostics
         if let Some(ref op) = output_path {
             let exit_reason_path = format!("{}.exit_reason", op);

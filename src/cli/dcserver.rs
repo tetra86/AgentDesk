@@ -186,6 +186,11 @@ pub fn update_release_link(link_path: &Path, target: &Path) -> Result<(), String
     symlink(target, link_path).map_err(|e| format!("create symlink failed: {e}"))
 }
 
+#[cfg(not(unix))]
+pub fn update_release_link(_link_path: &Path, _target: &Path) -> Result<(), String> {
+    Err("symlinks not supported on this platform".to_string())
+}
+
 pub fn dcserver_process_running() -> bool {
     !dcserver_instance_pids().is_empty()
 }

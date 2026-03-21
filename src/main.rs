@@ -153,6 +153,7 @@ fn main() -> Result<()> {
                 }
                 return Ok(());
             }
+            #[cfg(unix)]
             "--tmux-wrapper" => {
                 let i = args.iter().position(|a| a == "--tmux-wrapper").unwrap();
                 let mut output_file: Option<String> = None;
@@ -215,6 +216,7 @@ fn main() -> Result<()> {
                 }
                 return Ok(());
             }
+            #[cfg(unix)]
             "--codex-tmux-wrapper" => {
                 let i = args
                     .iter()

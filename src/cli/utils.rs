@@ -190,6 +190,11 @@ fn kill_agentdesk_tmux_sessions_local() -> usize {
     count
 }
 
+#[cfg(not(unix))]
+fn kill_agentdesk_tmux_sessions_local() -> usize {
+    0
+}
+
 fn clean_agentdesk_tmp_files() -> usize {
     let mut count = 0;
     if let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) {

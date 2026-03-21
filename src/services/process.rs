@@ -185,17 +185,33 @@ pub fn kill_process_with_verification(pid: i32, starttime: Option<u64>) -> Resul
 
     verify_process_identity(pid, starttime)?;
 
-    // Use libc kill for safety
-    #[allow(unsafe_code)]
-    let result = unsafe { libc::kill(pid, libc::SIGTERM) };
-    if result == 0 {
-        Ok(())
-    } else {
-        let errno = std::io::Error::last_os_error();
-        match errno.raw_os_error() {
-            Some(libc::ESRCH) => Err("Process not found".to_string()),
-            Some(libc::EPERM) => Err("Permission denied".to_string()),
-            _ => Err(errno.to_string()),
+    #[cfg(unix)]
+    {
+        // Use libc kill for safety
+        #[allow(unsafe_code)]
+        let result = unsafe { libc::kill(pid, libc::SIGTERM) };
+        if result == 0 {
+            Ok(())
+        } else {
+            let errno = std::io::Error::last_os_error();
+            match errno.raw_os_error() {
+                Some(libc::ESRCH) => Err("Process not found".to_string()),
+                Some(libc::EPERM) => Err("Permission denied".to_string()),
+                _ => Err(errno.to_string()),
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        // Use taskkill on Windows
+        let status = Command::new("taskkill")
+            .args(["/PID", &pid.to_string()])
+            .status()
+            .map_err(|e| format!("Failed to execute taskkill: {}", e))?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(format!("taskkill failed with code {:?}", status.code()))
         }
     }
 }
@@ -219,16 +235,32 @@ pub fn force_kill_process_with_verification(
 
     verify_process_identity(pid, starttime)?;
 
-    #[allow(unsafe_code)]
-    let result = unsafe { libc::kill(pid, libc::SIGKILL) };
-    if result == 0 {
-        Ok(())
-    } else {
-        let errno = std::io::Error::last_os_error();
-        match errno.raw_os_error() {
-            Some(libc::ESRCH) => Err("Process not found".to_string()),
-            Some(libc::EPERM) => Err("Permission denied".to_string()),
-            _ => Err(errno.to_string()),
+    #[cfg(unix)]
+    {
+        #[allow(unsafe_code)]
+        let result = unsafe { libc::kill(pid, libc::SIGKILL) };
+        if result == 0 {
+            Ok(())
+        } else {
+            let errno = std::io::Error::last_os_error();
+            match errno.raw_os_error() {
+                Some(libc::ESRCH) => Err("Process not found".to_string()),
+                Some(libc::EPERM) => Err("Permission denied".to_string()),
+                _ => Err(errno.to_string()),
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        // Use taskkill /F for force kill on Windows
+        let status = Command::new("taskkill")
+            .args(["/F", "/PID", &pid.to_string()])
+            .status()
+            .map_err(|e| format!("Failed to execute taskkill: {}", e))?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(format!("taskkill failed with code {:?}", status.code()))
         }
     }
 }

@@ -66,9 +66,7 @@ use shared_memory::{
 };
 #[cfg(unix)]
 use tmux::{cleanup_orphan_tmux_sessions, restore_tmux_watchers, tmux_output_watcher};
-use turn_bridge::{TurnBridgeContext, spawn_turn_bridge};
-#[cfg(unix)]
-use turn_bridge::tmux_runtime_paths;
+use turn_bridge::{TurnBridgeContext, spawn_turn_bridge, tmux_runtime_paths};
 
 pub use settings::{
     load_discord_bot_launch_configs, resolve_discord_bot_provider, resolve_discord_token_by_hash,
@@ -1435,8 +1433,11 @@ pub async fn run_bot(
                         &provider_for_restore,
                     ).await;
 
-                    restore_tmux_watchers(&http_for_tmux, &shared_for_tmux2).await;
-                    cleanup_orphan_tmux_sessions(&shared_for_tmux2).await;
+                    #[cfg(unix)]
+                    {
+                        restore_tmux_watchers(&http_for_tmux, &shared_for_tmux2).await;
+                        cleanup_orphan_tmux_sessions(&shared_for_tmux2).await;
+                    }
 
                     // Execute durable handoffs (post-restart follow-up work)
                     execute_handoff_turns(

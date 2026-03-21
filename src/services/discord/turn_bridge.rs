@@ -21,12 +21,18 @@ pub(super) fn cancel_active_token(token: &Arc<CancelToken>, cleanup_tmux: bool, 
                 .ok()
                 .and_then(|guard| guard.clone())
             {
-                record_tmux_exit_reason(&name, &format!("explicit cleanup via {reason}"));
-                let _ = std::process::Command::new("tmux")
-                    .args(["kill-session", "-t", &name])
-                    .output();
+                #[cfg(unix)]
+                {
+                    record_tmux_exit_reason(&name, &format!("explicit cleanup via {reason}"));
+                    let _ = std::process::Command::new("tmux")
+                        .args(["kill-session", "-t", &name])
+                        .output();
+                }
+                #[cfg(not(unix))]
+                { let _ = &name; }
             }
         } else {
+            #[cfg(unix)]
             if let Some(name) = token
                 .tmux_session
                 .lock()
@@ -46,6 +52,15 @@ pub(super) fn tmux_runtime_paths(tmux_session_name: &str) -> (String, String) {
     (
         session_temp_path(tmux_session_name, "jsonl"),
         session_temp_path(tmux_session_name, "input"),
+    )
+}
+
+#[cfg(not(unix))]
+pub(super) fn tmux_runtime_paths(tmux_session_name: &str) -> (String, String) {
+    let tmp = std::env::temp_dir();
+    (
+        tmp.join(format!("agentdesk-{}.jsonl", tmux_session_name)).display().to_string(),
+        tmp.join(format!("agentdesk-{}.input", tmux_session_name)).display().to_string(),
     )
 }
 
@@ -383,21 +398,24 @@ pub(super) fn spawn_turn_bridge(
                                     turn_delivered: turn_delivered.clone(),
                                 };
                                 shared_owned.tmux_watchers.insert(channel_id, handle);
-                                let http_bg = http.clone();
-                                let shared_bg = shared_owned.clone();
-                                tokio::spawn(tmux_output_watcher(
-                                    channel_id,
-                                    http_bg,
-                                    shared_bg,
-                                    output_path,
-                                    tmux_session_name,
-                                    last_offset,
-                                    cancel,
-                                    paused,
-                                    resume_offset,
-                                    pause_epoch,
-                                    turn_delivered,
-                                ));
+                                #[cfg(unix)]
+                                {
+                                    let http_bg = http.clone();
+                                    let shared_bg = shared_owned.clone();
+                                    tokio::spawn(tmux_output_watcher(
+                                        channel_id,
+                                        http_bg,
+                                        shared_bg,
+                                        output_path,
+                                        tmux_session_name,
+                                        last_offset,
+                                        cancel,
+                                        paused,
+                                        resume_offset,
+                                        pause_epoch,
+                                        turn_delivered,
+                                    ));
+                                }
                             }
                             state_dirty = true;
                         }

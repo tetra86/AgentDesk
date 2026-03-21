@@ -49,6 +49,7 @@ fn get_codex_path() -> Option<&'static str> {
     CODEX_PATH.get_or_init(resolve_codex_path).as_deref()
 }
 
+#[cfg(unix)]
 use crate::services::tmux_common::{tmux_owner_path, write_tmux_owner_marker};
 
 pub fn execute_command_simple(prompt: &str) -> Result<String, String> {
@@ -129,25 +130,28 @@ pub fn execute_command_streaming(
     let prompt = compose_codex_prompt(prompt, system_prompt, allowed_tools);
 
     if let Some(profile) = remote_profile {
-        let use_remote_tmux = tmux_session_name.is_some()
-            && std::env::var("AGENTDESK_CODEX_REMOTE_TMUX")
-                .map(|value| {
-                    let normalized = value.trim().to_ascii_lowercase();
-                    normalized == "1" || normalized == "true" || normalized == "yes"
-                })
-                .unwrap_or(false);
-        if use_remote_tmux {
-            let tmux_name = tmux_session_name.expect("checked is_some above");
-            return execute_streaming_remote_tmux(
-                profile,
-                &prompt,
-                working_dir,
-                sender,
-                cancel_token,
-                tmux_name,
-                report_channel_id,
-                report_provider,
-            );
+        #[cfg(unix)]
+        {
+            let use_remote_tmux = tmux_session_name.is_some()
+                && std::env::var("AGENTDESK_CODEX_REMOTE_TMUX")
+                    .map(|value| {
+                        let normalized = value.trim().to_ascii_lowercase();
+                        normalized == "1" || normalized == "true" || normalized == "yes"
+                    })
+                    .unwrap_or(false);
+            if use_remote_tmux {
+                let tmux_name = tmux_session_name.expect("checked is_some above");
+                return execute_streaming_remote_tmux(
+                    profile,
+                    &prompt,
+                    working_dir,
+                    sender,
+                    cancel_token,
+                    tmux_name,
+                    report_channel_id,
+                    report_provider,
+                );
+            }
         }
         return execute_streaming_remote_direct(
             profile,
@@ -160,6 +164,7 @@ pub fn execute_command_streaming(
     }
 
     if let Some(tmux_name) = tmux_session_name {
+        #[cfg(unix)]
         if claude::is_tmux_available() {
             return execute_streaming_local_tmux(
                 &prompt,
@@ -170,16 +175,15 @@ pub fn execute_command_streaming(
                 report_channel_id,
                 report_provider,
             );
-        } else {
-            // ProcessBackend fallback for Codex (no tmux)
-            return execute_streaming_local_process_codex(
-                &prompt,
-                working_dir,
-                sender,
-                cancel_token,
-                tmux_name,
-            );
         }
+        // ProcessBackend fallback for Codex (no tmux or non-unix)
+        return execute_streaming_local_process_codex(
+            &prompt,
+            working_dir,
+            sender,
+            cancel_token,
+            tmux_name,
+        );
     }
 
     execute_streaming_direct(
