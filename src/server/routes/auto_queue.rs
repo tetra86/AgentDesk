@@ -57,6 +57,8 @@ fn ensure_tables(conn: &rusqlite::Connection) {
             repo        TEXT,
             agent_id    TEXT,
             status      TEXT DEFAULT 'active',
+            ai_model    TEXT,
+            ai_rationale TEXT,
             timeout_minutes INTEGER DEFAULT 120,
             created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
             completed_at DATETIME
@@ -111,6 +113,7 @@ fn entry_to_json(conn: &rusqlite::Connection, entry_id: &str) -> serde_json::Val
 fn run_to_json(conn: &rusqlite::Connection, run_id: &str) -> serde_json::Value {
     conn.query_row(
         "SELECT id, repo, agent_id, status, timeout_minutes,
+                ai_model, ai_rationale,
                 CAST(strftime('%s', created_at) AS INTEGER) * 1000,
                 CASE WHEN completed_at IS NOT NULL THEN CAST(strftime('%s', completed_at) AS INTEGER) * 1000 END
          FROM auto_queue_runs WHERE id = ?1",
@@ -122,10 +125,10 @@ fn run_to_json(conn: &rusqlite::Connection, run_id: &str) -> serde_json::Value {
                 "agent_id": row.get::<_, Option<String>>(2)?,
                 "status": row.get::<_, String>(3)?,
                 "timeout_minutes": row.get::<_, i64>(4)?,
-                "ai_model": null,
-                "ai_rationale": null,
-                "created_at": row.get::<_, Option<i64>>(5)?.unwrap_or(0),
-                "completed_at": row.get::<_, Option<i64>>(6)?,
+                "ai_model": row.get::<_, Option<String>>(5)?,
+                "ai_rationale": row.get::<_, Option<String>>(6)?,
+                "created_at": row.get::<_, Option<i64>>(7)?.unwrap_or(0),
+                "completed_at": row.get::<_, Option<i64>>(8)?,
             }))
         },
     )
@@ -211,9 +214,14 @@ pub async fn generate(
 
     // Create run
     let run_id = uuid::Uuid::new_v4().to_string();
+    let ai_model = "priority-sort";
+    let ai_rationale = format!(
+        "우선순위 기반 정렬 (urgent > high > medium > low), {}개 카드 큐잉",
+        cards.len()
+    );
     conn.execute(
-        "INSERT INTO auto_queue_runs (id, repo, agent_id) VALUES (?1, ?2, ?3)",
-        rusqlite::params![run_id, body.repo, body.agent_id],
+        "INSERT INTO auto_queue_runs (id, repo, agent_id, ai_model, ai_rationale) VALUES (?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params![run_id, body.repo, body.agent_id, ai_model, ai_rationale],
     )
     .ok();
 
