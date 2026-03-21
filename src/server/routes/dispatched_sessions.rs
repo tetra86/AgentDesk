@@ -175,6 +175,22 @@ pub async fn hook_session(
     let status = body.status.as_deref().unwrap_or("working");
     let provider = body.provider.as_deref().unwrap_or("claude");
     let tokens = body.tokens.unwrap_or(0) as i64;
+    let idle_auto_complete_dispatch = if status == "idle" {
+        body.dispatch_id.as_ref().and_then(|did| {
+            conn.query_row(
+                "SELECT dispatch_type, status FROM task_dispatches WHERE id = ?1",
+                [did],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .ok()
+            .and_then(|(dtype, dstatus)| {
+                ((dtype == "implementation" || dtype == "rework") && dstatus == "pending")
+                    .then_some(did.clone())
+            })
+        })
+    } else {
+        None
+    };
 
     let result = conn.execute(
         "INSERT INTO sessions (session_key, agent_id, provider, status, session_info, model, tokens, cwd, active_dispatch_id, last_heartbeat)
@@ -186,7 +202,11 @@ pub async fn hook_session(
            model = COALESCE(excluded.model, sessions.model),
            tokens = CASE WHEN excluded.tokens > 0 THEN excluded.tokens ELSE sessions.tokens END,
            cwd = COALESCE(excluded.cwd, sessions.cwd),
-           active_dispatch_id = COALESCE(excluded.active_dispatch_id, sessions.active_dispatch_id),
+           active_dispatch_id = CASE
+             WHEN excluded.status IN ('idle', 'disconnected') THEN NULL
+             WHEN excluded.active_dispatch_id IS NOT NULL THEN excluded.active_dispatch_id
+             ELSE sessions.active_dispatch_id
+           END,
            agent_id = COALESCE(excluded.agent_id, sessions.agent_id),
            last_heartbeat = datetime('now')",
         rusqlite::params![
@@ -204,16 +224,42 @@ pub async fn hook_session(
 
     match result {
         Ok(_) => {
-            // Capture card status BEFORE hook fires
             let dispatch_id = body.dispatch_id.clone();
+            drop(conn);
+
+            if let Some(ref did) = idle_auto_complete_dispatch {
+                let auto_result = json!({
+                    "auto_completed": true,
+                    "completion_source": "session_idle",
+                });
+                if let Err(e) =
+                    crate::dispatch::complete_dispatch(&state.db, &state.engine, did, &auto_result)
+                {
+                    tracing::warn!(
+                        "[session] Failed to auto-complete dispatch {} on idle: {}",
+                        did,
+                        e
+                    );
+                } else {
+                    tracing::info!(
+                        "[session] Auto-completed dispatch {} on idle session update",
+                        did
+                    );
+                }
+            }
+
+            // Capture card status BEFORE hook fires.
+            // If idle auto-completion created a new review dispatch, `latest_dispatch_id`
+            // has already moved forward and this intentionally becomes `None`.
             let pre_hook_card: Option<(String, String)> = dispatch_id.as_ref().and_then(|did| {
+                let conn = state.db.lock().ok()?;
                 conn.query_row(
                     "SELECT kc.id, kc.status FROM kanban_cards kc WHERE kc.latest_dispatch_id = ?1",
                     [did],
                     |row| Ok((row.get(0)?, row.get(1)?)),
-                ).ok()
+                )
+                .ok()
             });
-            drop(conn);
 
             // Fire OnSessionStatusChange hook for policy engines
             let _ = state.engine.fire_hook(
@@ -237,13 +283,18 @@ pub async fn hook_session(
                             "SELECT status FROM kanban_cards WHERE id = ?1",
                             [card_id],
                             |row| row.get(0),
-                        ).ok()
+                        )
+                        .ok()
                     })
                 };
                 if let Some(ref new_s) = new_card_status {
                     if new_s != old_card_status {
                         crate::kanban::fire_transition_hooks(
-                            &state.db, &state.engine, card_id, old_card_status, new_s,
+                            &state.db,
+                            &state.engine,
+                            card_id,
+                            old_card_status,
+                            new_s,
                         );
                     }
                 }
@@ -279,7 +330,13 @@ pub async fn hook_session(
                                 let did_owned = did.clone();
                                 tokio::spawn(async move {
                                     // Get card info and verdict
-                                    let info: Option<(String, String, String, String, Option<String>)> = {
+                                    let info: Option<(
+                                        String,
+                                        String,
+                                        String,
+                                        String,
+                                        Option<String>,
+                                    )> = {
                                         let conn = match db_clone.lock() {
                                             Ok(c) => c,
                                             Err(_) => return,
@@ -293,18 +350,32 @@ pub async fn hook_session(
                                             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
                                         ).ok()
                                     };
-                                    if let Some((card_id, _agent_id, _title, new_did, result_json)) = &info {
+                                    if let Some((
+                                        card_id,
+                                        _agent_id,
+                                        _title,
+                                        new_did,
+                                        result_json,
+                                    )) = &info
+                                    {
                                         // Extract verdict from result
                                         let verdict = result_json
                                             .as_deref()
-                                            .and_then(|r| serde_json::from_str::<serde_json::Value>(r).ok())
-                                            .and_then(|v| v.get("verdict").and_then(|s| s.as_str()).map(|s| s.to_string()))
+                                            .and_then(|r| {
+                                                serde_json::from_str::<serde_json::Value>(r).ok()
+                                            })
+                                            .and_then(|v| {
+                                                v.get("verdict")
+                                                    .and_then(|s| s.as_str())
+                                                    .map(|s| s.to_string())
+                                            })
                                             .unwrap_or_else(|| "pass".to_string());
 
                                         // Send review result to primary channel
                                         super::dispatches::send_review_result_to_primary(
                                             &db_clone, card_id, &verdict,
-                                        ).await;
+                                        )
+                                        .await;
 
                                         // If a new dispatch was created (e.g., by OnReviewEnter for next round),
                                         // send notification to the appropriate channel
@@ -312,7 +383,8 @@ pub async fn hook_session(
                                             if let Some((_, agent_id, title, _, _)) = &info {
                                                 super::dispatches::send_dispatch_to_discord(
                                                     &db_clone, agent_id, title, card_id, new_did,
-                                                ).await;
+                                                )
+                                                .await;
                                             }
                                         }
                                     }
@@ -434,5 +506,127 @@ pub async fn update_dispatched_session(
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": format!("{e}")})),
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::Db;
+    use crate::engine::PolicyEngine;
+    use std::sync::{Arc, Mutex};
+
+    fn test_db() -> Db {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        crate::db::schema::migrate(&conn).unwrap();
+        Arc::new(Mutex::new(conn))
+    }
+
+    fn test_engine(db: &Db) -> PolicyEngine {
+        let config = crate::config::Config::default();
+        PolicyEngine::new(&config, db.clone()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn idle_hook_completes_pending_implementation_dispatch_and_clears_session_active_dispatch()
+     {
+        let db = test_db();
+        let engine = test_engine(&db);
+        let state = AppState {
+            db: db.clone(),
+            engine,
+        };
+
+        let card_id = "card-1";
+        let dispatch_id = "dispatch-1";
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO kanban_cards (id, title, status, latest_dispatch_id, created_at, updated_at)
+                 VALUES (?1, 'Test Card', 'requested', ?2, datetime('now'), datetime('now'))",
+                rusqlite::params![card_id, dispatch_id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, created_at, updated_at)
+                 VALUES (?1, ?2, 'ch-td', 'implementation', 'pending', 'Test Card', '{}', datetime('now'), datetime('now'))",
+                rusqlite::params![dispatch_id, card_id],
+            )
+            .unwrap();
+        }
+
+        let (working_status, _) = hook_session(
+            State(state.clone()),
+            Json(HookSessionBody {
+                session_key: "session-1".to_string(),
+                status: Some("working".to_string()),
+                provider: Some("claude".to_string()),
+                session_info: Some("working".to_string()),
+                name: None,
+                model: None,
+                tokens: None,
+                cwd: None,
+                dispatch_id: Some(dispatch_id.to_string()),
+            }),
+        )
+        .await;
+        assert_eq!(working_status, StatusCode::OK);
+
+        let (idle_status, _) = hook_session(
+            State(state),
+            Json(HookSessionBody {
+                session_key: "session-1".to_string(),
+                status: Some("idle".to_string()),
+                provider: Some("claude".to_string()),
+                session_info: Some("idle".to_string()),
+                name: None,
+                model: None,
+                tokens: Some(42),
+                cwd: None,
+                dispatch_id: Some(dispatch_id.to_string()),
+            }),
+        )
+        .await;
+        assert_eq!(idle_status, StatusCode::OK);
+
+        let conn = db.lock().unwrap();
+        let card_status: String = conn
+            .query_row(
+                "SELECT status FROM kanban_cards WHERE id = ?1",
+                [card_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let dispatch_status: String = conn
+            .query_row(
+                "SELECT status FROM task_dispatches WHERE id = ?1",
+                [dispatch_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let dispatch_result: Option<String> = conn
+            .query_row(
+                "SELECT result FROM task_dispatches WHERE id = ?1",
+                [dispatch_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let active_dispatch_id: Option<String> = conn
+            .query_row(
+                "SELECT active_dispatch_id FROM sessions WHERE session_key = 'session-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(card_status, "review");
+        assert_eq!(dispatch_status, "completed");
+        assert_eq!(active_dispatch_id, None);
+        assert!(
+            dispatch_result
+                .unwrap_or_default()
+                .contains("\"completion_source\":\"session_idle\"")
+        );
     }
 }

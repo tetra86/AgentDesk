@@ -62,11 +62,8 @@ var rules = {
       agentdesk.log.info("[kanban] " + card.id + " requested → in_progress");
     }
 
-    // idle → review (에이전트 턴 종료)
-    if (payload.status === "idle" && card.status === "in_progress") {
-      agentdesk.kanban.setStatus(card.id, "review");
-      agentdesk.log.info("[kanban] " + card.id + " in_progress → review");
-    }
+    // idle on implementation/rework is handled in Rust hook_session by completing
+    // the pending dispatch first, then letting onDispatchCompleted drive review entry.
 
     // idle + review dispatch → auto-complete with verdict
     // 카운터모델 리뷰 세션이 idle이 되면 디스패치를 자동 완료하고 verdict 전달
