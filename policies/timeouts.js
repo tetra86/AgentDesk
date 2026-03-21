@@ -4,7 +4,7 @@
  *
  * Hook: onTick (1분 간격 — Rust 서버에서 주기적으로 fire)
  *
- * [A] Requested 타임아웃 (45분) → failed
+ * [A] Requested 타임아웃 (45분) → pending_decision
  * [B] In-Progress 스테일 (2시간) → blocked
  * [C] 스테일 리뷰 (dispatch 완료인데 verdict 없음) → pending_decision
  * [D] DoD 대기 타임아웃 (15분) → pending_decision
@@ -13,6 +13,26 @@
  * [G] 스테일 디스패치 정리 (24시간) → failed
  * [H] Stale dispatched 큐 엔트리 진행
  */
+
+// Send notification via notify bot (system alerts, not agent communication)
+function sendNotifyAlert(channelTarget, message) {
+  try {
+    var port = agentdesk.config.get("health_port") || 8798;
+    agentdesk.http.post("http://127.0.0.1:" + port + "/api/send", {
+      target: channelTarget,
+      content: message,
+      bot: "notify",
+      source: "timeouts"
+    });
+  } catch (e) {
+    agentdesk.log.warn("[notify] Alert send failed: " + e);
+  }
+}
+
+// Get PMD channel for alerts
+function getPMDChannel() {
+  return "channel:" + (agentdesk.config.get("pmd_channel_id") || "1478652416533463101");
+}
 
 var timeouts = {
   name: "timeouts",
@@ -39,6 +59,7 @@ var timeouts = {
         [staleRequested[i].id]
       );
       agentdesk.log.warn("[timeout] Card " + staleRequested[i].id + " requested timeout → pending_decision");
+      sendNotifyAlert(getPMDChannel(), "⏰ [Timeout] 카드 " + staleRequested[i].id + " — 45분 대기 → pending_decision");
     }
 
     // ─── [B] In-Progress 스테일 (2시간) ────────────────────
@@ -52,6 +73,7 @@ var timeouts = {
         [staleInProgress[j].id]
       );
       agentdesk.log.warn("[timeout] Card " + staleInProgress[j].id + " in_progress stale → blocked");
+      sendNotifyAlert(getPMDChannel(), "⚠️ [Stalled] 카드 " + staleInProgress[j].id + " — 2시간 이상 진행 없음 → blocked");
     }
 
     // ─── [C] 스테일 리뷰 (dispatch 완료인데 verdict 없음) ──
