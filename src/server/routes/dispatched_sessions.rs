@@ -204,9 +204,18 @@ pub async fn hook_session(
 
     match result {
         Ok(_) => {
-            // Fire OnSessionStatusChange hook for policy engines
+            // Capture card status BEFORE hook fires
             let dispatch_id = body.dispatch_id.clone();
+            let pre_hook_card: Option<(String, String)> = dispatch_id.as_ref().and_then(|did| {
+                conn.query_row(
+                    "SELECT kc.id, kc.status FROM kanban_cards kc WHERE kc.latest_dispatch_id = ?1",
+                    [did],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                ).ok()
+            });
             drop(conn);
+
+            // Fire OnSessionStatusChange hook for policy engines
             let _ = state.engine.fire_hook(
                 crate::engine::hooks::Hook::OnSessionStatusChange,
                 json!({
@@ -218,8 +227,29 @@ pub async fn hook_session(
                 }),
             );
 
-            // After the hook fires, check if the policy auto-completed a review dispatch.
-            // If so, fire OnDispatchCompleted so review-automation.js can process the verdict.
+            // After the hook fires, policies may have changed card status via kanban.setStatus.
+            // Fire transition hooks if status actually changed.
+            if let Some((card_id, old_card_status)) = &pre_hook_card {
+                let new_card_status: Option<String> = {
+                    let conn = state.db.lock().ok();
+                    conn.and_then(|c| {
+                        c.query_row(
+                            "SELECT status FROM kanban_cards WHERE id = ?1",
+                            [card_id],
+                            |row| row.get(0),
+                        ).ok()
+                    })
+                };
+                if let Some(ref new_s) = new_card_status {
+                    if new_s != old_card_status {
+                        crate::kanban::fire_transition_hooks(
+                            &state.db, &state.engine, card_id, old_card_status, new_s,
+                        );
+                    }
+                }
+            }
+
+            // Additional idle-specific: check if the policy auto-completed a review dispatch.
             if status == "idle" {
                 if let Some(ref did) = dispatch_id {
                     let conn = state.db.lock().ok();
