@@ -190,6 +190,7 @@ fn default_agent_prompt(role_id: &str) -> String {
 
 // ── Launchd plist ──────────────────────────────────────────────────
 
+#[cfg(target_os = "macos")]
 fn generate_launchd_plist(home: &Path, agentdesk_bin: &Path) -> String {
     let home_str = home.display();
     let bin_str = agentdesk_bin.display();
@@ -519,58 +520,141 @@ pub fn handle_init(reconfigure: bool) {
             }
         }
 
-        let plist_content = generate_launchd_plist(&home, &agentdesk_bin);
-        let launch_agents = home.join("Library").join("LaunchAgents");
-        fs::create_dir_all(&launch_agents).unwrap();
-        let plist_filename = format!("{}.plist", dcserver::AGENTDESK_DCSERVER_LAUNCHD_LABEL);
-        let plist_path = launch_agents.join(&plist_filename);
-        write_with_backup(&plist_path, &plist_content, reconfigure);
-        println!("  [OK] {}", plist_path.display());
+        // Platform-specific service installation
+        install_service(&home, &agentdesk_bin, reconfigure);
 
-        // Load and start
-        let load_answer = prompt_line("\ndcserver를 지금 시작할까요? (Y/n): ");
-        if load_answer.is_empty() || load_answer.to_lowercase().starts_with('y') {
-            let label = dcserver::AGENTDESK_DCSERVER_LAUNCHD_LABEL;
-            // Unload first if already loaded
-            if dcserver::is_launchd_job_loaded(label) {
-                let _ = std::process::Command::new("launchctl")
-                    .args([
-                        "bootout",
-                        &format!("gui/{}", get_uid()),
-                        &plist_path.to_string_lossy().to_string(),
-                    ])
-                    .status();
-            }
-            let status = std::process::Command::new("launchctl")
+        println!("\n═══════════════════════════════════════");
+        println!("  초기 설정 완료!");
+        println!("═══════════════════════════════════════");
+        println!("\n생성된 파일:");
+        println!("  {} (org.yaml)", root.join("org.yaml").display());
+        println!(
+            "  {} (bot_settings.json)",
+            root.join("bot_settings.json").display()
+        );
+        println!("  {} (prompts)", root.join("prompts").display());
+        println!("\n다음 단계:");
+        println!("  1. 프롬프트 파일을 편집하여 에이전트 성격을 정의하세요");
+        println!("  2. Discord에서 봇에게 메시지를 보내 동작을 확인하세요");
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn install_service(home: &Path, agentdesk_bin: &Path, reconfigure: bool) {
+    let plist_content = generate_launchd_plist(home, agentdesk_bin);
+    let launch_agents = home.join("Library").join("LaunchAgents");
+    fs::create_dir_all(&launch_agents).unwrap();
+    let plist_filename = format!("{}.plist", dcserver::AGENTDESK_DCSERVER_LAUNCHD_LABEL);
+    let plist_path = launch_agents.join(&plist_filename);
+    write_with_backup(&plist_path, &plist_content, reconfigure);
+    println!("  [OK] {}", plist_path.display());
+
+    let load_answer = prompt_line("\ndcserver를 지금 시작할까요? (Y/n): ");
+    if load_answer.is_empty() || load_answer.to_lowercase().starts_with('y') {
+        let label = dcserver::AGENTDESK_DCSERVER_LAUNCHD_LABEL;
+        if dcserver::is_launchd_job_loaded(label) {
+            let _ = std::process::Command::new("launchctl")
                 .args([
-                    "bootstrap",
+                    "bootout",
                     &format!("gui/{}", get_uid()),
                     &plist_path.to_string_lossy().to_string(),
                 ])
                 .status();
-            match status {
-                Ok(s) if s.success() => println!("  [OK] dcserver 시작됨"),
-                _ => println!(
-                    "  [WARN] launchd 등록 실패 — 수동으로 실행: launchctl bootstrap gui/$(id -u) {}",
-                    plist_path.display()
-                ),
-            }
+        }
+        let status = std::process::Command::new("launchctl")
+            .args([
+                "bootstrap",
+                &format!("gui/{}", get_uid()),
+                &plist_path.to_string_lossy().to_string(),
+            ])
+            .status();
+        match status {
+            Ok(s) if s.success() => println!("  [OK] dcserver 시작됨"),
+            _ => println!(
+                "  [WARN] launchd 등록 실패 — 수동으로 실행: launchctl bootstrap gui/$(id -u) {}",
+                plist_path.display()
+            ),
         }
     }
+}
 
-    println!("\n═══════════════════════════════════════");
-    println!("  초기 설정 완료!");
-    println!("═══════════════════════════════════════");
-    println!("\n생성된 파일:");
-    println!("  {} (org.yaml)", root.join("org.yaml").display());
-    println!(
-        "  {} (bot_settings.json)",
-        root.join("bot_settings.json").display()
+#[cfg(target_os = "linux")]
+fn install_service(home: &Path, agentdesk_bin: &Path, _reconfigure: bool) {
+    let service_name = "agentdesk-dcserver";
+    let unit_content = format!(
+        "[Unit]\n\
+         Description=AgentDesk Discord Control Server\n\
+         After=network.target\n\n\
+         [Service]\n\
+         Type=simple\n\
+         ExecStart={} --dcserver\n\
+         Restart=on-failure\n\
+         RestartSec=5\n\
+         Environment=AGENTDESK_ROOT_DIR={}\n\n\
+         [Install]\n\
+         WantedBy=default.target\n",
+        agentdesk_bin.display(),
+        home.join(".agentdesk").display()
     );
-    println!("  {} (prompts)", root.join("prompts").display());
-    println!("\n다음 단계:");
-    println!("  1. 프롬프트 파일을 편집하여 에이전트 성격을 정의하세요");
-    println!("  2. Discord에서 봇에게 메시지를 보내 동작을 확인하세요");
+
+    let user_systemd = home.join(".config").join("systemd").join("user");
+    fs::create_dir_all(&user_systemd).unwrap();
+    let unit_path = user_systemd.join(format!("{service_name}.service"));
+    fs::write(&unit_path, &unit_content).unwrap();
+    println!("  [OK] {}", unit_path.display());
+
+    let load_answer = prompt_line("\ndcserver를 지금 시작할까요? (Y/n): ");
+    if load_answer.is_empty() || load_answer.to_lowercase().starts_with('y') {
+        let _ = std::process::Command::new("systemctl")
+            .args(["--user", "daemon-reload"])
+            .status();
+        let status = std::process::Command::new("systemctl")
+            .args(["--user", "enable", "--now", service_name])
+            .status();
+        match status {
+            Ok(s) if s.success() => println!("  [OK] dcserver 시작됨 (systemd)"),
+            _ => println!("  [WARN] systemd 등록 실패 — 수동: systemctl --user enable --now {service_name}"),
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn install_service(_home: &Path, agentdesk_bin: &Path, _reconfigure: bool) {
+    let service_name = "AgentDeskDcserver";
+    println!("  Windows 서비스 등록:");
+    println!("  NSSM 사용 시:");
+    println!("    nssm install {service_name} \"{}\" --dcserver", agentdesk_bin.display());
+    println!("    nssm start {service_name}");
+    println!("  sc.exe 사용 시:");
+    println!("    sc create {service_name} binPath=\"{} --dcserver\" start=auto", agentdesk_bin.display());
+    println!("    sc start {service_name}");
+
+    let load_answer = prompt_line("\nNSSM으로 지금 등록할까요? (y/N): ");
+    if load_answer.to_lowercase().starts_with('y') {
+        let status = std::process::Command::new("nssm")
+            .args([
+                "install",
+                service_name,
+                &agentdesk_bin.to_string_lossy(),
+                "--dcserver",
+            ])
+            .status();
+        match status {
+            Ok(s) if s.success() => {
+                let _ = std::process::Command::new("nssm")
+                    .args(["start", service_name])
+                    .status();
+                println!("  [OK] dcserver 시작됨 (NSSM)");
+            }
+            _ => println!("  [WARN] NSSM 등록 실패 — nssm이 설치되어 있는지 확인하세요"),
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+fn install_service(_home: &Path, agentdesk_bin: &Path, _reconfigure: bool) {
+    println!("  이 플랫폼에서는 자동 서비스 등록이 지원되지 않습니다.");
+    println!("  수동으로 실행: {} --dcserver", agentdesk_bin.display());
 }
 
 fn write_with_backup(path: &Path, content: &str, reconfigure: bool) {
