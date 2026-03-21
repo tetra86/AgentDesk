@@ -139,7 +139,7 @@ fn run_to_json(conn: &rusqlite::Connection, run_id: &str) -> serde_json::Value {
 // ── Endpoints ────────────────────────────────────────────────────────────────
 
 /// POST /api/auto-queue/generate
-/// Creates a queue run from ready/backlog cards, ordered by priority.
+/// Creates a queue run from ready cards, ordered by priority.
 pub async fn generate(
     State(state): State<AppState>,
     Json(body): Json<GenerateBody>,
@@ -156,7 +156,7 @@ pub async fn generate(
     ensure_tables(&conn);
 
     // Build filter
-    let mut conditions = vec!["kc.status IN ('ready', 'backlog')".to_string()];
+    let mut conditions = vec!["kc.status = 'ready'".to_string()];
     let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
     if let Some(ref repo) = body.repo {
         conditions.push(format!("kc.repo_id = ?{}", params.len() + 1));
