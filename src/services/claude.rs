@@ -48,12 +48,20 @@ fn resolve_claude_path() -> Option<String> {
 
     // Fallback: check known installation paths
     let home = dirs::home_dir().unwrap_or_default();
-    let known_paths = [
+    let mut known_paths = vec![
         home.join(".local/bin/claude"),
         home.join("bin/claude"),
-        std::path::PathBuf::from("/usr/local/bin/claude"),
-        std::path::PathBuf::from("/opt/homebrew/bin/claude"),
     ];
+    #[cfg(unix)]
+    {
+        known_paths.push(std::path::PathBuf::from("/usr/local/bin/claude"));
+        known_paths.push(std::path::PathBuf::from("/opt/homebrew/bin/claude"));
+    }
+    #[cfg(windows)]
+    {
+        known_paths.push(home.join("AppData/Local/Programs/claude/claude.exe"));
+        known_paths.push(std::path::PathBuf::from("C:/Program Files/claude/claude.exe"));
+    }
     for path in &known_paths {
         if path.is_file() {
             return Some(path.display().to_string());
@@ -232,10 +240,12 @@ pub enum ReadOutputResult {
     Cancelled { offset: u64 },
 }
 
+#[cfg(unix)]
 fn tmux_session_alive(tmux_session_name: &str) -> bool {
     tmux_session_has_live_pane(tmux_session_name)
 }
 
+#[cfg(unix)]
 fn tmux_capture_indicates_ready_for_input(capture: &str) -> bool {
     // Only check the last few non-empty lines of the capture.
     // The "Ready for input" prompt from a *previous* turn can linger in
@@ -1416,6 +1426,7 @@ fn parse_stream_message(json: &Value) -> Option<StreamMessage> {
 }
 
 /// Check if tmux is available on the system
+#[cfg(unix)]
 pub fn is_tmux_available() -> bool {
     Command::new("tmux")
         .arg("-V")
@@ -1433,6 +1444,7 @@ pub fn is_tmux_available() -> bool {
 /// - Output: wrapper appends JSON lines to a file; parent reads with polling
 /// - Input (Discord→Claude): parent writes stream-json to INPUT_FIFO
 /// - Input (terminal→Claude): wrapper reads stdin directly
+#[cfg(unix)]
 fn execute_streaming_local_tmux(
     args: &[String],
     prompt: &str,
@@ -1741,6 +1753,7 @@ fn execute_streaming_local_tmux(
 }
 
 /// Send a follow-up message to an existing tmux Claude session.
+#[cfg(unix)]
 fn send_followup_to_tmux(
     prompt: &str,
     output_path: &str,
@@ -2245,6 +2258,7 @@ pub(crate) static PROCESS_HANDLES: std::sync::LazyLock<
 
 /// Execute Claude inside a tmux session on a remote host via SSH.
 /// NOTE: Remote SSH execution is not available in AgentDesk — always returns Err.
+#[cfg(unix)]
 fn execute_streaming_remote_tmux(
     _profile: &RemoteProfile,
     _args: &[String],

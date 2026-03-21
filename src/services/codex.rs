@@ -341,6 +341,7 @@ fn execute_streaming_remote_direct(
     Err("Remote SSH execution is not available in AgentDesk".to_string())
 }
 
+#[cfg(unix)]
 fn execute_streaming_remote_tmux(
     _profile: &RemoteProfile,
     _prompt: &str,
@@ -354,6 +355,7 @@ fn execute_streaming_remote_tmux(
     Err("Remote SSH tmux execution is not available in AgentDesk".to_string())
 }
 
+#[cfg(unix)]
 fn execute_streaming_local_tmux(
     prompt: &str,
     working_dir: &str,
@@ -548,6 +550,7 @@ fn execute_streaming_local_tmux(
     Ok(())
 }
 
+#[cfg(unix)]
 fn send_followup_to_tmux(
     prompt: &str,
     output_path: &str,

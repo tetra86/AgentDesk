@@ -162,6 +162,7 @@ pub fn handle_reset_tmux() {
     println!("Done.");
 }
 
+#[cfg(unix)]
 fn kill_agentdesk_tmux_sessions_local() -> usize {
     let output = match std::process::Command::new("tmux")
         .args(["list-sessions", "-F", "#{session_name}"])

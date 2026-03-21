@@ -17,6 +17,7 @@ pub(crate) const AGENTDESK_DCSERVER_LAUNCHD_LABEL: &str = "com.agentdesk.dcserve
 const AGENTDESK_DCSERVER_LABEL_ENV: &str = "AGENTDESK_DCSERVER_LABEL";
 const AGENTDESK_ROOT_DIR_ENV: &str = "AGENTDESK_ROOT_DIR";
 
+#[cfg(target_os = "macos")]
 pub fn current_launchd_domain() -> Option<String> {
     let output = std::process::Command::new("id").arg("-u").output().ok()?;
     if !output.status.success() {
@@ -29,6 +30,12 @@ pub fn current_launchd_domain() -> Option<String> {
     Some(format!("gui/{}", uid))
 }
 
+#[cfg(not(target_os = "macos"))]
+pub fn current_launchd_domain() -> Option<String> {
+    None
+}
+
+#[cfg(target_os = "macos")]
 pub fn is_launchd_job_loaded(label: &str) -> bool {
     let output = match std::process::Command::new("launchctl").arg("list").output() {
         Ok(output) if output.status.success() => output,
@@ -40,6 +47,12 @@ pub fn is_launchd_job_loaded(label: &str) -> bool {
         .any(|line| line.split_whitespace().last() == Some(label))
 }
 
+#[cfg(not(target_os = "macos"))]
+pub fn is_launchd_job_loaded(_label: &str) -> bool {
+    false
+}
+
+#[cfg(target_os = "macos")]
 pub fn kickstart_launchd_job(label: &str) -> bool {
     let Some(domain) = current_launchd_domain() else {
         return false;
@@ -50,6 +63,11 @@ pub fn kickstart_launchd_job(label: &str) -> bool {
         .status()
         .map(|status| status.success())
         .unwrap_or(false)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn kickstart_launchd_job(_label: &str) -> bool {
+    false
 }
 
 pub fn agentdesk_runtime_root() -> Option<PathBuf> {
@@ -78,6 +96,7 @@ pub fn current_dcserver_root_marker() -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+#[cfg(unix)]
 pub fn dcserver_process_command(pid: u32) -> Option<String> {
     let output = std::process::Command::new("ps")
         .args(["eww", "-o", "command=", "-p", &pid.to_string()])
@@ -93,6 +112,11 @@ pub fn dcserver_process_command(pid: u32) -> Option<String> {
     Some(command)
 }
 
+#[cfg(not(unix))]
+pub fn dcserver_process_command(_pid: u32) -> Option<String> {
+    None
+}
+
 pub fn dcserver_process_matches_instance(command: &str) -> bool {
     let is_dcserver = command.contains("agentdesk dcserver");
     if !is_dcserver {
@@ -105,6 +129,7 @@ pub fn dcserver_process_matches_instance(command: &str) -> bool {
     }
 }
 
+#[cfg(unix)]
 pub fn dcserver_instance_pids() -> Vec<u32> {
     let output = match std::process::Command::new("pgrep")
         .args(["-f", "agentdesk dcserver"])
@@ -124,6 +149,11 @@ pub fn dcserver_instance_pids() -> Vec<u32> {
                 .unwrap_or(false)
         })
         .collect()
+}
+
+#[cfg(not(unix))]
+pub fn dcserver_instance_pids() -> Vec<u32> {
+    Vec::new()
 }
 
 pub fn instance_bot_settings_path() -> Option<PathBuf> {
@@ -241,8 +271,13 @@ pub fn kill_existing_dcserver_processes() {
             continue;
         }
         println!("   Killing existing dcserver (PID {})", pid);
+        #[cfg(unix)]
         let _ = std::process::Command::new("kill")
             .arg(pid.to_string())
+            .status();
+        #[cfg(not(unix))]
+        let _ = std::process::Command::new("taskkill")
+            .args(["/F", "/PID", &pid.to_string()])
             .status();
         killed += 1;
     }
@@ -451,13 +486,26 @@ pub fn handle_restart_dcserver(
             let pid_file = root.join("runtime").join("dcserver.pid");
             if let Ok(pid_str) = fs::read_to_string(&pid_file) {
                 if let Ok(pid) = pid_str.trim().parse::<u32>() {
-                    // Check if process still exists via /bin/kill -0
-                    let status = std::process::Command::new("kill")
-                        .args(["-0", &pid.to_string()])
-                        .stdout(std::process::Stdio::null())
-                        .stderr(std::process::Stdio::null())
-                        .status();
-                    if matches!(status, Ok(s) if !s.success()) {
+                    // Check if process still exists
+                    let process_alive = {
+                        #[cfg(unix)]
+                        {
+                            let status = std::process::Command::new("kill")
+                                .args(["-0", &pid.to_string()])
+                                .stdout(std::process::Stdio::null())
+                                .stderr(std::process::Stdio::null())
+                                .status();
+                            matches!(status, Ok(s) if s.success())
+                        }
+                        #[cfg(not(unix))]
+                        {
+                            let status = std::process::Command::new("tasklist")
+                                .args(["/FI", &format!("PID eq {}", pid), "/NH"])
+                                .output();
+                            matches!(status, Ok(o) if String::from_utf8_lossy(&o.stdout).contains(&pid.to_string()))
+                        }
+                    };
+                    if !process_alive {
                         println!("   ✓ dcserver process exited gracefully");
                         let _ = fs::remove_file(&marker);
                         break;
