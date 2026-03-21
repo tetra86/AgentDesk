@@ -84,13 +84,15 @@ pub(super) async fn handle_event(
                 return Ok(());
             }
 
-            // Handle file attachments first, then continue to text (if any)
+            // Handle file attachments — download regardless of session state
             if !new_message.attachments.is_empty() {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 println!(
                     "  [{ts}] ◀ [{user_name}] Upload: {} file(s)",
                     new_message.attachments.len()
                 );
+                // Ensure session exists before handling uploads
+                auto_restore_session(&data.shared, channel_id, ctx).await;
                 handle_file_upload(ctx, new_message, &data.shared).await?;
             }
 
@@ -1139,19 +1141,7 @@ async fn handle_file_upload(
 ) -> Result<(), Error> {
     let channel_id = msg.channel_id;
 
-    let has_session = {
-        let data = shared.core.lock().await;
-        data.sessions.get(&channel_id).is_some()
-    };
-
-    if !has_session {
-        rate_limit_wait(shared, channel_id).await;
-        let _ = channel_id
-            .say(&ctx.http, "No active session. Use `/start <path>` first.")
-            .await;
-        return Ok(());
-    }
-
+    // Always use the runtime uploads directory (works without session)
     let Some(save_dir) = channel_upload_dir(channel_id) else {
         rate_limit_wait(shared, channel_id).await;
         let _ = channel_id
