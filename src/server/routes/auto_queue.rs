@@ -14,6 +14,7 @@ use super::AppState;
 pub struct GenerateBody {
     pub repo: Option<String>,
     pub agent_id: Option<String>,
+    pub mode: Option<String>, // "priority-sort" (default) or "dependency-aware"
 }
 
 #[derive(Debug, Deserialize)]
@@ -212,22 +213,133 @@ pub async fn generate(
         );
     }
 
+    let mode = body.mode.as_deref().unwrap_or("priority-sort");
+
+    // Dependency-aware mode: filter out cards with incomplete dependencies
+    let (filtered_cards, excluded_count) = if mode == "dependency-aware" {
+        let mut filtered = Vec::new();
+        let mut excluded = 0usize;
+        for (card_id, agent_id, priority) in &cards {
+            // Get GitHub issue body to parse dependencies
+            let issue_body: Option<String> = conn
+                .query_row(
+                    "SELECT github_issue_url FROM kanban_cards WHERE id = ?1",
+                    [card_id],
+                    |row| row.get(0),
+                )
+                .ok()
+                .flatten();
+
+            // Parse dependency issue numbers from ## 의존성 section
+            let dep_numbers = if let Some(ref url) = issue_body {
+                // Get issue number from this card
+                let issue_num: Option<i64> = conn
+                    .query_row(
+                        "SELECT github_issue_number FROM kanban_cards WHERE id = ?1",
+                        [card_id],
+                        |row| row.get(0),
+                    )
+                    .ok()
+                    .flatten();
+
+                // Look for dependencies in kv_meta or card metadata
+                // Parse from GitHub issue body if available via sync
+                let mut deps = Vec::new();
+                if let Some(_num) = issue_num {
+                    // Check if card has metadata with dependencies
+                    let metadata: Option<String> = conn
+                        .query_row(
+                            "SELECT metadata FROM kanban_cards WHERE id = ?1",
+                            [card_id],
+                            |row| row.get(0),
+                        )
+                        .ok()
+                        .flatten();
+                    if let Some(meta) = metadata {
+                        // Parse #N references from metadata
+                        for cap in regex::Regex::new(r"#(\d+)")
+                            .unwrap()
+                            .captures_iter(&meta)
+                        {
+                            if let Ok(n) = cap[1].parse::<i64>() {
+                                deps.push(n);
+                            }
+                        }
+                    }
+                }
+                deps
+            } else {
+                Vec::new()
+            };
+
+            // Check if all dependencies are done
+            let mut all_deps_done = true;
+            for dep_num in &dep_numbers {
+                let dep_status: Option<String> = conn
+                    .query_row(
+                        "SELECT status FROM kanban_cards WHERE github_issue_number = ?1",
+                        [dep_num],
+                        |row| row.get(0),
+                    )
+                    .ok();
+                if dep_status.as_deref() != Some("done") {
+                    all_deps_done = false;
+                    break;
+                }
+            }
+
+            if all_deps_done {
+                filtered.push((card_id.clone(), agent_id.clone(), priority.clone()));
+            } else {
+                excluded += 1;
+            }
+        }
+        (filtered, excluded)
+    } else {
+        (cards.clone(), 0)
+    };
+
+    if filtered_cards.is_empty() {
+        return (
+            StatusCode::OK,
+            Json(json!({
+                "run": null,
+                "entries": [],
+                "message": format!("No cards available ({}개 의존성 미충족으로 제외)", excluded_count)
+            })),
+        );
+    }
+
     // Create run
     let run_id = uuid::Uuid::new_v4().to_string();
-    let ai_model = "priority-sort";
-    let ai_rationale = format!(
-        "우선순위 기반 정렬 (urgent > high > medium > low), {}개 카드 큐잉",
-        cards.len()
-    );
+    let (ai_model, ai_rationale) = if mode == "dependency-aware" {
+        (
+            "dependency-aware-sort",
+            format!(
+                "의존관계 기반 필터링 + 우선순위 정렬. {}개 큐잉, {}개 의존성 미충족 제외",
+                filtered_cards.len(),
+                excluded_count
+            ),
+        )
+    } else {
+        (
+            "priority-sort",
+            format!(
+                "우선순위 기반 정렬 (urgent > high > medium > low), {}개 카드 큐잉",
+                filtered_cards.len()
+            ),
+        )
+    };
+    let ai_model_str = ai_model.to_string();
     conn.execute(
         "INSERT INTO auto_queue_runs (id, repo, agent_id, ai_model, ai_rationale) VALUES (?1, ?2, ?3, ?4, ?5)",
-        rusqlite::params![run_id, body.repo, body.agent_id, ai_model, ai_rationale],
+        rusqlite::params![run_id, body.repo, body.agent_id, ai_model_str, ai_rationale],
     )
     .ok();
 
     // Create entries
     let mut entries = Vec::new();
-    for (rank, (card_id, agent_id, _priority)) in cards.iter().enumerate() {
+    for (rank, (card_id, agent_id, _priority)) in filtered_cards.iter().enumerate() {
         let entry_id = uuid::Uuid::new_v4().to_string();
         let agent = if agent_id.is_empty() {
             body.agent_id.as_deref().unwrap_or("")

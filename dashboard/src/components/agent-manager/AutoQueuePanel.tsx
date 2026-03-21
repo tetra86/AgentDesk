@@ -244,11 +244,15 @@ export default function AutoQueuePanel({ tr, locale, agents, selectedRepo, selec
     return agent ? localeName(locale, agent) : agentId.slice(0, 8);
   };
 
+  const [generateMode, setGenerateMode] = useState<"priority-sort" | "dependency-aware">("priority-sort");
+
   const handleGenerate = async () => {
     setGenerating(true);
     setError(null);
     try {
-      await api.generateAutoQueue(selectedRepo || null, selectedAgentId);
+      // Reset existing queue first, then generate fresh
+      await api.resetAutoQueue();
+      await api.generateAutoQueue(selectedRepo || null, selectedAgentId, generateMode);
       await fetchStatus();
     } catch (e) {
       setError(e instanceof Error ? e.message : tr("큐 생성 실패", "Queue generation failed"));
@@ -380,18 +384,29 @@ export default function AutoQueuePanel({ tr, locale, agents, selectedRepo, selec
             </button>
           )}
           {(!run || run.status === "completed") && (
-            <button
-              onClick={() => void handleGenerate()}
-              disabled={generating}
-              className="text-[11px] px-2.5 py-1 rounded-lg border font-medium"
-              style={{
-                borderColor: "rgba(139,92,246,0.4)",
-                color: "#a78bfa",
-                backgroundColor: "rgba(139,92,246,0.1)",
-              }}
-            >
-              {generating ? tr("AI 분석 중…", "Analyzing…") : tr("큐 생성", "Generate")}
-            </button>
+            <>
+              <select
+                value={generateMode}
+                onChange={(e) => setGenerateMode(e.target.value as "priority-sort" | "dependency-aware")}
+                className="text-[11px] px-2 py-1 rounded-lg border bg-transparent"
+                style={{ borderColor: "rgba(148,163,184,0.22)", color: "var(--th-text-secondary)" }}
+              >
+                <option value="priority-sort">{tr("우선순위 정렬", "Priority Sort")}</option>
+                <option value="dependency-aware">{tr("의존관계 고려", "Dependency Aware")}</option>
+              </select>
+              <button
+                onClick={() => void handleGenerate()}
+                disabled={generating}
+                className="text-[11px] px-2.5 py-1 rounded-lg border font-medium"
+                style={{
+                  borderColor: "rgba(139,92,246,0.4)",
+                  color: "#a78bfa",
+                  backgroundColor: "rgba(139,92,246,0.1)",
+                }}
+              >
+                {generating ? tr("분석 중…", "Analyzing…") : tr("큐 생성", "Generate")}
+              </button>
+            </>
           )}
           {run && (
             <button

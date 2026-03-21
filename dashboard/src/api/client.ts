@@ -917,13 +917,13 @@ export interface AutoQueueStatus {
   agents: Record<string, { pending: number; dispatched: number; done: number; skipped: number }>;
 }
 
-export async function generateAutoQueue(repo?: string | null, agentId?: string | null): Promise<{
+export async function generateAutoQueue(repo?: string | null, agentId?: string | null, mode?: string | null): Promise<{
   run: AutoQueueRun;
   entries: DispatchQueueEntry[];
 }> {
   return request("/api/auto-queue/generate", {
     method: "POST",
-    body: JSON.stringify({ repo: repo ?? null, agent_id: agentId ?? null }),
+    body: JSON.stringify({ repo: repo ?? null, agent_id: agentId ?? null, mode: mode ?? "priority-sort" }),
   });
 }
 
