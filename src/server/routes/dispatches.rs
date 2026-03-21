@@ -451,22 +451,21 @@ pub(super) async fn send_dispatch_to_discord(
         }
     };
 
-    // Look up the issue URL for context
-    let issue_url: Option<String> = {
+    // Look up the issue URL and number for context
+    let (issue_url, issue_number): (Option<String>, Option<i64>) = {
         let conn = match db.lock() {
             Ok(c) => c,
             Err(_) => return,
         };
         conn.query_row(
-            "SELECT github_issue_url FROM kanban_cards WHERE id = ?1",
+            "SELECT github_issue_url, github_issue_number FROM kanban_cards WHERE id = ?1",
             [card_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
-        .ok()
-        .flatten()
+        .unwrap_or_default()
     };
 
-    let message = format_dispatch_message(dispatch_id, title, issue_url.as_deref(), use_alt);
+    let message = format_dispatch_message(dispatch_id, title, issue_url.as_deref(), issue_number, use_alt);
 
     // Send via Discord HTTP API using the announce bot
     let config = crate::config::load_graceful();
@@ -662,21 +661,29 @@ fn format_dispatch_message(
     dispatch_id: &str,
     title: &str,
     issue_url: Option<&str>,
+    issue_number: Option<i64>,
     use_alt: bool,
 ) -> String {
+    // Format issue link as markdown hyperlink with angle brackets to suppress embed
+    let issue_link = match (issue_url, issue_number) {
+        (Some(url), Some(num)) => format!("[{title} #{num}](<{url}>)"),
+        (Some(url), None) => format!("[{title}](<{url}>)"),
+        _ => String::new(),
+    };
+
     if use_alt {
         let mut message = format!(
             "DISPATCH:{dispatch_id} - {title}\n\
              ⚠️ 검토 전용 — 작업 착수 금지\n\
              코드 리뷰만 수행하고 GitHub 이슈에 코멘트로 피드백해주세요."
         );
-        if let Some(url) = issue_url {
+        if !issue_link.is_empty() {
             message.push('\n');
-            message.push_str(url);
+            message.push_str(&issue_link);
         }
         message
-    } else if let Some(url) = issue_url {
-        format!("DISPATCH:{dispatch_id} - {title}\n{url}")
+    } else if !issue_link.is_empty() {
+        format!("DISPATCH:{dispatch_id} - {title}\n{issue_link}")
     } else {
         format!("DISPATCH:{dispatch_id} - {title}")
     }
@@ -756,13 +763,14 @@ mod tests {
             "dispatch-1",
             "[Review R1] card-1",
             Some("https://github.com/itismyfield/AgentDesk/issues/19"),
+            Some(19),
             true,
         );
 
         assert!(message.starts_with("DISPATCH:dispatch-1 - [Review R1] card-1"));
         assert!(message.contains("⚠️ 검토 전용"));
         assert!(message.contains("코드 리뷰만 수행하고 GitHub 이슈에 코멘트로 피드백해주세요."));
-        assert!(message.ends_with("https://github.com/itismyfield/AgentDesk/issues/19"));
+        assert!(message.contains("[Review R1] card-1 #19](<https://github.com/itismyfield/AgentDesk/issues/19>)"));
     }
 
     #[test]
@@ -771,13 +779,11 @@ mod tests {
             "dispatch-2",
             "Implement feature",
             Some("https://github.com/itismyfield/AgentDesk/issues/24"),
+            Some(24),
             false,
         );
 
-        assert_eq!(
-            message,
-            "DISPATCH:dispatch-2 - Implement feature\nhttps://github.com/itismyfield/AgentDesk/issues/24"
-        );
+        assert!(message.contains("[Implement feature #24](<https://github.com/itismyfield/AgentDesk/issues/24>)"));
         assert!(!message.contains("검토 전용"));
     }
 }
