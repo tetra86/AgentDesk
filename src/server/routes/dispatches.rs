@@ -688,33 +688,52 @@ fn resolve_channel_alias(alias: &str) -> Option<u64> {
     let content = std::fs::read_to_string(&path).ok()?;
     let json: serde_json::Value = serde_json::from_str(&content).ok()?;
 
-    // role_map.json has byChannelId: { "123456": { roleId, ... } }
-    // and byChannelName: { "adk-cc": { roleId, ... } }
-    // We need to find the numeric ID that maps to the same role as the alias
+    // Strategy 1: Direct lookup in byChannelName → channelId field
     let by_name = json.get("byChannelName")?.as_object()?;
-    let entry = by_name.get(alias)?;
-    let role_id = entry.get("roleId")?.as_str()?;
-
-    // Now find the numeric channel ID with the same roleId and matching provider
-    let provider = entry
-        .get("provider")
-        .and_then(|v| v.as_str())
-        .unwrap_or_else(|| {
-            // Infer provider from channel name convention: *-cdx = codex, *-cc = claude
-            if alias.ends_with("-cdx") {
-                "codex"
-            } else {
-                "claude"
-            }
-        });
-    let by_id = json.get("byChannelId")?.as_object()?;
-    for (ch_id, ch_entry) in by_id {
-        if ch_entry.get("roleId").and_then(|v| v.as_str()) == Some(role_id)
-            && ch_entry.get("provider").and_then(|v| v.as_str()) == Some(provider)
-        {
-            return ch_id.parse().ok();
+    if let Some(entry) = by_name.get(alias) {
+        // If byChannelName entry has a channelId field, use it directly (most reliable)
+        if let Some(id) = entry.get("channelId").and_then(|v| v.as_str()) {
+            return id.parse().ok();
+        }
+        if let Some(id) = entry.get("channelId").and_then(|v| v.as_u64()) {
+            return Some(id);
         }
     }
+
+    // Strategy 2: Search byChannelId for entries whose channel name matches the alias
+    // Each byChannelId entry may have been registered with a channel name
+    let by_id = json.get("byChannelId")?.as_object()?;
+    for (ch_id, ch_entry) in by_id {
+        // Check if this entry's associated channel name matches our alias
+        if let Some(ch_name) = ch_entry.get("channelName").and_then(|v| v.as_str()) {
+            if ch_name == alias {
+                return ch_id.parse().ok();
+            }
+        }
+    }
+
+    // Strategy 3: Fallback — roleId matching (original approach)
+    if let Some(entry) = by_name.get(alias) {
+        let role_id = entry.get("roleId").and_then(|v| v.as_str())?;
+        let provider = entry
+            .get("provider")
+            .and_then(|v| v.as_str());
+        for (ch_id, ch_entry) in by_id {
+            let entry_role = ch_entry.get("roleId").and_then(|v| v.as_str());
+            let entry_provider = ch_entry.get("provider").and_then(|v| v.as_str());
+            if entry_role == Some(role_id) {
+                // If both have provider, must match. If either is missing, accept the match.
+                if let (Some(p1), Some(p2)) = (provider, entry_provider) {
+                    if p1 == p2 {
+                        return ch_id.parse().ok();
+                    }
+                } else {
+                    return ch_id.parse().ok();
+                }
+            }
+        }
+    }
+
     None
 }
 
