@@ -245,6 +245,7 @@ pub fn api_router(db: Db, engine: PolicyEngine) -> Router {
         )
         .route("/auto-queue/runs/{id}", patch(auto_queue::update_run))
         .route("/auto-queue/reorder", patch(auto_queue::reorder))
+        .route("/auto-queue/reset", post(auto_queue::reset))
         .route("/auto-queue/enqueue", post(auto_queue::enqueue))
         // Analytics
         .route("/streaks", get(analytics::streaks))

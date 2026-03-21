@@ -393,6 +393,20 @@ export default function AutoQueuePanel({ tr, locale, agents, selectedRepo, selec
               {generating ? tr("AI 분석 중…", "Analyzing…") : tr("큐 생성", "Generate")}
             </button>
           )}
+          {run && (
+            <button
+              onClick={async () => {
+                try {
+                  await api.resetAutoQueue();
+                  await fetchStatus();
+                } catch { /* ignore */ }
+              }}
+              className="text-[11px] px-2 py-1 rounded-lg border"
+              style={{ borderColor: "rgba(248,113,113,0.3)", color: "#f87171", backgroundColor: "rgba(248,113,113,0.08)" }}
+            >
+              {tr("초기화", "Reset")}
+            </button>
+          )}
           {run?.status === "active" && (
             <button
               onClick={() => void handleRunAction(run, "paused")}

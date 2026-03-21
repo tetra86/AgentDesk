@@ -606,6 +606,42 @@ pub async fn update_run(
     (StatusCode::OK, Json(json!({ "ok": true })))
 }
 
+/// POST /api/auto-queue/reset
+/// Clear all entries and complete all active runs.
+pub async fn reset(
+    State(state): State<AppState>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let conn = match state.db.lock() {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{e}")})),
+            )
+        }
+    };
+    ensure_tables(&conn);
+
+    let deleted_entries = conn
+        .execute("DELETE FROM auto_queue_entries", [])
+        .unwrap_or(0);
+    let completed_runs = conn
+        .execute(
+            "UPDATE auto_queue_runs SET status = 'completed', completed_at = datetime('now') WHERE status IN ('active', 'paused')",
+            [],
+        )
+        .unwrap_or(0);
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "ok": true,
+            "deleted_entries": deleted_entries,
+            "completed_runs": completed_runs,
+        })),
+    )
+}
+
 /// PATCH /api/auto-queue/reorder
 pub async fn reorder(
     State(state): State<AppState>,

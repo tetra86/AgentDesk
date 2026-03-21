@@ -71,6 +71,7 @@ export {
   getRuntimeConfig,
   saveRuntimeConfig,
   reorderAutoQueueEntries,
+  resetAutoQueue,
   getKanbanReviews,
   saveReviewDecisions,
   triggerDecidedRework,

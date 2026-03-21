@@ -979,3 +979,7 @@ export async function reorderAutoQueueEntries(
     body: JSON.stringify({ orderedIds, agentId: agentId ?? undefined }),
   });
 }
+
+export async function resetAutoQueue(): Promise<{ ok: boolean; deleted_entries: number; completed_runs: number }> {
+  return request("/api/auto-queue/reset", { method: "POST" });
+}
