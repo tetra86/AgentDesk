@@ -255,11 +255,17 @@ pub async fn activate(
     let mut run_filter = "status = 'active'".to_string();
     let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
     if let Some(ref repo) = body.repo {
-        run_filter.push_str(&format!(" AND repo = ?{}", params.len() + 1));
+        run_filter.push_str(&format!(
+            " AND (repo = ?{} OR repo IS NULL OR repo = '')",
+            params.len() + 1
+        ));
         params.push(Box::new(repo.clone()));
     }
     if let Some(ref agent_id) = body.agent_id {
-        run_filter.push_str(&format!(" AND agent_id = ?{}", params.len() + 1));
+        run_filter.push_str(&format!(
+            " AND (agent_id = ?{} OR agent_id IS NULL OR agent_id = '')",
+            params.len() + 1
+        ));
         params.push(Box::new(agent_id.clone()));
     }
 
@@ -418,15 +424,21 @@ pub async fn status(
     };
     ensure_tables(&conn);
 
-    // Find latest run
+    // Find latest run (NULL agent_id/repo matches any filter)
     let mut run_filter = "1=1".to_string();
     let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
     if let Some(ref repo) = query.repo {
-        run_filter.push_str(&format!(" AND repo = ?{}", params.len() + 1));
+        run_filter.push_str(&format!(
+            " AND (repo = ?{} OR repo IS NULL OR repo = '')",
+            params.len() + 1
+        ));
         params.push(Box::new(repo.clone()));
     }
     if let Some(ref agent_id) = query.agent_id {
-        run_filter.push_str(&format!(" AND agent_id = ?{}", params.len() + 1));
+        run_filter.push_str(&format!(
+            " AND (agent_id = ?{} OR agent_id IS NULL OR agent_id = '')",
+            params.len() + 1
+        ));
         params.push(Box::new(agent_id.clone()));
     }
 
