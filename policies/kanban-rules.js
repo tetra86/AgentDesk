@@ -58,19 +58,13 @@ var rules = {
 
     // working → in_progress
     if (payload.status === "working" && card.status === "requested") {
-      agentdesk.db.execute(
-        "UPDATE kanban_cards SET status = 'in_progress', started_at = datetime('now'), updated_at = datetime('now') WHERE id = ?",
-        [card.id]
-      );
+      agentdesk.kanban.setStatus(card.id, "in_progress");
       agentdesk.log.info("[kanban] " + card.id + " requested → in_progress");
     }
 
     // idle → review (에이전트 턴 종료)
     if (payload.status === "idle" && card.status === "in_progress") {
-      agentdesk.db.execute(
-        "UPDATE kanban_cards SET status = 'review', updated_at = datetime('now') WHERE id = ?",
-        [card.id]
-      );
+      agentdesk.kanban.setStatus(card.id, "review");
       agentdesk.log.info("[kanban] " + card.id + " in_progress → review");
     }
 
@@ -128,9 +122,7 @@ var rules = {
     // Rework dispatches — skip gate, go directly to review
     if (dispatch.dispatch_type === "rework") {
       agentdesk.db.execute(
-        "UPDATE kanban_cards SET status = 'review', updated_at = datetime('now') WHERE id = ?",
-        [card.id]
-      );
+      agentdesk.kanban.setStatus(card.id, "review");
       agentdesk.log.info("[kanban] " + card.id + " rework done → review");
       return;
     }
@@ -185,7 +177,9 @@ var rules = {
       if (reasons.length > 0) {
         // Gate failed → pending_decision
         agentdesk.db.execute(
-          "UPDATE kanban_cards SET status = 'pending_decision', review_status = NULL, updated_at = datetime('now') WHERE id = ?",
+      agentdesk.kanban.setStatus(card.id, "pending_decision");
+        agentdesk.db.execute(
+          "UPDATE kanban_cards SET review_status = NULL WHERE id = ?",
           [card.id]
         );
         agentdesk.log.warn("[pm-gate] Card " + card.id + " → pending_decision: " + reasons.join("; "));
@@ -195,10 +189,7 @@ var rules = {
     }
 
     // ── Gate passed → always review (counter-model review) ──
-    agentdesk.db.execute(
-      "UPDATE kanban_cards SET status = 'review', updated_at = datetime('now') WHERE id = ?",
-      [card.id]
-    );
+    agentdesk.kanban.setStatus(card.id, "review");
     agentdesk.log.info("[kanban] " + card.id + " → review");
   },
 

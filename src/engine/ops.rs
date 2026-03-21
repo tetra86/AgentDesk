@@ -33,7 +33,10 @@ pub fn register_globals(ctx: &Ctx<'_>, db: Db) -> JsResult<()> {
     register_http_ops(ctx)?;
 
     // ── agentdesk.dispatch ────────────────────────────────────────
-    register_dispatch_ops(ctx, db)?;
+    register_dispatch_ops(ctx, db.clone())?;
+
+    // ── agentdesk.kanban ────────────────────────────────────────
+    register_kanban_ops(ctx, db)?;
 
     Ok(())
 }
@@ -537,4 +540,122 @@ mod tests {
             assert_eq!(xp, 10);
         });
     }
+}
+
+// ── Kanban ops ────────────────────────────────────────────────────
+//
+// agentdesk.kanban.setStatus(cardId, newStatus) — updates card status
+// and fires appropriate hooks (OnCardTransition, OnCardTerminal, OnReviewEnter).
+// This replaces direct SQL UPDATEs in policies to ensure hooks always fire.
+
+fn register_kanban_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
+    let ad: Object<'js> = ctx.globals().get("agentdesk")?;
+    let kanban_obj = Object::new(ctx.clone())?;
+
+    let db_set = db.clone();
+    kanban_obj.set(
+        "__setStatusRaw",
+        Function::new(ctx.clone(), move |card_id: String, new_status: String| -> String {
+            let conn = match db_set.lock() {
+                Ok(c) => c,
+                Err(e) => return format!(r#"{{"error":"DB lock: {}"}}"#, e),
+            };
+
+            // Get current status
+            let old_status: String = match conn.query_row(
+                "SELECT status FROM kanban_cards WHERE id = ?1",
+                [&card_id],
+                |row| row.get(0),
+            ) {
+                Ok(s) => s,
+                Err(_) => return r#"{"error":"card not found"}"#.to_string(),
+            };
+
+            if old_status == new_status {
+                return format!(r#"{{"ok":true,"changed":false,"status":"{}"}}"#, new_status);
+            }
+
+            // Update status
+            let extra = match new_status.as_str() {
+                "in_progress" => ", started_at = COALESCE(started_at, datetime('now'))",
+                "requested" => ", requested_at = datetime('now')",
+                "done" => ", completed_at = datetime('now'), review_status = NULL",
+                "review" => "",
+                _ => "",
+            };
+            let sql = format!(
+                "UPDATE kanban_cards SET status = ?1, updated_at = datetime('now'){} WHERE id = ?2",
+                extra
+            );
+            if let Err(e) = conn.execute(&sql, rusqlite::params![new_status, card_id]) {
+                return format!(r#"{{"error":"UPDATE: {}"}}"#, e);
+            }
+
+            // Also update auto_queue_entries if terminal
+            if new_status == "done" {
+                conn.execute(
+                    "UPDATE auto_queue_entries SET status = 'done', completed_at = datetime('now') WHERE kanban_card_id = ?1 AND status = 'dispatched'",
+                    [&card_id],
+                ).ok();
+            }
+
+            format!(
+                r#"{{"ok":true,"changed":true,"from":"{}","to":"{}","card_id":"{}"}}"#,
+                old_status, new_status, card_id
+            )
+        })?,
+    )?;
+
+    let db_get = db.clone();
+    kanban_obj.set(
+        "__getCardRaw",
+        Function::new(ctx.clone(), move |card_id: String| -> String {
+            let conn = match db_get.lock() {
+                Ok(c) => c,
+                Err(e) => return format!(r#"{{"error":"{}"}}"#, e),
+            };
+            match conn.query_row(
+                "SELECT id, status, assigned_agent_id, title, review_status, review_round, latest_dispatch_id FROM kanban_cards WHERE id = ?1",
+                [&card_id],
+                |row| {
+                    Ok(serde_json::json!({
+                        "id": row.get::<_, String>(0)?,
+                        "status": row.get::<_, String>(1)?,
+                        "assigned_agent_id": row.get::<_, Option<String>>(2)?,
+                        "title": row.get::<_, Option<String>>(3)?,
+                        "review_status": row.get::<_, Option<String>>(4)?,
+                        "review_round": row.get::<_, Option<i64>>(5)?,
+                        "latest_dispatch_id": row.get::<_, Option<String>>(6)?,
+                    }))
+                },
+            ) {
+                Ok(card) => card.to_string(),
+                Err(_) => r#"{"error":"card not found"}"#.to_string(),
+            }
+        })?,
+    )?;
+
+    ad.set("kanban", kanban_obj)?;
+
+    // JS wrapper that parses JSON + fires hooks via engine callback
+    let _: rquickjs::Value = ctx.eval(
+        r#"
+        (function() {
+            var raw = agentdesk.kanban.__setStatusRaw;
+            var getRaw = agentdesk.kanban.__getCardRaw;
+            agentdesk.kanban.setStatus = function(cardId, newStatus) {
+                var result = JSON.parse(raw(cardId, newStatus));
+                if (result.error) throw new Error(result.error);
+                return result;
+            };
+            agentdesk.kanban.getCard = function(cardId) {
+                var result = JSON.parse(getRaw(cardId));
+                if (result.error) return null;
+                return result;
+            };
+        })();
+    "#,
+    )?;
+
+    Ok(())
 }

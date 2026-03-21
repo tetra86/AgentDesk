@@ -35,10 +35,7 @@ var reviewAutomation = {
     // Check if review is enabled
     var reviewEnabled = agentdesk.config.get("review_enabled");
     if (reviewEnabled === "false" || reviewEnabled === false) {
-      agentdesk.db.execute(
-        "UPDATE kanban_cards SET status = 'done', completed_at = datetime('now'), updated_at = datetime('now') WHERE id = ?",
-        [card.id]
-      );
+      agentdesk.kanban.setStatus(card.id, "done");
       agentdesk.log.info("[review] Review disabled, card " + card.id + " → done");
       return;
     }
@@ -149,15 +146,7 @@ function processVerdict(cardId, verdict, result) {
     if (stages.length > 0) {
       agentdesk.log.info("[review] Card " + cardId + " passed review, entering pipeline");
     } else {
-      agentdesk.db.execute(
-        "UPDATE kanban_cards SET status = 'done', review_status = NULL, completed_at = datetime('now'), updated_at = datetime('now') WHERE id = ?",
-        [cardId]
-      );
-      // Mark auto-queue entry as done so next entry can be dispatched
-      agentdesk.db.execute(
-        "UPDATE auto_queue_entries SET status = 'done', completed_at = datetime('now') WHERE kanban_card_id = ? AND status = 'dispatched'",
-        [cardId]
-      );
+      agentdesk.kanban.setStatus(cardId, "done");
       agentdesk.log.info("[review] Card " + cardId + " passed review → done");
     }
 

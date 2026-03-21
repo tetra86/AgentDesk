@@ -33,8 +33,9 @@ var timeouts = {
         );
       }
       // 카드는 pending_decision으로 (PMD가 판단)
+      agentdesk.kanban.setStatus(staleRequested[i].id, "pending_decision");
       agentdesk.db.execute(
-        "UPDATE kanban_cards SET status = 'pending_decision', blocked_reason = 'Timed out waiting for agent acceptance', updated_at = datetime('now') WHERE id = ?",
+        "UPDATE kanban_cards SET blocked_reason = 'Timed out waiting for agent acceptance' WHERE id = ?",
         [staleRequested[i].id]
       );
       agentdesk.log.warn("[timeout] Card " + staleRequested[i].id + " requested timeout → pending_decision");
@@ -45,8 +46,9 @@ var timeouts = {
       "SELECT id FROM kanban_cards WHERE status = 'in_progress' AND updated_at < datetime('now', '-2 hours')"
     );
     for (var j = 0; j < staleInProgress.length; j++) {
+      agentdesk.kanban.setStatus(staleInProgress[j].id, "blocked");
       agentdesk.db.execute(
-        "UPDATE kanban_cards SET status = 'blocked', blocked_reason = 'Stalled: no activity for 2+ hours', updated_at = datetime('now') WHERE id = ?",
+        "UPDATE kanban_cards SET blocked_reason = 'Stalled: no activity for 2+ hours' WHERE id = ?",
         [staleInProgress[j].id]
       );
       agentdesk.log.warn("[timeout] Card " + staleInProgress[j].id + " in_progress stale → blocked");
@@ -62,10 +64,8 @@ var timeouts = {
       "AND kc.updated_at < datetime('now', '-30 minutes')"
     );
     for (var k = 0; k < staleReviews.length; k++) {
-      agentdesk.db.execute(
-        "UPDATE kanban_cards SET status = 'pending_decision', review_status = NULL, updated_at = datetime('now') WHERE id = ?",
-        [staleReviews[k].card_id]
-      );
+      agentdesk.kanban.setStatus(staleReviews[k].card_id, "pending_decision");
+      agentdesk.db.execute("UPDATE kanban_cards SET review_status = NULL WHERE id = ?", [staleReviews[k].card_id]);
       agentdesk.log.warn("[timeout] Stale review → pending_decision: card " + staleReviews[k].card_id);
     }
 
@@ -76,10 +76,8 @@ var timeouts = {
       "AND updated_at < datetime('now', '-15 minutes')"
     );
     for (var d = 0; d < stuckDod.length; d++) {
-      agentdesk.db.execute(
-        "UPDATE kanban_cards SET status = 'pending_decision', review_status = NULL, updated_at = datetime('now') WHERE id = ?",
-        [stuckDod[d].id]
-      );
+      agentdesk.kanban.setStatus(stuckDod[d].id, "pending_decision");
+      agentdesk.db.execute("UPDATE kanban_cards SET review_status = NULL WHERE id = ?", [stuckDod[d].id]);
       agentdesk.log.warn("[timeout] DoD await timeout → pending_decision: card " + stuckDod[d].id);
     }
 
@@ -113,10 +111,14 @@ var timeouts = {
         [staleDispatches[sd].id]
       );
       if (staleDispatches[sd].kanban_card_id) {
-        agentdesk.db.execute(
-          "UPDATE kanban_cards SET status = 'pending_decision', blocked_reason = 'Stale dispatch auto-failed after 24h', updated_at = datetime('now') WHERE id = ? AND status NOT IN ('done')",
-          [staleDispatches[sd].kanban_card_id]
-        );
+        var card = agentdesk.kanban.getCard(staleDispatches[sd].kanban_card_id);
+        if (card && card.status !== "done") {
+          agentdesk.kanban.setStatus(staleDispatches[sd].kanban_card_id, "pending_decision");
+          agentdesk.db.execute(
+            "UPDATE kanban_cards SET blocked_reason = 'Stale dispatch auto-failed after 24h' WHERE id = ?",
+            [staleDispatches[sd].kanban_card_id]
+          );
+        }
       }
       agentdesk.log.warn("[timeout] Dispatch " + staleDispatches[sd].id + " stale 24h → failed");
     }

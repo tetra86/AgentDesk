@@ -42,10 +42,7 @@ var autoQueue = {
       agentdesk.log.info("[auto-queue] Dispatching next entry for " + agentId + ": " + entry.kanban_card_id);
 
       // Set card to requested
-      agentdesk.db.execute(
-        "UPDATE kanban_cards SET status = 'requested', updated_at = datetime('now') WHERE id = ?",
-        [entry.kanban_card_id]
-      );
+      agentdesk.kanban.setStatus(entry.kanban_card_id, "requested");
 
       // Mark entry as dispatched
       agentdesk.db.execute(
