@@ -195,8 +195,8 @@ fn generate_launchd_plist(home: &Path, agentdesk_bin: &Path) -> String {
     let home_str = home.display();
     let bin_str = agentdesk_bin.display();
     let label = dcserver::AGENTDESK_DCSERVER_LAUNCHD_LABEL;
-    // Use AGENTDESK_ROOT_DIR if set, otherwise default to ~/.agentdesk
-    let root_dir = dcserver::agentdesk_runtime_root().unwrap_or_else(|| home.join(".agentdesk"));
+    // Use AGENTDESK_ROOT_DIR if set, otherwise default to ~/.adk/release
+    let root_dir = dcserver::agentdesk_runtime_root().unwrap_or_else(|| home.join(".adk").join("release"));
     let root_str = root_dir.display();
     let logs_dir = root_dir.join("logs");
     let logs_str = logs_dir.display();
@@ -278,7 +278,7 @@ fn generate_bot_settings(
 
 pub fn handle_init(reconfigure: bool) {
     let root = dcserver::agentdesk_runtime_root().unwrap_or_else(|| {
-        eprintln!("Error: cannot determine ~/.agentdesk directory");
+        eprintln!("Error: cannot determine runtime directory");
         std::process::exit(1);
     });
 
@@ -594,7 +594,7 @@ fn install_service(home: &Path, agentdesk_bin: &Path, _reconfigure: bool) {
          [Install]\n\
          WantedBy=default.target\n",
         agentdesk_bin.display(),
-        home.join(".agentdesk").display()
+        home.join(".adk").join("release").display()
     );
 
     let user_systemd = home.join(".config").join("systemd").join("user");

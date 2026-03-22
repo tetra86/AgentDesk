@@ -78,7 +78,7 @@ pub fn agentdesk_runtime_root() -> Option<PathBuf> {
         }
     }
 
-    dirs::home_dir().map(|h| h.join(".agentdesk"))
+    dirs::home_dir().map(|h| h.join(".adk").join("release"))
 }
 
 pub fn current_dcserver_launchd_label() -> String {

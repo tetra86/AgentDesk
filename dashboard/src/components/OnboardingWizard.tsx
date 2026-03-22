@@ -208,7 +208,7 @@ function Tip({ text }: { text: string }) {
       >
         ?
       </span>
-      <span className="absolute hidden group-hover:block bottom-full left-1/2 -translate-x-1/2 mb-2 px-3 py-2 text-xs rounded-lg whitespace-pre-wrap max-w-xs z-50 shadow-lg"
+      <span className="absolute hidden group-hover:block bottom-full left-0 mb-2 px-3 py-2 text-xs rounded-lg whitespace-pre-wrap w-72 z-50 shadow-lg"
         style={{ backgroundColor: "#1e293b", color: "#e2e8f0", border: "1px solid rgba(148,163,184,0.3)" }}
       >
         {text}
@@ -233,6 +233,7 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
   const [announceToken, setAnnounceToken] = useState("");
   const [notifyToken, setNotifyToken] = useState("");
   const [announceBotInfo, setAnnounceBotInfo] = useState<BotInfo | null>(null);
+  const [notifyBotInfo, setNotifyBotInfo] = useState<BotInfo | null>(null);
   const [validating, setValidating] = useState(false);
 
   // Step 2: Provider verification
@@ -336,7 +337,18 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
         return;
       }
 
-      setStep(2);
+      // Validate notify bot if provided
+      if (notifyToken) {
+        const ntfInfo = await validateBotToken(notifyToken);
+        setNotifyBotInfo(ntfInfo);
+        if (!ntfInfo.valid) {
+          setError(tr("알림 봇 토큰이 유효하지 않습니다.", "Notification bot token is invalid."));
+          setValidating(false);
+          return;
+        }
+      }
+
+      // Don't auto-advance — let user invite bots first
     } catch {
       setError(tr("검증 실패", "Validation failed"));
     }
@@ -498,6 +510,21 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
     setCompleting(false);
   };
 
+  // ── Invite link helpers ──────────────────────────────
+
+  // Discord permission bit values
+  const PERMS = {
+    // Command bot: Send Messages + Read Message History + Manage Messages
+    command: (2048 + 65536 + 8192).toString(),
+    // Announce bot: Administrator (simplest — covers channel creation, role management, etc.)
+    announce: "8",
+    // Notify bot: Send Messages only
+    notify: "2048",
+  };
+
+  const makeInviteUrl = (botId: string, permissions: string) =>
+    `https://discord.com/oauth2/authorize?client_id=${botId}&scope=bot&permissions=${permissions}`;
+
   // ── Styles ──────────────────────────────────────────
 
   const stepBox = "rounded-2xl border p-6 space-y-5";
@@ -578,7 +605,7 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
                 {tr("에서 New Application 클릭", " → Click New Application")}
               </li>
               <li>{tr("왼쪽 Bot 탭 → Reset Token → 토큰 복사", "Left Bot tab → Reset Token → Copy token")}</li>
-              <li>{tr("OAuth2 → URL Generator → bot 체크 → 권한 선택 → URL로 서버에 초대", "OAuth2 → URL Generator → check bot → select permissions → invite to server")}</li>
+              <li>{tr("아래에 토큰을 붙여넣고 검증하면, 서버 초대 링크가 자동 생성됩니다", "Paste tokens below and validate — invite links are generated automatically")}</li>
             </ol>
           </div>
 
@@ -645,12 +672,22 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
                   style={{ borderColor: borderInput, color: "var(--th-text-primary)" }}
                 />
                 {bot.botInfo?.valid && (
-                  <div className="text-xs text-emerald-400">✓ {bot.botInfo.bot_name}</div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-emerald-400">✓ {bot.botInfo.bot_name}</span>
+                    <a
+                      href={makeInviteUrl(bot.botInfo.bot_id!, PERMS.command)}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-[11px] px-2 py-0.5 rounded-md bg-indigo-600/30 text-indigo-300 hover:bg-indigo-600/50 transition-colors"
+                    >
+                      {tr("서버에 초대 →", "Invite to server →")}
+                    </a>
+                  </div>
                 )}
                 <div className="text-[11px]" style={{ color: "var(--th-text-muted)" }}>
                   {tr(
-                    `필요 권한: Send Messages, Read Message History, Manage Messages`,
-                    `Required: Send Messages, Read Message History, Manage Messages`,
+                    `자동 설정 권한: Send Messages, Read Message History, Manage Messages`,
+                    `Auto-configured: Send Messages, Read Message History, Manage Messages`,
                   )}
                 </div>
               </div>
@@ -677,8 +714,8 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
                 {tr("통신 봇", "Communication Bot")}
               </span>
               <Tip text={tr(
-                "에이전트들이 서로 메시지를 보낼 때 사용하는 봇입니다.\n에이전트 A가 에이전트 B에게 작업을 요청하거나\n결과를 회신할 때 이 봇을 통해 전송합니다.\n(별도의 봇이어야 메시지 충돌이 방지됩니다)",
-                "Used for agent-to-agent communication.\nAgent A sends tasks to Agent B through this bot.\n(Must be a separate bot to prevent conflicts)",
+                "에이전트들이 서로 메시지를 보낼 때 사용하는 봇입니다.\n에이전트 A가 에이전트 B에게 작업을 요청하거나\n결과를 회신할 때 이 봇을 통해 전송합니다.\n\n또한 온보딩 시 Discord 채널을 자동 생성하고,\n다른 봇들의 채널 접근 권한을 설정합니다.\n(별도의 봇이어야 메시지 충돌이 방지됩니다)",
+                "Used for agent-to-agent communication.\nAgent A sends tasks to Agent B through this bot.\n\nAlso creates Discord channels during onboarding\nand manages channel permissions for other bots.\n(Must be a separate bot to prevent conflicts)",
               )} />
               <span className="text-[10px] px-1.5 py-0.5 rounded bg-red-500/20 text-red-300 font-medium">
                 {tr("필수", "Required")}
@@ -693,10 +730,23 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
               style={{ borderColor: borderInput, color: "var(--th-text-primary)" }}
             />
             {announceBotInfo?.valid && (
-              <div className="text-xs text-emerald-400">✓ {announceBotInfo.bot_name}</div>
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-emerald-400">✓ {announceBotInfo.bot_name}</span>
+                <a
+                  href={makeInviteUrl(announceBotInfo.bot_id!, PERMS.announce)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-[11px] px-2 py-0.5 rounded-md bg-indigo-600/30 text-indigo-300 hover:bg-indigo-600/50 transition-colors"
+                >
+                  {tr("서버에 초대 (관리자 권한) →", "Invite to server (Admin) →")}
+                </a>
+              </div>
             )}
             <div className="text-[11px]" style={{ color: "var(--th-text-muted)" }}>
-              {tr("필요 권한: Send Messages, Read Message History", "Required: Send Messages, Read Message History")}
+              {tr(
+                "관리자(Administrator) 권한으로 초대됩니다. 채널 생성, 봇 권한 설정 등을 자동으로 처리합니다.",
+                "Invited with Administrator permission. Handles channel creation and bot permission setup automatically.",
+              )}
             </div>
           </div>
 
@@ -722,8 +772,21 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
               className={inputStyle}
               style={{ borderColor: borderInput, color: "var(--th-text-primary)" }}
             />
+            {notifyBotInfo?.valid && (
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-emerald-400">✓ {notifyBotInfo.bot_name}</span>
+                <a
+                  href={makeInviteUrl(notifyBotInfo.bot_id!, PERMS.notify)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-[11px] px-2 py-0.5 rounded-md bg-indigo-600/30 text-indigo-300 hover:bg-indigo-600/50 transition-colors"
+                >
+                  {tr("서버에 초대 →", "Invite to server →")}
+                </a>
+              </div>
+            )}
             <div className="text-[11px]" style={{ color: "var(--th-text-muted)" }}>
-              {tr("필요 권한: Send Messages", "Required: Send Messages")}
+              {tr("자동 설정 권한: Send Messages", "Auto-configured: Send Messages")}
             </div>
           </div>
 
@@ -732,13 +795,21 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
             <button
               onClick={() => void validateStep1()}
               disabled={!commandBots[0]?.token || !announceToken || validating}
-              className={btnPrimary}
+              className={btnSecondary}
+              style={{ borderColor: "rgba(99,102,241,0.4)", color: "#a5b4fc" }}
             >
-              {validating ? tr("검증 중...", "Validating...") : tr("토큰 검증 후 다음", "Validate & Next")}
+              {validating ? tr("검증 중...", "Validating...") : tr("토큰 검증", "Validate Tokens")}
             </button>
-            <button onClick={() => setStep(2)} className={btnSecondary} style={{ borderColor: "rgba(148,163,184,0.3)" }}>
-              {tr("나중에 입력", "Skip for now")}
-            </button>
+            {/* "다음" only after all required bots are validated */}
+            {commandBots[0]?.botInfo?.valid && announceBotInfo?.valid ? (
+              <button onClick={() => setStep(2)} className={btnPrimary}>
+                {tr("다음", "Next")}
+              </button>
+            ) : (
+              <button onClick={() => setStep(2)} className={btnSecondary} style={{ borderColor: "rgba(148,163,184,0.3)" }}>
+                {tr("나중에 입력", "Skip for now")}
+              </button>
+            )}
           </div>
           <p className="text-xs" style={{ color: "var(--th-text-muted)" }}>
             {tr("토큰은 나중에 설정 파일에서 직접 입력할 수 있습니다: ", "Tokens can be set later in: ")}
