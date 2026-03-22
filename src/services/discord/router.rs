@@ -594,12 +594,55 @@ pub(super) async fn handle_text_message(
     // Add hourglass reaction to user's message
     add_reaction(ctx, channel_id, user_msg_id, '⏳').await;
 
+    // ── Dispatch thread auto-creation ──────────────────────────────
+    // When a dispatch message arrives, create a Discord thread for
+    // isolated context.  All subsequent agent output goes to the thread.
+    let dispatch_id_for_thread = super::adk_session::parse_dispatch_id(user_text);
+    let channel_id = if let Some(ref did) = dispatch_id_for_thread {
+        // Extract short title from "DISPATCH:uuid - title" format
+        let thread_title = user_text
+            .find(" - ")
+            .map(|idx| &user_text[idx + 3..])
+            .unwrap_or("dispatch")
+            .chars()
+            .take(90)
+            .collect::<String>();
+
+        match channel_id
+            .create_thread(
+                &ctx.http,
+                poise::serenity_prelude::builder::CreateThread::new(thread_title)
+                    .kind(poise::serenity_prelude::ChannelType::PublicThread)
+                    .auto_archive_duration(poise::serenity_prelude::AutoArchiveDuration::OneDay),
+            )
+            .await
+        {
+            Ok(thread) => {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                println!(
+                    "  [{ts}] 🧵 Created dispatch thread {} for dispatch {}",
+                    thread.id, did
+                );
+                // Bootstrap session for the thread from parent channel
+                super::bootstrap_thread_session(shared, thread.id, &current_path, ctx).await;
+                thread.id
+            }
+            Err(e) => {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                eprintln!("  [{ts}] ⚠ Failed to create dispatch thread: {e}");
+                channel_id // fallback to main channel
+            }
+        }
+    } else {
+        channel_id
+    };
+
     // Send placeholder message
     rate_limit_wait(shared, channel_id).await;
     let placeholder = channel_id
         .send_message(&ctx.http, {
             let builder = CreateMessage::new().content("...");
-            if reply_to_user_message {
+            if reply_to_user_message && dispatch_id_for_thread.is_none() {
                 builder.reference_message((channel_id, user_msg_id))
             } else {
                 builder
