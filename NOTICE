@@ -12,5 +12,5 @@ This product includes software derived from the following projects:
 - claw-empire (https://github.com/GreenSheep01201/claw-empire)
   Copyright (c) GreenSheep01201
   Licensed under the Apache License 2.0
-  Portions of the kanban pipeline, dispatch system, and dashboard UI
-  were originally developed in claw-empire and adapted for AgentDesk.
+  Sprite images used in the office view dashboard were sourced from
+  claw-empire and adapted for use in AgentDesk.
