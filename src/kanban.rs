@@ -68,25 +68,25 @@ pub fn transition_status_with_opts(
     );
 
     if !free_transition && !force {
-        // Check for active dispatch
-        let has_dispatch: bool = conn
+        // Check for active dispatch — only pending/dispatched count as active.
+        // Completed dispatches are historical and must NOT authorize new transitions.
+        let has_active_dispatch: bool = conn
             .query_row(
                 "SELECT COUNT(*) > 0 FROM task_dispatches \
-                 WHERE kanban_card_id = ?1 AND status IN ('pending', 'completed')",
+                 WHERE kanban_card_id = ?1 AND status IN ('pending', 'dispatched')",
                 [card_id],
                 |row| row.get(0),
             )
             .unwrap_or(false);
 
-        if !has_dispatch {
-            // Log violation
+        if !has_active_dispatch {
             log_audit(
                 &conn,
                 card_id,
                 &old_status,
                 new_status,
                 source,
-                "BLOCKED: no dispatch",
+                "BLOCKED: no active dispatch",
             );
             tracing::warn!(
                 "[kanban] Blocked transition {} → {} for card {} (no active dispatch, source: {})",
@@ -96,7 +96,7 @@ pub fn transition_status_with_opts(
                 source
             );
             return Err(anyhow::anyhow!(
-                "Status transition {} → {} requires an active dispatch. Use dispatch lifecycle or PMD force override.",
+                "Status transition {} → {} requires an active dispatch (pending/dispatched). Completed dispatches do not qualify. Use dispatch lifecycle or PMD force override.",
                 old_status,
                 new_status
             ));
@@ -197,6 +197,7 @@ pub fn transition_status_with_opts(
     })
 }
 
+#[derive(Debug)]
 pub struct TransitionResult {
     pub changed: bool,
     pub from: String,
@@ -511,4 +512,114 @@ fn log_audit(
         rusqlite::params![card_id, format!("{from}->{to} ({result})"), source],
     )
     .ok();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
+
+    fn test_db() -> Db {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        crate::db::schema::migrate(&conn).unwrap();
+        Arc::new(Mutex::new(conn))
+    }
+
+    fn test_engine(db: &Db) -> PolicyEngine {
+        let mut config = crate::config::Config::default();
+        config.policies.dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies");
+        config.policies.hot_reload = false;
+        PolicyEngine::new(&config, db.clone()).unwrap()
+    }
+
+    fn seed_card(db: &Db, card_id: &str, status: &str) {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) VALUES ('agent-1', 'Agent 1', '123', '456')",
+            [],
+        ).ok(); // ignore if already exists
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, created_at, updated_at)
+             VALUES (?1, 'Test Card', ?2, 'agent-1', datetime('now'), datetime('now'))",
+            rusqlite::params![card_id, status],
+        ).unwrap();
+    }
+
+    fn seed_dispatch(db: &Db, card_id: &str, dispatch_status: &str) {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at)
+             VALUES (?1, ?2, 'agent-1', 'implementation', ?3, 'Test Dispatch', datetime('now'), datetime('now'))",
+            rusqlite::params![format!("dispatch-{}-{}", card_id, dispatch_status), card_id, dispatch_status],
+        ).unwrap();
+    }
+
+    #[test]
+    fn completed_dispatch_only_does_not_authorize_transition() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_card(&db, "card-completed", "requested");
+        seed_dispatch(&db, "card-completed", "completed");
+
+        let result = transition_status(&db, &engine, "card-completed", "in_progress");
+        assert!(result.is_err(), "completed dispatch should NOT authorize transition");
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("active dispatch"), "error should mention active dispatch");
+    }
+
+    #[test]
+    fn pending_dispatch_authorizes_transition() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_card(&db, "card-pending", "requested");
+        seed_dispatch(&db, "card-pending", "pending");
+
+        let result = transition_status(&db, &engine, "card-pending", "in_progress");
+        assert!(result.is_ok(), "pending dispatch should authorize transition");
+    }
+
+    #[test]
+    fn dispatched_status_authorizes_transition() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_card(&db, "card-dispatched", "requested");
+        seed_dispatch(&db, "card-dispatched", "dispatched");
+
+        let result = transition_status(&db, &engine, "card-dispatched", "in_progress");
+        assert!(result.is_ok(), "dispatched status should authorize transition");
+    }
+
+    #[test]
+    fn no_dispatch_blocks_non_free_transition() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_card(&db, "card-none", "requested");
+        // No dispatch at all
+
+        let result = transition_status(&db, &engine, "card-none", "in_progress");
+        assert!(result.is_err(), "no dispatch should block transition");
+    }
+
+    #[test]
+    fn free_transition_works_without_dispatch() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_card(&db, "card-free", "backlog");
+
+        let result = transition_status(&db, &engine, "card-free", "ready");
+        assert!(result.is_ok(), "backlog → ready should work without dispatch");
+    }
+
+    #[test]
+    fn force_overrides_dispatch_check() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_card(&db, "card-force", "requested");
+        // No dispatch, but force=true
+
+        let result = transition_status_with_opts(&db, &engine, "card-force", "in_progress", "pmd", true);
+        assert!(result.is_ok(), "force=true should bypass dispatch check");
+    }
 }
