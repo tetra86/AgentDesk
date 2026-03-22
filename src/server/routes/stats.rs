@@ -61,7 +61,7 @@ pub async fn get_stats(
     };
 
     let agents_sql = format!(
-        "SELECT id, name, name_ko, avatar_emoji, xp, department, status
+        "SELECT id, name, name_ko, avatar_emoji, xp, department, status, sprite_number
          FROM agents WHERE {} ORDER BY id",
         agent_where("id")
     );
@@ -83,6 +83,7 @@ pub async fn get_stats(
         i64,
         Option<String>,
         Option<String>,
+        Option<i64>,
     )> = agents_stmt
         .query_map([], |row| {
             Ok((
@@ -93,6 +94,7 @@ pub async fn get_stats(
                 row.get::<_, f64>(4).unwrap_or(0.0) as i64,
                 row.get::<_, Option<String>>(5)?,
                 row.get::<_, Option<String>>(6)?,
+                row.get::<_, Option<i64>>(7)?,
             ))
         })
         .ok()
@@ -126,7 +128,7 @@ pub async fn get_stats(
     let mut offline = 0i64;
     let mut idle = 0i64;
 
-    for (agent_id, _, _, _, _, _, base_status) in &agent_rows {
+    for (agent_id, _, _, _, _, _, base_status, _) in &agent_rows {
         let effective_working =
             working_session_agents.contains(agent_id) || base_status.as_deref() == Some("working");
         if effective_working {
@@ -146,7 +148,7 @@ pub async fn get_stats(
     let top_agents: Vec<serde_json::Value> = top_agents_src
         .into_iter()
         .take(10)
-        .map(|(id, name, name_ko, avatar_emoji, xp, _, _)| {
+        .map(|(id, name, name_ko, avatar_emoji, xp, _, _, sprite_number)| {
             let tasks_done: i64 = conn
                 .query_row(
                     "SELECT COUNT(*) FROM task_dispatches WHERE to_agent_id = ?1 AND status = 'completed'",
@@ -166,6 +168,7 @@ pub async fn get_stats(
                 "name": name,
                 "name_ko": name_ko,
                 "avatar_emoji": avatar_emoji,
+                "sprite_number": sprite_number,
                 "stats_xp": xp,
                 "stats_tasks_done": tasks_done,
                 "stats_tokens": tokens,
@@ -176,7 +179,7 @@ pub async fn get_stats(
     // ── departments stats ──
     let departments = {
         let mut stats_by_dept: HashMap<String, (i64, i64, i64)> = HashMap::new();
-        for (agent_id, _, _, _, xp, department_id, base_status) in &agent_rows {
+        for (agent_id, _, _, _, xp, department_id, base_status, _) in &agent_rows {
             let Some(dept_id) = department_id else {
                 continue;
             };
