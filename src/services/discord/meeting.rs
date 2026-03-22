@@ -1272,8 +1272,8 @@ async fn conclude_meeting(
             }
         }
         Err(e) => {
-            rate_limit_wait(shared, channel_id).await;
-            let _ = channel_id
+            rate_limit_wait(shared, msg_channel).await;
+            let _ = msg_channel
                 .send_message(
                     http,
                     CreateMessage::new().content(format!("⚠️ 회의록 작성 실패: {}", e)),
