@@ -1101,15 +1101,9 @@ pub async fn submit_order(
         .ok();
 
     let first_dispatched = if let Some((entry_id, card_id, agent_id, title)) = first_entry {
-        // Mark entry as dispatched
-        conn.execute(
-            "UPDATE auto_queue_entries SET status = 'dispatched', dispatched_at = datetime('now') WHERE id = ?1",
-            [&entry_id],
-        )
-        .ok();
         drop(conn);
 
-        // Create dispatch (this also sets card status to 'requested')
+        // Create dispatch FIRST (this also sets card status to 'requested')
         let dispatch_result = crate::dispatch::create_dispatch(
             &state.db,
             &state.engine,
@@ -1120,42 +1114,66 @@ pub async fn submit_order(
             &json!({"auto_queue": true, "entry_id": entry_id}),
         );
 
-        // Async Discord notification
-        if dispatch_result.is_ok() {
-            let db_clone = state.db.clone();
-            let card_id_c = card_id.clone();
-            let agent_id_c = agent_id.clone();
-            tokio::spawn(async move {
-                let info: Option<(String, String)> = {
-                    let conn = match db_clone.lock() {
-                        Ok(c) => c,
-                        Err(_) => return,
-                    };
-                    conn.query_row(
-                        "SELECT latest_dispatch_id, title FROM kanban_cards WHERE id = ?1",
-                        [&card_id_c],
-                        |row| Ok((row.get(0)?, row.get(1)?)),
+        match dispatch_result {
+            Ok(_) => {
+                // Mark entry as dispatched ONLY after successful dispatch creation
+                if let Ok(conn) = state.db.lock() {
+                    conn.execute(
+                        "UPDATE auto_queue_entries SET status = 'dispatched', dispatched_at = datetime('now') WHERE id = ?1",
+                        [&entry_id],
                     )
-                    .ok()
-                };
-                if let Some((dispatch_id, title)) = info {
-                    super::dispatches::send_dispatch_to_discord(
-                        &db_clone,
-                        &agent_id_c,
-                        &title,
-                        &card_id_c,
-                        &dispatch_id,
-                    )
-                    .await;
+                    .ok();
                 }
-            });
-        }
 
-        Some(json!({
-            "card_id": card_id,
-            "agent_id": agent_id,
-            "title": title,
-        }))
+                // Async Discord notification
+                let db_clone = state.db.clone();
+                let card_id_c = card_id.clone();
+                let agent_id_c = agent_id.clone();
+                tokio::spawn(async move {
+                    let info: Option<(String, String)> = {
+                        let conn = match db_clone.lock() {
+                            Ok(c) => c,
+                            Err(_) => return,
+                        };
+                        conn.query_row(
+                            "SELECT latest_dispatch_id, title FROM kanban_cards WHERE id = ?1",
+                            [&card_id_c],
+                            |row| Ok((row.get(0)?, row.get(1)?)),
+                        )
+                        .ok()
+                    };
+                    if let Some((dispatch_id, title)) = info {
+                        super::dispatches::send_dispatch_to_discord(
+                            &db_clone,
+                            &agent_id_c,
+                            &title,
+                            &card_id_c,
+                            &dispatch_id,
+                        )
+                        .await;
+                    }
+                });
+
+                Some(json!({
+                    "card_id": card_id,
+                    "agent_id": agent_id,
+                    "title": title,
+                    "dispatched": true,
+                }))
+            }
+            Err(e) => {
+                // Dispatch failed — entry stays pending, log error
+                tracing::error!(
+                    "[auto-queue] First dispatch failed for entry {}: {e}",
+                    entry_id
+                );
+                Some(json!({
+                    "card_id": card_id,
+                    "error": format!("{e}"),
+                    "dispatched": false,
+                }))
+            }
+        }
     } else {
         drop(conn);
         None
