@@ -389,11 +389,30 @@ fn dispatch_create_raw(
         Err(e) => return format!(r#"{{"error":"DB lock: {}"}}"#, e),
     };
 
+    // Build context — for review dispatches, record the HEAD commit as source of truth
+    let context_str = if dispatch_type == "review" {
+        let repo_dir = std::env::var("AGENTDESK_REPO_DIR")
+            .unwrap_or_else(|_| format!("{}/AgentDesk", env!("HOME")));
+        let head = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&repo_dir)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+        match head {
+            Some(commit) => format!(r#"{{"reviewed_commit":"{}"}}"#, commit),
+            None => "{}".to_string(),
+        }
+    } else {
+        "{}".to_string()
+    };
+
     // Insert dispatch
     if let Err(e) = conn.execute(
         "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, 'pending', ?5, '{}', datetime('now'), datetime('now'))",
-        rusqlite::params![dispatch_id, card_id, agent_id, dispatch_type, title],
+         VALUES (?1, ?2, ?3, ?4, 'pending', ?5, ?6, datetime('now'), datetime('now'))",
+        rusqlite::params![dispatch_id, card_id, agent_id, dispatch_type, title, context_str],
     ) {
         return format!(r#"{{"error":"INSERT dispatch: {}"}}"#, e);
     }

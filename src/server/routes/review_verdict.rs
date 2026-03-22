@@ -108,6 +108,38 @@ pub async fn submit_verdict(
         }
     }
 
+    // C: Validate reviewed commit — the dispatch context stores the HEAD that was
+    //    actually sent for review. Reject mismatched commits to prevent arbitrary SHA injection.
+    let stored_reviewed_commit: Option<String> = conn
+        .query_row(
+            "SELECT json_extract(context, '$.reviewed_commit') FROM task_dispatches WHERE id = ?1",
+            [&body.dispatch_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .ok()
+        .flatten();
+
+    let effective_commit: Option<String> = match (&body.commit, &stored_reviewed_commit) {
+        (Some(submitted), Some(stored)) => {
+            if submitted != stored {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "error": format!(
+                            "commit mismatch: submitted {} but dispatch was created for {}",
+                            submitted, stored
+                        )
+                    })),
+                );
+            }
+            Some(stored.clone())
+        }
+        // body.commit is None → use stored reviewed_commit (no HEAD fallback)
+        (None, stored) => stored.clone(),
+        // No stored commit (legacy dispatch) → accept body.commit as-is
+        (submitted, None) => submitted.clone(),
+    };
+
     // Build result JSON
     let result_json = json!({
         "verdict": body.overall,
@@ -176,7 +208,7 @@ pub async fn submit_verdict(
 
     // When review passes, stamp a marker so promote-release.sh can verify
     if body.overall == "pass" || body.overall == "approved" {
-        stamp_review_passed_marker(body.commit.as_deref());
+        stamp_review_passed_marker(effective_commit.as_deref());
     }
 
     (

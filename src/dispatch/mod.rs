@@ -21,7 +21,30 @@ pub fn create_dispatch(
     context: &serde_json::Value,
 ) -> Result<serde_json::Value> {
     let dispatch_id = uuid::Uuid::new_v4().to_string();
-    let context_str = serde_json::to_string(context)?;
+
+    // For review dispatches, inject reviewed_commit (HEAD) as server-side source of truth
+    let context_str = if dispatch_type == "review" {
+        let mut ctx_val = context.clone();
+        if let Some(obj) = ctx_val.as_object_mut() {
+            if !obj.contains_key("reviewed_commit") {
+                let repo_dir = std::env::var("AGENTDESK_REPO_DIR")
+                    .unwrap_or_else(|_| format!("{}/AgentDesk", env!("HOME")));
+                if let Some(commit) = std::process::Command::new("git")
+                    .args(["rev-parse", "HEAD"])
+                    .current_dir(&repo_dir)
+                    .output()
+                    .ok()
+                    .filter(|o| o.status.success())
+                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                {
+                    obj.insert("reviewed_commit".to_string(), json!(commit));
+                }
+            }
+        }
+        serde_json::to_string(&ctx_val)?
+    } else {
+        serde_json::to_string(context)?
+    };
 
     let conn = db
         .lock()
