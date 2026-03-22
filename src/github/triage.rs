@@ -44,7 +44,7 @@ pub fn triage_new_issues(db: &Db, repo: &str, issues: &[GhIssue]) -> Result<usiz
         let priority = infer_priority(&issue.labels);
 
         conn.execute(
-            "INSERT INTO kanban_cards (id, repo_id, title, status, priority, github_issue_url, github_issue_number, metadata, created_at, updated_at)
+            "INSERT OR IGNORE INTO kanban_cards (id, repo_id, title, status, priority, github_issue_url, github_issue_number, metadata, created_at, updated_at)
              VALUES (?1, ?2, ?3, 'backlog', ?4, ?5, ?6, ?7, datetime('now'), datetime('now'))",
             rusqlite::params![
                 card_id,

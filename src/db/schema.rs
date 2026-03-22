@@ -82,6 +82,13 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     let _ = conn.execute_batch("ALTER TABLE kanban_cards ADD COLUMN depth INTEGER DEFAULT 0;");
     let _ = conn.execute_batch("ALTER TABLE kanban_cards ADD COLUMN sort_order INTEGER DEFAULT 0;");
 
+    // Unique constraint: one kanban card per GitHub issue per repo
+    let _ = conn.execute_batch(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_kanban_cards_issue_repo \
+         ON kanban_cards (github_issue_number, repo_id) \
+         WHERE github_issue_number IS NOT NULL AND repo_id IS NOT NULL;",
+    );
+
     // Audit logs table for analytics dashboard
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS audit_logs (
