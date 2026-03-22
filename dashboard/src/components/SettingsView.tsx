@@ -1,6 +1,8 @@
-import { useEffect, useState } from "react";
+import { Suspense, lazy, useEffect, useState } from "react";
 import type { CompanySettings } from "../types";
 import * as api from "../api";
+
+const OnboardingWizard = lazy(() => import("./OnboardingWizard"));
 
 interface SettingsViewProps {
   settings: CompanySettings;
@@ -118,6 +120,7 @@ export default function SettingsView({
   const [configEntries, setConfigEntries] = useState<ConfigEntry[]>([]);
   const [configEdits, setConfigEdits] = useState<Record<string, string>>({});
   const [configSaving, setConfigSaving] = useState(false);
+  const [showOnboarding, setShowOnboarding] = useState(false);
 
   useEffect(() => {
     void api.getRuntimeConfig().then((data) => {
@@ -433,7 +436,7 @@ export default function SettingsView({
       {/* Onboarding re-run */}
       <div className="mt-8 pt-6 border-t" style={{ borderColor: "rgba(148,163,184,0.15)" }}>
         <button
-          onClick={() => window.location.hash = "#onboarding"}
+          onClick={() => setShowOnboarding(true)}
           className="px-6 py-2.5 rounded-xl text-sm font-medium border hover:bg-white/5 transition-colors"
           style={{ borderColor: "rgba(148,163,184,0.3)", color: "var(--th-text-secondary)" }}
         >
@@ -443,6 +446,27 @@ export default function SettingsView({
           {tr("봇 토큰, 채널, 에이전트 구성을 다시 설정합니다.", "Reconfigure bot token, channels, and agents.")}
         </p>
       </div>
+
+      {showOnboarding && (
+        <div className="fixed inset-0 z-50 bg-black/80 overflow-y-auto">
+          <div className="min-h-screen flex items-start justify-center pt-8 pb-16">
+            <div className="w-full max-w-2xl">
+              <div className="flex justify-end px-4 mb-2">
+                <button
+                  onClick={() => setShowOnboarding(false)}
+                  className="text-sm px-3 py-1 rounded-lg border"
+                  style={{ borderColor: "rgba(148,163,184,0.3)", color: "var(--th-text-muted)" }}
+                >
+                  ✕ {tr("닫기", "Close")}
+                </button>
+              </div>
+              <Suspense fallback={<div className="text-center py-8" style={{ color: "var(--th-text-muted)" }}>Loading...</div>}>
+                <OnboardingWizard isKo={isKo} onComplete={() => { setShowOnboarding(false); window.location.reload(); }} />
+              </Suspense>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
