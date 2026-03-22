@@ -593,10 +593,10 @@ pub async fn retry_card(
             ).ok();
         }
 
-        // Update assignee if provided, then set status to "requested"
+        // Update assignee if provided, clear latest_dispatch_id for fresh dispatch
         let agent_id_for_dispatch: String = if let Some(ref agent_id) = body.assignee_agent_id {
             conn.execute(
-                "UPDATE kanban_cards SET status = 'requested', assigned_agent_id = ?1, latest_dispatch_id = NULL, updated_at = datetime('now') WHERE id = ?2",
+                "UPDATE kanban_cards SET assigned_agent_id = ?1, latest_dispatch_id = NULL, updated_at = datetime('now') WHERE id = ?2",
                 rusqlite::params![agent_id, id],
             ).ok();
             agent_id.clone()
@@ -609,11 +609,12 @@ pub async fn retry_card(
                 )
                 .unwrap_or_default();
             conn.execute(
-                "UPDATE kanban_cards SET status = 'requested', latest_dispatch_id = NULL, updated_at = datetime('now') WHERE id = ?1",
+                "UPDATE kanban_cards SET latest_dispatch_id = NULL, updated_at = datetime('now') WHERE id = ?1",
                 [&id],
             ).ok();
             current
         };
+        // Note: status → 'requested' is handled by create_dispatch() below
 
         // Get card info for dispatch creation
         let (card_title, card_id_owned) = (
@@ -722,9 +723,9 @@ pub async fn redispatch_card(
             ).ok();
         }
 
-        // Set to requested (keep assignee), clear review_status
+        // Clear review_status and latest_dispatch_id (status → 'requested' handled by create_dispatch)
         match conn.execute(
-            "UPDATE kanban_cards SET status = 'requested', review_status = NULL, latest_dispatch_id = NULL, updated_at = datetime('now') WHERE id = ?1",
+            "UPDATE kanban_cards SET review_status = NULL, latest_dispatch_id = NULL, updated_at = datetime('now') WHERE id = ?1",
             [&id],
         ) {
             Ok(0) => return (StatusCode::NOT_FOUND, Json(json!({"error": "card not found"}))),
@@ -1060,23 +1061,11 @@ pub async fn bulk_action(
         }
     };
 
-    let conn = match state.db.lock() {
-        Ok(c) => c,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{e}")})),
-            );
-        }
-    };
-
     let mut results: Vec<serde_json::Value> = Vec::new();
     for card_id in &body.card_ids {
-        match conn.execute(
-            "UPDATE kanban_cards SET status = ?1, updated_at = datetime('now') WHERE id = ?2",
-            rusqlite::params![target_status, card_id],
+        match crate::kanban::transition_status_with_opts(
+            &state.db, &state.engine, card_id, target_status, "bulk-action", true,
         ) {
-            Ok(0) => results.push(json!({"id": card_id, "ok": false, "error": "not found"})),
             Ok(_) => results.push(json!({"id": card_id, "ok": true})),
             Err(e) => results.push(json!({"id": card_id, "ok": false, "error": format!("{e}")})),
         }
