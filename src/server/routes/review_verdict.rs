@@ -5,19 +5,27 @@ use serde_json::json;
 use super::AppState;
 use crate::engine::hooks::Hook;
 
-/// Write a review-passed marker file for the current HEAD commit.
+/// Write a review-passed marker file for the reviewed commit.
 /// `promote-release.sh` checks this before allowing release promotion.
-fn stamp_review_passed_marker() {
-    let repo_dir = std::env::var("AGENTDESK_REPO_DIR")
-        .unwrap_or_else(|_| format!("{}/AgentDesk", env!("HOME")));
-    let commit = std::process::Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .current_dir(&repo_dir)
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
-    let Some(commit) = commit else { return };
+///
+/// When `reviewed_commit` is provided, stamp that exact commit (the one that
+/// was actually reviewed). Falls back to current HEAD for backwards compat.
+fn stamp_review_passed_marker(reviewed_commit: Option<&str>) {
+    let commit = if let Some(c) = reviewed_commit {
+        c.to_string()
+    } else {
+        let repo_dir = std::env::var("AGENTDESK_REPO_DIR")
+            .unwrap_or_else(|_| format!("{}/AgentDesk", env!("HOME")));
+        let out = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&repo_dir)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+        let Some(c) = out else { return };
+        c
+    };
     let root = std::env::var("AGENTDESK_ROOT_DIR")
         .unwrap_or_else(|_| format!("{}/.adk/release", env!("HOME")));
     let dir = format!("{}/runtime/review_passed", root);
@@ -38,6 +46,9 @@ pub struct SubmitVerdictBody {
     pub items: Option<Vec<VerdictItem>>,
     pub notes: Option<String>,
     pub feedback: Option<String>,
+    /// The commit SHA that was actually reviewed. When provided, the
+    /// review-passed marker stamps this commit instead of the current HEAD.
+    pub commit: Option<String>,
 }
 
 /// POST /api/review-verdict
@@ -165,7 +176,7 @@ pub async fn submit_verdict(
 
     // When review passes, stamp a marker so promote-release.sh can verify
     if body.overall == "pass" || body.overall == "approved" {
-        stamp_review_passed_marker();
+        stamp_review_passed_marker(body.commit.as_deref());
     }
 
     (
@@ -418,6 +429,7 @@ mod tests {
                 items: None,
                 notes: None,
                 feedback: None,
+                commit: None,
             }),
         )
         .await;
@@ -463,6 +475,7 @@ mod tests {
                 items: None,
                 notes: Some("Please tighten validation".to_string()),
                 feedback: None,
+                commit: None,
             }),
         )
         .await;
@@ -513,6 +526,7 @@ mod tests {
                 items: None,
                 notes: None,
                 feedback: None,
+                commit: None,
             }),
         )
         .await;
@@ -557,6 +571,7 @@ mod tests {
                 items: None,
                 notes: None,
                 feedback: None,
+                commit: None,
             }),
         )
         .await;
@@ -599,6 +614,7 @@ mod tests {
                 items: None,
                 notes: None,
                 feedback: None,
+                commit: None,
             }),
         )
         .await;

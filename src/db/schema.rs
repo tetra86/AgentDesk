@@ -82,7 +82,31 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     let _ = conn.execute_batch("ALTER TABLE kanban_cards ADD COLUMN depth INTEGER DEFAULT 0;");
     let _ = conn.execute_batch("ALTER TABLE kanban_cards ADD COLUMN sort_order INTEGER DEFAULT 0;");
 
-    // Unique constraint: one kanban card per GitHub issue per repo
+    // Unique constraint: one kanban card per GitHub issue per repo.
+    // First, deduplicate any existing rows — keep the one with the highest id
+    // for each (github_issue_number, repo_id) pair so that CREATE UNIQUE INDEX
+    // does not silently fail.
+    let dedup_deleted: usize = conn
+        .execute(
+            "DELETE FROM kanban_cards WHERE id NOT IN (
+                SELECT MAX(id) FROM kanban_cards
+                WHERE github_issue_number IS NOT NULL AND repo_id IS NOT NULL
+                GROUP BY github_issue_number, repo_id
+            ) AND github_issue_number IS NOT NULL AND repo_id IS NOT NULL
+            AND EXISTS (
+                SELECT 1 FROM kanban_cards kc2
+                WHERE kc2.github_issue_number = kanban_cards.github_issue_number
+                AND kc2.repo_id = kanban_cards.repo_id
+                AND kc2.id > kanban_cards.id
+            )",
+            [],
+        )
+        .unwrap_or(0);
+    if dedup_deleted > 0 {
+        tracing::warn!(
+            "Cleaned up {dedup_deleted} duplicate kanban_cards rows (by github_issue_number, repo_id)"
+        );
+    }
     let _ = conn.execute_batch(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_kanban_cards_issue_repo \
          ON kanban_cards (github_issue_number, repo_id) \
