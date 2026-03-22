@@ -121,10 +121,10 @@ export default function SettingsView({
 
   useEffect(() => {
     void api.getRuntimeConfig().then((data) => {
-      setRcValues(data.current);
-      setRcDefaults(data.defaults);
+      setRcValues(data?.current ?? {});
+      setRcDefaults(data?.defaults ?? {});
       setRcLoaded(true);
-    }).catch(() => {});
+    }).catch(() => { setRcLoaded(true); });
     // Load kv_meta config
     void fetch("/api/settings/config", { credentials: "include" })
       .then((r) => r.json())
@@ -155,7 +155,7 @@ export default function SettingsView({
       const result = await api.saveRuntimeConfig(
         Object.keys(patch).length > 0 ? rcValues : rcValues,
       );
-      setRcValues(result.config);
+      setRcValues(result?.config ?? rcValues);
       setRcDirty(false);
     } finally {
       setRcSaving(false);
