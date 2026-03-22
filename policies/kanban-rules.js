@@ -35,7 +35,7 @@ function notifyPMD(cardId, reason) {
   sendDiscordNotification(
     "channel:" + pmdChannel,
     "[PM Decision] " + title + "\n사유: " + reason,
-    "notify"
+    "announce"
   );
 }
 

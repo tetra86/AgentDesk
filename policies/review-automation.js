@@ -61,7 +61,7 @@ var reviewAutomation = {
         sendDiscordReview(
           "channel:" + pmdChannel,
           "[Review Dilemma] " + card.id + " — 리뷰 라운드 " + maxRounds + "회 초과. 수동 결정 필요.",
-          "notify"
+          "announce"
         );
       }
       return;
