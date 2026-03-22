@@ -97,7 +97,7 @@ var rules = {
           } catch(e) { /* parse fail */ }
         }
 
-        // 2. GitHub comment fallback — only check comments containing review round marker
+        // 2. GitHub comment fallback — filter by current round/dispatch correlation
         if (!verdict) {
           var cardInfo = agentdesk.db.query(
             "SELECT github_issue_url, review_round FROM kanban_cards WHERE id = ?",
@@ -108,15 +108,19 @@ var rules = {
             if (urlMatch) {
               try {
                 var round = cardInfo[0].review_round || 1;
-                // Fetch all comments, filter for ones containing review markers
+                var dispatchId = dispatch[0].id;
+                // Filter comments that match current round OR dispatch_id
+                // Round marker: "round 1", "R1", "라운드 1" etc.
+                // Dispatch marker: dispatch_id substring
+                var roundPattern = "round.?" + round + "|R" + round + "|라운드.?" + round + "|" + dispatchId.substring(0, 8);
                 var ghOutput = agentdesk.exec("gh", [
                   "issue", "view", urlMatch[2], "--repo", urlMatch[1],
                   "--comments", "--json", "comments", "--jq",
-                  "[.comments[].body] | map(select(test(\"verdict|검토 피드백|리뷰 피드백|review.*feedback\"; \"i\"))) | last"
+                  "[.comments[].body] | map(select(test(\"" + roundPattern + "\"; \"i\"))) | last"
                 ]);
                 if (ghOutput && ghOutput.trim()) {
                   var lower = ghOutput.toLowerCase();
-                  // Structured verdict markers (exact match preferred)
+                  // Structured verdict markers
                   if (lower.indexOf("verdict: pass") >= 0 || lower.indexOf("verdict: **pass**") >= 0) {
                     verdict = "pass";
                   } else if (lower.indexOf("verdict: improve") >= 0 || lower.indexOf("verdict: **improve**") >= 0) {
@@ -126,7 +130,6 @@ var rules = {
                   } else if (lower.indexOf("보완 필요") >= 0 || lower.indexOf("한 번 더") >= 0) {
                     verdict = "improve";
                   }
-                  // Do NOT fall back to bare "pass"/"improve" keyword — too ambiguous
                 }
               } catch(e) {
                 agentdesk.log.warn("[kanban] GitHub comment parsing failed: " + e);
