@@ -129,6 +129,29 @@ pub async fn patch_config_entries(
     (StatusCode::OK, Json(json!({"ok": true, "updated": updated})))
 }
 
+/// Default runtime config values
+fn runtime_config_defaults() -> serde_json::Value {
+    json!({
+        "dispatchPollSec": 30,
+        "agentSyncSec": 300,
+        "githubIssueSyncSec": 900,
+        "claudeRateLimitPollSec": 120,
+        "codexRateLimitPollSec": 120,
+        "issueTriagePollSec": 300,
+        "requestedAckTimeoutMin": 45,
+        "inProgressStaleMin": 120,
+        "maxChainDepth": 5,
+        "ceoWarnDepth": 3,
+        "maxRetries": 3,
+        "maxReviewRounds": 3,
+        "reviewReminderMin": 30,
+        "rateLimitWarningPct": 80,
+        "rateLimitDangerPct": 95,
+        "githubRepoCacheSec": 300,
+        "rateLimitStaleSec": 600,
+    })
+}
+
 /// GET /api/settings/runtime-config
 pub async fn get_runtime_config(
     State(state): State<AppState>,
@@ -151,9 +174,20 @@ pub async fn get_runtime_config(
         )
         .unwrap_or_else(|_| "{}".to_string());
 
-    let parsed: serde_json::Value = serde_json::from_str(&value).unwrap_or(json!({}));
+    let saved: serde_json::Value = serde_json::from_str(&value).unwrap_or(json!({}));
+    let defaults = runtime_config_defaults();
 
-    (StatusCode::OK, Json(parsed))
+    let mut current = defaults.as_object().cloned().unwrap_or_default();
+    if let Some(saved_obj) = saved.as_object() {
+        for (k, v) in saved_obj {
+            current.insert(k.clone(), v.clone());
+        }
+    }
+
+    (StatusCode::OK, Json(json!({
+        "current": current,
+        "defaults": defaults,
+    })))
 }
 
 /// PUT /api/settings/runtime-config
