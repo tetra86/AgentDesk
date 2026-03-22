@@ -147,14 +147,28 @@ pub async fn get_stats(
         .into_iter()
         .take(10)
         .map(|(id, name, name_ko, avatar_emoji, xp, _, _)| {
+            let tasks_done: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM task_dispatches WHERE to_agent_id = ?1 AND status = 'completed'",
+                    [&id],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0);
+            let tokens: i64 = conn
+                .query_row(
+                    "SELECT COALESCE(SUM(tokens), 0) FROM sessions WHERE agent_id = ?1",
+                    [&id],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0);
             json!({
                 "id": id,
                 "name": name,
                 "name_ko": name_ko,
                 "avatar_emoji": avatar_emoji,
                 "stats_xp": xp,
-                "stats_tasks_done": 0,
-                "stats_tokens": 0,
+                "stats_tasks_done": tasks_done,
+                "stats_tokens": tokens,
             })
         })
         .collect();
@@ -315,13 +329,28 @@ pub async fn get_stats(
             rows
         };
 
+        let waiting_acceptance: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM kanban_cards WHERE status = 'pending_decision'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        let stale_in_progress: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM kanban_cards WHERE status = 'in_progress' AND updated_at < datetime('now', '-100 minutes')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+
         json!({
             "open_total": open_total,
             "review_queue": review_queue,
             "blocked": blocked,
             "failed": failed,
-            "waiting_acceptance": 0,
-            "stale_in_progress": 0,
+            "waiting_acceptance": waiting_acceptance,
+            "stale_in_progress": stale_in_progress,
             "by_status": by_status,
             "top_repos": top_repos,
         })

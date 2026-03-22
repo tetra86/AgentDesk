@@ -137,12 +137,16 @@ export default function KanbanTab({
     const roleIdMap = new Map<string, Agent>();
     const suffixMap = new Map<string, Agent>();
     for (const agent of agents) {
-      if (agent.role_id) {
-        roleIdMap.set(agent.role_id, agent);
+      // Use agent.id as primary key (role_id may be null from API)
+      const key = agent.role_id || agent.id;
+      if (key) {
+        roleIdMap.set(key, agent);
+        // Also map by agent.id if different from role_id
+        if (agent.id && agent.id !== key) roleIdMap.set(agent.id, agent);
         // Also map the suffix after last hyphen (e.g. "ch-dd" → "dd")
-        const lastDash = agent.role_id.lastIndexOf("-");
+        const lastDash = key.lastIndexOf("-");
         if (lastDash >= 0) {
-          const suffix = agent.role_id.slice(lastDash + 1);
+          const suffix = key.slice(lastDash + 1);
           if (!suffixMap.has(suffix)) suffixMap.set(suffix, agent);
         }
       }

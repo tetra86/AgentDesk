@@ -339,7 +339,10 @@ async fn list_agents(
                         (
                     "SELECT a.id, a.name, a.name_ko, a.provider, a.department, a.avatar_emoji,
                             a.discord_channel_id, a.discord_channel_alt, a.status, a.xp,
-                            a.sprite_number, d.name, d.name, NULL, a.created_at
+                            a.sprite_number, d.name, d.name, NULL, a.created_at,
+                            (SELECT COUNT(*) FROM task_dispatches td WHERE td.to_agent_id = a.id AND td.status = 'completed') AS tasks_done,
+                            (SELECT COALESCE(SUM(s.tokens), 0) FROM sessions s WHERE s.agent_id = a.id) AS total_tokens,
+                            (SELECT td2.id FROM task_dispatches td2 JOIN kanban_cards kc ON kc.latest_dispatch_id = td2.id WHERE td2.to_agent_id = a.id AND kc.status = 'in_progress' LIMIT 1) AS current_task
                      FROM agents a
                      LEFT JOIN departments d ON d.id = a.department
                      ORDER BY a.id".to_string(),
@@ -379,17 +382,17 @@ async fn list_agents(
                             "status": row.get::<_, Option<String>>(8)?,
                             "xp": xp_val,
                             "stats_xp": xp_val,
-                            "stats_tasks_done": 0,
-                            "stats_tokens": 0,
+                            "stats_tasks_done": row.get::<_, i64>(15).unwrap_or(0),
+                            "stats_tokens": row.get::<_, i64>(16).unwrap_or(0),
                             "sprite_number": row.get::<_, Option<i64>>(10)?,
                             "department_name": row.get::<_, Option<String>>(11)?,
                             "department_name_ko": row.get::<_, Option<String>>(12)?,
                             "department_color": row.get::<_, Option<String>>(13)?,
                             "created_at": row.get::<_, Option<String>>(14)?,
                             "alias": serde_json::Value::Null,
-                            "role_id": serde_json::Value::Null,
+                            "role_id": row.get::<_, Option<String>>(0)?,
                             "personality": serde_json::Value::Null,
-                            "current_task_id": serde_json::Value::Null,
+                            "current_task_id": row.get::<_, Option<String>>(17)?,
                         }))
                     })
                     .ok();
@@ -414,7 +417,10 @@ async fn get_agent(
             let result = conn.query_row(
                 "SELECT a.id, a.name, a.name_ko, a.provider, a.department, a.avatar_emoji,
                         a.discord_channel_id, a.discord_channel_alt, a.status, a.xp,
-                        a.sprite_number, d.name, d.name, NULL, a.created_at
+                        a.sprite_number, d.name, d.name, NULL, a.created_at,
+                        (SELECT COUNT(*) FROM task_dispatches td WHERE td.to_agent_id = a.id AND td.status = 'completed') AS tasks_done,
+                        (SELECT COALESCE(SUM(s.tokens), 0) FROM sessions s WHERE s.agent_id = a.id) AS total_tokens,
+                        (SELECT td2.id FROM task_dispatches td2 JOIN kanban_cards kc ON kc.latest_dispatch_id = td2.id WHERE td2.to_agent_id = a.id AND kc.status = 'in_progress' LIMIT 1) AS current_task
                  FROM agents a
                  LEFT JOIN departments d ON d.id = a.department
                  WHERE a.id = ?1",
@@ -438,17 +444,17 @@ async fn get_agent(
                         "status": row.get::<_, Option<String>>(8)?,
                         "xp": xp_val,
                         "stats_xp": xp_val,
-                        "stats_tasks_done": 0,
-                        "stats_tokens": 0,
+                        "stats_tasks_done": row.get::<_, i64>(15).unwrap_or(0),
+                        "stats_tokens": row.get::<_, i64>(16).unwrap_or(0),
                         "sprite_number": row.get::<_, Option<i64>>(10)?,
                         "department_name": row.get::<_, Option<String>>(11)?,
                         "department_name_ko": row.get::<_, Option<String>>(12)?,
                         "department_color": row.get::<_, Option<String>>(13)?,
                         "created_at": row.get::<_, Option<String>>(14)?,
                         "alias": serde_json::Value::Null,
-                        "role_id": serde_json::Value::Null,
+                        "role_id": row.get::<_, Option<String>>(0)?,
                         "personality": serde_json::Value::Null,
-                        "current_task_id": serde_json::Value::Null,
+                        "current_task_id": row.get::<_, Option<String>>(17)?,
                     }))
                 },
             );
