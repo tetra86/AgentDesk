@@ -348,8 +348,14 @@ pub async fn update_card(
     let new_status = body.status.clone();
 
     // Status change via transition_status_with_opts (dispatch validation + audit)
-    // Do this BEFORE reading card back, so the response reflects the new status
+    // "requested" transition is ONLY allowed via POST /api/dispatches (which creates dispatch + sets status)
     if let Some(new_s) = &new_status {
+        if new_s == "requested" {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "Use POST /api/dispatches to start work. PATCH status=requested is not allowed."})),
+            );
+        }
         if new_s.as_str() != old_status {
             match crate::kanban::transition_status_with_opts(
                 &state.db, &state.engine, &id, new_s, "api", false,
