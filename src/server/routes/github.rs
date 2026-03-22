@@ -125,7 +125,7 @@ pub async fn sync_repo(
     let triaged = github::triage::triage_new_issues(&state.db, &repo_id, &issues).unwrap_or(0);
 
     // Sync state
-    let sync_result = match github::sync::sync_github_issues_for_repo(&state.db, &repo_id, &issues)
+    let sync_result = match github::sync::sync_github_issues_for_repo(&state.db, &state.engine, &repo_id, &issues)
     {
         Ok(r) => r,
         Err(e) => {

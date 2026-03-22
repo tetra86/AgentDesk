@@ -47,66 +47,72 @@ pub fn fetch_issues(repo: &str) -> Result<Vec<GhIssue>, String> {
 /// Returns (closed_count, inconsistency_count).
 pub fn sync_github_issues_for_repo(
     db: &Db,
+    engine: &crate::engine::PolicyEngine,
     repo: &str,
     issues: &[GhIssue],
 ) -> Result<SyncResult, String> {
-    let conn = db.lock().map_err(|e| format!("db lock: {e}"))?;
     let mut result = SyncResult::default();
 
-    for issue in issues {
-        // Find kanban cards linked to this issue
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, status FROM kanban_cards WHERE github_issue_number = ?1 AND repo_id = ?2",
-            )
-            .map_err(|e| format!("prepare: {e}"))?;
+    // Collect cards to close (need to drop conn before calling transition_status)
+    let mut cards_to_close: Vec<(String, i64)> = Vec::new();
 
-        let cards: Vec<(String, String)> = stmt
-            .query_map(rusqlite::params![issue.number, repo], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })
-            .map_err(|e| format!("query: {e}"))?
-            .filter_map(|r| r.ok())
-            .collect();
-
-        for (card_id, card_status) in &cards {
-            if issue.state == "CLOSED" && card_status != "done" && card_status != "cancelled" {
-                // Issue closed on GitHub, card not done -> mark done
-                conn.execute(
-                    "UPDATE kanban_cards SET status = 'done', updated_at = datetime('now') WHERE id = ?1",
-                    [card_id],
+    {
+        let conn = db.lock().map_err(|e| format!("db lock: {e}"))?;
+        for issue in issues {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, status FROM kanban_cards WHERE github_issue_number = ?1 AND repo_id = ?2",
                 )
-                .map_err(|e| format!("update: {e}"))?;
-                result.closed_count += 1;
-                tracing::info!(
-                    "[github-sync] {repo}#{}: card {} → done (issue closed)",
-                    issue.number,
-                    card_id
-                );
-            } else if issue.state == "OPEN" && card_status == "done" {
-                // Issue open on GitHub but card is done -> inconsistency
-                result.inconsistency_count += 1;
-                tracing::warn!(
-                    "[github-sync] {repo}#{}: card {} is 'done' but issue is OPEN",
-                    issue.number,
-                    card_id
-                );
+                .map_err(|e| format!("prepare: {e}"))?;
+
+            let cards: Vec<(String, String)> = stmt
+                .query_map(rusqlite::params![issue.number, repo], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(|e| format!("query: {e}"))?
+                .filter_map(|r| r.ok())
+                .collect();
+
+            for (card_id, card_status) in &cards {
+                if issue.state == "CLOSED" && card_status != "done" && card_status != "cancelled" {
+                    cards_to_close.push((card_id.clone(), issue.number));
+                } else if issue.state == "OPEN" && card_status == "done" {
+                    result.inconsistency_count += 1;
+                    tracing::warn!(
+                        "[github-sync] {repo}#{}: card {} is 'done' but issue is OPEN",
+                        issue.number,
+                        card_id
+                    );
+                }
             }
         }
-    }
 
-    // Update last_synced_at
-    conn.execute(
-        "UPDATE github_repos SET last_synced_at = datetime('now') WHERE id = ?1",
-        [repo],
-    )
-    .map_err(|e| format!("update last_synced_at: {e}"))?;
+        // Update last_synced_at
+        conn.execute(
+            "UPDATE github_repos SET last_synced_at = datetime('now') WHERE id = ?1",
+            [repo],
+        )
+        .map_err(|e| format!("update last_synced_at: {e}"))?;
+    } // conn dropped here
+
+    // Process closures via central state machine (outside conn lock)
+    for (card_id, issue_number) in &cards_to_close {
+        let _ = crate::kanban::transition_status_with_opts(
+            db, engine, card_id, "done", "github-sync", true,
+        );
+        result.closed_count += 1;
+        tracing::info!(
+            "[github-sync] {repo}#{}: card {} → done (issue closed)",
+            issue_number,
+            card_id
+        );
+    }
 
     Ok(result)
 }
 
 /// Sync all registered repos (orchestration function).
-pub fn sync_all_repos(db: &Db) -> Result<SyncResult, String> {
+pub fn sync_all_repos(db: &Db, engine: &crate::engine::PolicyEngine) -> Result<SyncResult, String> {
     let repos = super::list_repos(db)?;
     let mut total = SyncResult::default();
 
@@ -116,7 +122,7 @@ pub fn sync_all_repos(db: &Db) -> Result<SyncResult, String> {
         }
 
         match fetch_issues(&repo.id) {
-            Ok(issues) => match sync_github_issues_for_repo(db, &repo.id, &issues) {
+            Ok(issues) => match sync_github_issues_for_repo(db, engine, &repo.id, &issues) {
                 Ok(r) => {
                     total.closed_count += r.closed_count;
                     total.inconsistency_count += r.inconsistency_count;
@@ -150,6 +156,13 @@ mod tests {
         conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
         crate::db::schema::migrate(&conn).unwrap();
         Arc::new(Mutex::new(conn))
+    }
+
+    fn test_engine(db: &crate::db::Db) -> crate::engine::PolicyEngine {
+        let mut config = crate::config::Config::default();
+        config.policies.dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies");
+        config.policies.hot_reload = false;
+        crate::engine::PolicyEngine::new(&config, db.clone()).unwrap()
     }
 
     #[test]
@@ -191,7 +204,7 @@ mod tests {
             body: None,
         }];
 
-        let result = sync_github_issues_for_repo(&db, "owner/repo", &issues).unwrap();
+        let result = sync_github_issues_for_repo(&db, &test_engine(&db), "owner/repo", &issues).unwrap();
         assert_eq!(result.closed_count, 1);
         assert_eq!(result.inconsistency_count, 0);
 
@@ -228,7 +241,7 @@ mod tests {
             body: None,
         }];
 
-        let result = sync_github_issues_for_repo(&db, "owner/repo", &issues).unwrap();
+        let result = sync_github_issues_for_repo(&db, &test_engine(&db), "owner/repo", &issues).unwrap();
         assert_eq!(result.closed_count, 0);
         assert_eq!(result.inconsistency_count, 1);
     }
@@ -256,7 +269,7 @@ mod tests {
             body: None,
         }];
 
-        let result = sync_github_issues_for_repo(&db, "owner/repo", &issues).unwrap();
+        let result = sync_github_issues_for_repo(&db, &test_engine(&db), "owner/repo", &issues).unwrap();
         assert_eq!(result.closed_count, 0);
         assert_eq!(result.inconsistency_count, 0);
     }

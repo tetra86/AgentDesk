@@ -152,11 +152,10 @@ pub async fn trigger_rework(
         }
     };
 
-    match conn.execute(
-        "UPDATE kanban_cards SET status = 'in_progress', updated_at = datetime('now') WHERE id = ?1",
-        [&card_id],
+    drop(conn);
+    match crate::kanban::transition_status_with_opts(
+        &state.db, &state.engine, &card_id, "in_progress", "trigger-rework", true,
     ) {
-        Ok(0) => (StatusCode::NOT_FOUND, Json(json!({"error": "card not found"}))),
         Ok(_) => (StatusCode::OK, Json(json!({"ok": true}))),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,

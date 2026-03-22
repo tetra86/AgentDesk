@@ -15,8 +15,9 @@ pub async fn run(config: Config, db: Db, engine: PolicyEngine) -> Result<()> {
     let sync_interval = config.github.sync_interval_minutes;
     if sync_interval > 0 {
         let sync_db = db.clone();
+        let sync_engine = engine.clone();
         tokio::spawn(async move {
-            github_sync_loop(sync_db, sync_interval).await;
+            github_sync_loop(sync_db, sync_engine, sync_interval).await;
         });
     }
 
@@ -65,7 +66,7 @@ async fn policy_tick_loop(engine: PolicyEngine) {
 }
 
 /// Background task that periodically syncs GitHub issues for all registered repos.
-async fn github_sync_loop(db: Db, interval_minutes: u64) {
+async fn github_sync_loop(db: Db, engine: crate::engine::PolicyEngine, interval_minutes: u64) {
     use std::time::Duration;
 
     if !crate::github::gh_available() {
@@ -119,7 +120,7 @@ async fn github_sync_loop(db: Db, interval_minutes: u64) {
             }
 
             // Sync state
-            match crate::github::sync::sync_github_issues_for_repo(&db, &repo.id, &issues) {
+            match crate::github::sync::sync_github_issues_for_repo(&db, &engine, &repo.id, &issues) {
                 Ok(r) => {
                     if r.closed_count > 0 || r.inconsistency_count > 0 {
                         tracing::info!(

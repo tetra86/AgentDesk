@@ -551,13 +551,6 @@ pub async fn activate(
 
     let mut dispatched = Vec::new();
     for (entry_id, card_id, agent_id) in &pending {
-        // Set card to requested
-        conn.execute(
-            "UPDATE kanban_cards SET status = 'requested', updated_at = datetime('now') WHERE id = ?1",
-            [card_id],
-        )
-        .ok();
-
         // Mark entry as dispatched
         conn.execute(
             "UPDATE auto_queue_entries SET status = 'dispatched', dispatched_at = datetime('now') WHERE id = ?1",
