@@ -827,6 +827,28 @@ pub(super) fn spawn_turn_bridge(
         clear_inflight_state(&provider, channel_id.get());
         shared_owned.recovering_channels.remove(&channel_id);
 
+        // For dispatch-based turns (threads), kill the tmux session after
+        // finalization. Thread sessions are one-shot — keeping claude alive
+        // in "Ready for input" blocks idle detection and the auto-complete pipeline.
+        #[cfg(unix)]
+        if dispatch_id.is_some() {
+            if let Some(ref name) = cancel_token
+                .tmux_session
+                .lock()
+                .ok()
+                .and_then(|g| g.clone())
+            {
+                record_tmux_exit_reason(name, "dispatch turn completed — killing thread session");
+                let sess = name.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    let _ = std::process::Command::new("tmux")
+                        .args(["kill-session", "-t", &sess])
+                        .output();
+                })
+                .await;
+            }
+        }
+
         // Finalization complete — decrement counters
         shared_owned
             .finalizing_turns
