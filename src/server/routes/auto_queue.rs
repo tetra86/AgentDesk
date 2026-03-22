@@ -1028,33 +1028,47 @@ pub async fn submit_order(
     };
     ensure_tables(&conn);
 
-    // Verify run exists and is pending
-    let run_status: Option<String> = conn
+    // Verify run exists and is pending, get repo for filtering
+    let run_info: Option<(String, Option<String>)> = conn
         .query_row(
-            "SELECT status FROM auto_queue_runs WHERE id = ?1",
+            "SELECT status, repo FROM auto_queue_runs WHERE id = ?1",
             [&run_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .ok();
 
-    if run_status.as_deref() != Some("pending") {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "run not found or not pending"})),
-        );
+    match run_info.as_ref().map(|(s, _)| s.as_str()) {
+        Some("pending") => {}
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "run not found or not pending"})),
+            );
+        }
     }
+    let run_repo = run_info.as_ref().and_then(|(_, r)| r.clone());
 
     // Create entries from the ordered list
     let mut created = 0;
     for (rank, item) in body.order.iter().enumerate() {
         // Item can be issue number (i64) or card_id (string)
+        // When matching by issue number, filter by repo to prevent cross-repo collisions
         let card_id: Option<String> = if let Some(num) = item.as_i64() {
-            conn.query_row(
-                "SELECT id FROM kanban_cards WHERE github_issue_number = ?1",
-                [num],
-                |row| row.get(0),
-            )
-            .ok()
+            if let Some(ref repo) = run_repo {
+                conn.query_row(
+                    "SELECT id FROM kanban_cards WHERE github_issue_number = ?1 AND repo_id = ?2",
+                    rusqlite::params![num, repo],
+                    |row| row.get(0),
+                )
+                .ok()
+            } else {
+                conn.query_row(
+                    "SELECT id FROM kanban_cards WHERE github_issue_number = ?1",
+                    [num],
+                    |row| row.get(0),
+                )
+                .ok()
+            }
         } else if let Some(id) = item.as_str() {
             Some(id.to_string())
         } else {
