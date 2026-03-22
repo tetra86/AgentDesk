@@ -208,9 +208,30 @@ pub async fn generate(
         .unwrap_or_default();
 
     if cards.is_empty() {
+        // Provide context: how many cards are in backlog vs other statuses
+        let backlog_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM kanban_cards WHERE status = 'backlog'", [], |row| row.get(0))
+            .unwrap_or(0);
+        let in_progress_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM kanban_cards WHERE status = 'in_progress'", [], |row| row.get(0))
+            .unwrap_or(0);
+        let review_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM kanban_cards WHERE status = 'review'", [], |row| row.get(0))
+            .unwrap_or(0);
         return (
             StatusCode::OK,
-            Json(json!({ "run": null, "entries": [], "message": "No ready cards found" })),
+            Json(json!({
+                "run": null,
+                "entries": [],
+                "message": "No ready cards found",
+                "hint": "Move cards from backlog to ready before generating a queue.",
+                "counts": {
+                    "ready": 0,
+                    "backlog": backlog_count,
+                    "in_progress": in_progress_count,
+                    "review": review_count,
+                },
+            })),
         );
     }
 

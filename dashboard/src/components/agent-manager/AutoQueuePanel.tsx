@@ -250,9 +250,17 @@ export default function AutoQueuePanel({ tr, locale, agents, selectedRepo, selec
     setGenerating(true);
     setError(null);
     try {
-      // Reset existing queue first, then generate fresh
       await api.resetAutoQueue();
-      await api.generateAutoQueue(selectedRepo || null, selectedAgentId, generateMode);
+      const result = await api.generateAutoQueue(selectedRepo || null, selectedAgentId, generateMode) as Record<string, unknown>;
+      if (result.entries && Array.isArray(result.entries) && result.entries.length === 0) {
+        const counts = result.counts as Record<string, number> | undefined;
+        const backlog = counts?.backlog ?? 0;
+        const hint = backlog > 0
+          ? tr(`준비됨 상태의 카드가 없습니다. 백로그에 ${backlog}개 카드가 있습니다 — 준비됨으로 이동하세요.`,
+               `No ready cards. ${backlog} cards in backlog — move them to ready first.`)
+          : tr("준비됨 상태의 카드가 없습니다.", "No ready cards found.");
+        setError(hint);
+      }
       await fetchStatus();
     } catch (e) {
       setError(e instanceof Error ? e.message : tr("큐 생성 실패", "Queue generation failed"));
