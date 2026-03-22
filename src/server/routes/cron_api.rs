@@ -8,15 +8,30 @@ fn build_cron_jobs(state: &AppState, agent_filter: Option<&str>) -> Vec<serde_js
     let policies = state.engine.list_policies();
     let now_ms = chrono::Utc::now().timestamp_millis();
 
+    // Read actual last tick time from DB
+    let last_tick_ms: i64 = state
+        .db
+        .lock()
+        .ok()
+        .and_then(|conn| {
+            conn.query_row(
+                "SELECT value FROM kv_meta WHERE key = 'last_tick_ms'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .ok()
+        })
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(now_ms - 30000);
+
+    let next_tick_ms = last_tick_ms + 60000;
+
     policies
         .iter()
         .filter(|p| p.hooks.iter().any(|h| h == "onTick"))
-        .filter(|p| {
-            if let Some(agent_id) = agent_filter {
-                // Only include policies relevant to this agent
-                // All onTick policies are global, so include all unless we add agent-scoping later
-                let _ = agent_id;
-                true
+        .filter(|_p| {
+            if let Some(_agent_id) = agent_filter {
+                true // All onTick policies are global
             } else {
                 true
             }
@@ -49,8 +64,8 @@ fn build_cron_jobs(state: &AppState, agent_filter: Option<&str>) -> Vec<serde_js
                 "state": {
                     "status": "active",
                     "lastStatus": "ok",
-                    "lastRunAtMs": now_ms - 30000, // approximate
-                    "nextRunAtMs": now_ms + 30000,
+                    "lastRunAtMs": last_tick_ms,
+                    "nextRunAtMs": next_tick_ms,
                 },
             })
         })

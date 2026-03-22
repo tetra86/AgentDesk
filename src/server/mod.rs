@@ -24,8 +24,9 @@ pub async fn run(config: Config, db: Db, engine: PolicyEngine) -> Result<()> {
     // Spawn periodic policy tick (fires OnTick every 60s)
     {
         let tick_engine = engine.clone();
+        let tick_db = db.clone();
         tokio::spawn(async move {
-            policy_tick_loop(tick_engine).await;
+            policy_tick_loop(tick_engine, tick_db).await;
         });
     }
 
@@ -50,7 +51,7 @@ pub async fn run(config: Config, db: Db, engine: PolicyEngine) -> Result<()> {
 }
 
 /// Background task that fires the OnTick policy hook at regular intervals.
-async fn policy_tick_loop(engine: PolicyEngine) {
+async fn policy_tick_loop(engine: PolicyEngine, db: Db) {
     use std::time::Duration;
 
     let interval = Duration::from_secs(60);
@@ -61,6 +62,14 @@ async fn policy_tick_loop(engine: PolicyEngine) {
         if let Err(e) = engine.fire_hook(crate::engine::hooks::Hook::OnTick, serde_json::json!({}))
         {
             tracing::warn!("[policy-tick] OnTick hook error: {e}");
+        }
+        // Record last tick time for cron-jobs API
+        if let Ok(conn) = db.lock() {
+            conn.execute(
+                "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('last_tick_ms', ?1)",
+                [chrono::Utc::now().timestamp_millis().to_string()],
+            )
+            .ok();
         }
     }
 }
