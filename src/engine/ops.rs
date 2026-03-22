@@ -38,6 +38,9 @@ pub fn register_globals(ctx: &Ctx<'_>, db: Db) -> JsResult<()> {
     // ── agentdesk.kanban ────────────────────────────────────────
     register_kanban_ops(ctx, db)?;
 
+    // ── agentdesk.exec ──────────────────────────────────────────
+    register_exec_ops(ctx)?;
+
     Ok(())
 }
 
@@ -657,6 +660,55 @@ fn register_kanban_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
                 var result = JSON.parse(getRaw(cardId));
                 if (result.error) return null;
                 return result;
+            };
+        })();
+    "#,
+    )?;
+
+    Ok(())
+}
+
+// ── Exec ops ──────────────────────────────────────────────────────
+//
+// agentdesk.exec(command, args) → stdout string
+// Runs a local command synchronously. Limited to safe commands.
+
+fn register_exec_ops<'js>(ctx: &Ctx<'js>) -> JsResult<()> {
+    let ad: Object<'js> = ctx.globals().get("agentdesk")?;
+
+    ad.set(
+        "exec",
+        Function::new(ctx.clone(), |cmd: String, args_json: String| -> String {
+            // Only allow safe commands
+            let allowed = ["gh", "git"];
+            if !allowed.contains(&cmd.as_str()) {
+                return format!("ERROR: command '{}' not allowed", cmd);
+            }
+
+            let args: Vec<String> = serde_json::from_str(&args_json).unwrap_or_default();
+            match std::process::Command::new(&cmd)
+                .args(&args)
+                .output()
+            {
+                Ok(output) if output.status.success() => {
+                    String::from_utf8_lossy(&output.stdout).trim().to_string()
+                }
+                Ok(output) => {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    format!("ERROR: {}", stderr.trim())
+                }
+                Err(e) => format!("ERROR: {}", e),
+            }
+        })?,
+    )?;
+
+    // JS wrapper to accept array directly
+    let _: rquickjs::Value = ctx.eval(
+        r#"
+        (function() {
+            var rawExec = agentdesk.exec;
+            agentdesk.exec = function(cmd, args) {
+                return rawExec(cmd, JSON.stringify(args || []));
             };
         })();
     "#,

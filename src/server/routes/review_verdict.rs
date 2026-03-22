@@ -48,6 +48,26 @@ pub async fn submit_verdict(
         }
     };
 
+    // B: Block self-review — the reviewed agent cannot submit its own verdict
+    let self_review_check: Option<(String, String)> = conn
+        .query_row(
+            "SELECT td.to_agent_id, kc.assigned_agent_id \
+             FROM task_dispatches td \
+             JOIN kanban_cards kc ON kc.id = td.kanban_card_id \
+             WHERE td.id = ?1",
+            [&body.dispatch_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .ok();
+    if let Some((reviewer, reviewee)) = &self_review_check {
+        if reviewer == reviewee {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({"error": "Self-review is not allowed. The reviewed agent cannot submit its own verdict."})),
+            );
+        }
+    }
+
     // Build result JSON
     let result_json = json!({
         "verdict": body.overall,

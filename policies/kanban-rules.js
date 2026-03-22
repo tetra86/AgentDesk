@@ -69,24 +69,62 @@ var rules = {
     // 카운터모델 리뷰 세션이 idle이 되면 디스패치를 자동 완료하고 verdict 전달
     if (payload.status === "idle" && card.status === "review") {
       var dispatch = agentdesk.db.query(
-        "SELECT id, dispatch_type, status, result FROM task_dispatches WHERE id = ?",
+        "SELECT id, dispatch_type, status, result, kanban_card_id FROM task_dispatches WHERE id = ?",
         [payload.dispatch_id]
       );
       if (dispatch.length > 0 && dispatch[0].dispatch_type === "review" && dispatch[0].status === "pending") {
-        // 디스패치 결과에서 verdict 추출 시도
-        var verdict = "pass"; // 기본값: 리뷰어가 이슈 없이 종료 = 통과
+        // C: GitHub 코멘트에서 verdict 추출 시도
+        var verdict = null;
         var resultJson = dispatch[0].result;
         if (resultJson) {
           try {
             var parsed = JSON.parse(resultJson);
             if (parsed.verdict) verdict = parsed.verdict;
-          } catch(e) { /* parse fail = use default */ }
+          } catch(e) { /* parse fail */ }
+        }
+
+        // C: GitHub 이슈 코멘트에서 verdict 키워드 파싱
+        if (!verdict) {
+          var cardInfo = agentdesk.db.query(
+            "SELECT github_issue_url FROM kanban_cards WHERE id = ?",
+            [dispatch[0].kanban_card_id]
+          );
+          if (cardInfo.length > 0 && cardInfo[0].github_issue_url) {
+            // Extract owner/repo#number from URL
+            var urlMatch = (cardInfo[0].github_issue_url || "").match(/github\.com\/([^/]+\/[^/]+)\/issues\/(\d+)/);
+            if (urlMatch) {
+              try {
+                var ghOutput = agentdesk.exec("gh", ["issue", "view", urlMatch[2], "--repo", urlMatch[1], "--comments", "--json", "comments", "--jq", ".comments[-1].body"]);
+                if (ghOutput) {
+                  var lower = ghOutput.toLowerCase();
+                  if (lower.indexOf("verdict: pass") >= 0 || lower.indexOf("verdict: **pass**") >= 0 || lower.indexOf("pass") >= 0 && lower.indexOf("improve") < 0) {
+                    verdict = "pass";
+                  } else if (lower.indexOf("improve") >= 0 || lower.indexOf("verdict: improve") >= 0 || lower.indexOf("verdict: **improve**") >= 0) {
+                    verdict = "improve";
+                  }
+                }
+              } catch(e) {
+                agentdesk.log.warn("[kanban] GitHub comment parsing failed: " + e);
+              }
+            }
+          }
+        }
+
+        // A: verdict 추출 실패 시 pending_decision (pass 기본값 금지)
+        if (!verdict) {
+          agentdesk.kanban.setStatus(card.id, "pending_decision");
+          agentdesk.db.execute(
+            "UPDATE kanban_cards SET blocked_reason = 'Review completed but verdict unclear — manual decision needed' WHERE id = ?",
+            [card.id]
+          );
+          agentdesk.log.warn("[kanban] review dispatch " + payload.dispatch_id + " — no clear verdict, → pending_decision");
+          return;
         }
 
         // 디스패치 completed 처리
         agentdesk.db.execute(
           "UPDATE task_dispatches SET status = 'completed', result = ?, updated_at = datetime('now') WHERE id = ?",
-          [JSON.stringify({ verdict: verdict, auto_completed: true }), payload.dispatch_id]
+          [JSON.stringify({ verdict: verdict, auto_completed: true, source: "github_comment" }), payload.dispatch_id]
         );
         agentdesk.log.info("[kanban] review dispatch " + payload.dispatch_id + " auto-completed with verdict: " + verdict);
       }
