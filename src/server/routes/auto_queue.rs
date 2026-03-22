@@ -525,13 +525,14 @@ pub async fn activate(
         );
     };
 
-    // Get all pending entries
+    // Get first pending entry only (sequential dispatch — one at a time)
     let mut stmt = conn
         .prepare(
             "SELECT e.id, e.kanban_card_id, e.agent_id
              FROM auto_queue_entries e
              WHERE e.run_id = ?1 AND e.status = 'pending'
-             ORDER BY e.priority_rank ASC",
+             ORDER BY e.priority_rank ASC
+             LIMIT 1",
         )
         .unwrap();
 
@@ -1086,8 +1087,87 @@ pub async fn submit_order(
     )
     .ok();
 
+    // Auto-start first pending entry (avoid requiring separate activate call)
+    let first_entry: Option<(String, String, String, String)> = conn
+        .query_row(
+            "SELECT e.id, e.kanban_card_id, e.agent_id, kc.title
+             FROM auto_queue_entries e
+             JOIN kanban_cards kc ON kc.id = e.kanban_card_id
+             WHERE e.run_id = ?1 AND e.status = 'pending'
+             ORDER BY e.priority_rank ASC LIMIT 1",
+            [&run_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .ok();
+
+    let first_dispatched = if let Some((entry_id, card_id, agent_id, title)) = first_entry {
+        // Mark entry as dispatched
+        conn.execute(
+            "UPDATE auto_queue_entries SET status = 'dispatched', dispatched_at = datetime('now') WHERE id = ?1",
+            [&entry_id],
+        )
+        .ok();
+        drop(conn);
+
+        // Create dispatch (this also sets card status to 'requested')
+        let dispatch_result = crate::dispatch::create_dispatch(
+            &state.db,
+            &state.engine,
+            &card_id,
+            &agent_id,
+            "implementation",
+            &title,
+            &json!({"auto_queue": true, "entry_id": entry_id}),
+        );
+
+        // Async Discord notification
+        if dispatch_result.is_ok() {
+            let db_clone = state.db.clone();
+            let card_id_c = card_id.clone();
+            let agent_id_c = agent_id.clone();
+            tokio::spawn(async move {
+                let info: Option<(String, String)> = {
+                    let conn = match db_clone.lock() {
+                        Ok(c) => c,
+                        Err(_) => return,
+                    };
+                    conn.query_row(
+                        "SELECT latest_dispatch_id, title FROM kanban_cards WHERE id = ?1",
+                        [&card_id_c],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .ok()
+                };
+                if let Some((dispatch_id, title)) = info {
+                    super::dispatches::send_dispatch_to_discord(
+                        &db_clone,
+                        &agent_id_c,
+                        &title,
+                        &card_id_c,
+                        &dispatch_id,
+                    )
+                    .await;
+                }
+            });
+        }
+
+        Some(json!({
+            "card_id": card_id,
+            "agent_id": agent_id,
+            "title": title,
+        }))
+    } else {
+        drop(conn);
+        None
+    };
+
     (
         StatusCode::OK,
-        Json(json!({"ok": true, "created": created, "run_id": run_id})),
+        Json(json!({
+            "ok": true,
+            "created": created,
+            "run_id": run_id,
+            "first_dispatched": first_dispatched,
+        })),
     )
 }
