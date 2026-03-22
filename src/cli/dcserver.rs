@@ -873,6 +873,18 @@ pub fn handle_dcserver(token: Option<String>) {
         // and force-exits if the tokio runtime becomes unresponsive.
         services::discord::health::spawn_watchdog(health_port);
 
+        // Async heartbeat: proves the tokio runtime is scheduling tasks.
+        // If this stops printing, the runtime is hung (watchdog will catch it).
+        tokio::spawn(async {
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
+            interval.tick().await; // skip first immediate tick
+            loop {
+                interval.tick().await;
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                eprintln!("  [{ts}] 💓 runtime heartbeat");
+            }
+        });
+
         match token {
             Some(token) => {
                 let provider = services::discord::resolve_discord_bot_provider(&token);

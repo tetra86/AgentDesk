@@ -657,7 +657,20 @@ pub fn spawn_watchdog(port: u16) {
                     );
                     if consecutive_failures >= MAX_FAILURES {
                         eprintln!(
-                            "  [{ts}] 🩺 watchdog: runtime unresponsive — forcing exit"
+                            "  [{ts}] 🩺 watchdog: runtime unresponsive — capturing diagnostics before exit"
+                        );
+                        // Capture process sample for post-mortem analysis
+                        let pid = std::process::id();
+                        let dump_path = format!(
+                            "/tmp/adk-hang-{}-{}.txt",
+                            pid,
+                            chrono::Local::now().format("%Y%m%d-%H%M%S")
+                        );
+                        let _ = std::process::Command::new("sample")
+                            .args([&pid.to_string(), "1", "-f", &dump_path])
+                            .status();
+                        eprintln!(
+                            "  [{ts}] 🩺 watchdog: sample saved to {dump_path} — forcing exit"
                         );
                         std::process::exit(1);
                     }
