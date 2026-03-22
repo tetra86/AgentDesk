@@ -48,19 +48,24 @@ pub async fn submit_verdict(
         }
     };
 
-    // B: Block self-review — the reviewed agent cannot submit its own verdict
-    let self_review_check: Option<(String, String)> = conn
+    // B: Block self-review — but allow counter-model (alt-provider) reviews.
+    // Counter-model reviews target the same agent_id but use a different provider
+    // channel (e.g., Claude reviews Codex's work via the alt channel).
+    // Only block when: same agent AND same dispatch_type is NOT 'review'.
+    let self_review_check: Option<(String, String, String)> = conn
         .query_row(
-            "SELECT td.to_agent_id, kc.assigned_agent_id \
+            "SELECT td.to_agent_id, kc.assigned_agent_id, COALESCE(td.dispatch_type, '') \
              FROM task_dispatches td \
              JOIN kanban_cards kc ON kc.id = td.kanban_card_id \
              WHERE td.id = ?1",
             [&body.dispatch_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .ok();
-    if let Some((reviewer, reviewee)) = &self_review_check {
-        if reviewer == reviewee {
+    if let Some((reviewer, reviewee, dispatch_type)) = &self_review_check {
+        // Allow review-type dispatches (counter-model review uses same agent_id but alt channel)
+        let is_review_dispatch = dispatch_type == "review" || dispatch_type == "review-decision";
+        if reviewer == reviewee && !is_review_dispatch {
             return (
                 StatusCode::FORBIDDEN,
                 Json(
@@ -460,5 +465,75 @@ mod tests {
         assert_eq!(dispatch_type, "review-decision");
         assert_eq!(dispatch_status, "pending");
         assert!(context.contains("\"verdict\":\"improve\""));
+    }
+
+    #[tokio::test]
+    async fn counter_model_review_verdict_not_blocked_by_self_review() {
+        // Counter-model review: to_agent_id == assigned_agent_id but dispatch_type = 'review'
+        // This should NOT be blocked (alt-provider review)
+        let db = test_db();
+        seed_review_card(&db, "dispatch-counter");
+        let state = AppState {
+            db: db.clone(),
+            engine: test_engine(&db),
+        };
+
+        let (status, body) = submit_verdict(
+            State(state),
+            Json(SubmitVerdictBody {
+                dispatch_id: "dispatch-counter".to_string(),
+                overall: "pass".to_string(),
+                items: None,
+                notes: None,
+                feedback: None,
+            }),
+        )
+        .await;
+
+        // Should succeed (not 403)
+        assert_eq!(status, StatusCode::OK);
+        let ok = body.0.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+        assert!(ok, "counter-model review verdict should not be blocked");
+    }
+
+    #[tokio::test]
+    async fn self_review_blocked_for_non_review_dispatch() {
+        // Same agent submitting verdict on a non-review dispatch should be blocked
+        let db = test_db();
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) VALUES ('agent-self', 'Self', '111', '222')",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, latest_dispatch_id, created_at, updated_at)
+             VALUES ('card-self', 'Self Test', 'in_progress', 'agent-self', 'dispatch-self', datetime('now'), datetime('now'))",
+            [],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at)
+             VALUES ('dispatch-self', 'card-self', 'agent-self', 'implementation', 'pending', 'Self Task', datetime('now'), datetime('now'))",
+            [],
+        ).unwrap();
+        drop(conn);
+
+        let state = AppState {
+            db: db.clone(),
+            engine: test_engine(&db),
+        };
+
+        let (status, _) = submit_verdict(
+            State(state),
+            Json(SubmitVerdictBody {
+                dispatch_id: "dispatch-self".to_string(),
+                overall: "pass".to_string(),
+                items: None,
+                notes: None,
+                feedback: None,
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::FORBIDDEN, "self-review on non-review dispatch should be blocked");
     }
 }
