@@ -523,16 +523,52 @@ pub async fn audit_logs(
 }
 
 /// GET /api/machine-status
-pub async fn machine_status() -> (StatusCode, Json<serde_json::Value>) {
-    let result = tokio::task::spawn_blocking(|| {
-        let machines = vec![
-            ("mac-mini", "mac-mini.local"),
-            ("mac-book", "mac-book.local"),
-        ];
+/// Machine list from kv_meta key 'machines' (JSON array of {name, host}).
+/// Falls back to current hostname if not configured.
+pub async fn machine_status(
+    State(state): State<AppState>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    // Read machine list from config
+    let machines_config: Vec<(String, String)> = state
+        .db
+        .lock()
+        .ok()
+        .and_then(|conn| {
+            conn.query_row(
+                "SELECT value FROM kv_meta WHERE key = 'machines'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .ok()
+        })
+        .and_then(|v| serde_json::from_str::<Vec<serde_json::Value>>(&v).ok())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|m| {
+                    let name = m.get("name")?.as_str()?.to_string();
+                    let host = m
+                        .get("host")
+                        .and_then(|h| h.as_str())
+                        .unwrap_or_else(|| m.get("name").and_then(|n| n.as_str()).unwrap_or("localhost"));
+                    Some((name, format!("{}.local", host)))
+                })
+                .collect()
+        })
+        .unwrap_or_else(|| {
+            // Default: current hostname
+            let hostname = Command::new("hostname")
+                .output()
+                .ok()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .unwrap_or_else(|| "localhost".to_string());
+            vec![(hostname.clone(), hostname)]
+        });
+
+    let result = tokio::task::spawn_blocking(move || {
         let mut results = Vec::new();
-        for (name, host) in machines {
+        for (name, host) in machines_config {
             let online = Command::new("ping")
-                .args(["-c1", "-W2", host])
+                .args(["-c1", "-W2", &host])
                 .output()
                 .map(|o| o.status.success())
                 .unwrap_or(false);
