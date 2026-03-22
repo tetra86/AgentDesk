@@ -68,10 +68,26 @@ pub async fn status(
         .map(|rows| rows.filter_map(|r| r.ok()).collect())
         .unwrap_or_default();
 
+    // Load all bot tokens for pre-fill
+    let announce_token: Option<String> = conn
+        .query_row("SELECT value FROM kv_meta WHERE key = 'onboarding_announce_token'", [], |row| row.get(0))
+        .ok();
+    let notify_token: Option<String> = conn
+        .query_row("SELECT value FROM kv_meta WHERE key = 'onboarding_notify_token'", [], |row| row.get(0))
+        .ok();
+    let command_token_2: Option<String> = conn
+        .query_row("SELECT value FROM kv_meta WHERE key = 'onboarding_command_token_2'", [], |row| row.get(0))
+        .ok();
+
     (StatusCode::OK, Json(json!({
         "completed": has_bots && agent_count > 0,
         "agent_count": agent_count,
-        "bot_token": bot_token,
+        "bot_tokens": {
+            "command": bot_token,
+            "announce": announce_token,
+            "notify": notify_token,
+            "command2": command_token_2,
+        },
         "guild_id": guild_id,
         "owner_id": owner_id,
         "agents": agents,
@@ -204,6 +220,9 @@ pub async fn channels(
 #[derive(Debug, Deserialize)]
 pub struct CompleteBody {
     pub token: String,
+    pub announce_token: Option<String>,
+    pub notify_token: Option<String>,
+    pub command_token_2: Option<String>,
     pub guild_id: String,
     pub owner_id: Option<String>,
     pub provider: Option<String>,
@@ -243,6 +262,24 @@ pub async fn complete(
         conn.execute(
             "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('onboarding_owner_id', ?1)",
             [owner],
+        ).ok();
+    }
+    if let Some(ref ann) = body.announce_token {
+        conn.execute(
+            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('onboarding_announce_token', ?1)",
+            [ann],
+        ).ok();
+    }
+    if let Some(ref ntf) = body.notify_token {
+        conn.execute(
+            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('onboarding_notify_token', ?1)",
+            [ntf],
+        ).ok();
+    }
+    if let Some(ref cmd2) = body.command_token_2 {
+        conn.execute(
+            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('onboarding_command_token_2', ?1)",
+            [cmd2],
         ).ok();
     }
 
@@ -305,33 +342,59 @@ pub async fn complete(
     ).ok();
     drop(conn);
 
-    // Write bot token to agentdesk.yaml so dcserver can use it
+    // Write bot tokens to agentdesk.yaml
     if let Some(root) = crate::cli::agentdesk_runtime_root() {
         let yaml_path = root.join("agentdesk.yaml");
-        let mut yaml_content = std::fs::read_to_string(&yaml_path).unwrap_or_default();
+        let existing = std::fs::read_to_string(&yaml_path).unwrap_or_default();
 
-        // Update or add bot token in discord.bots section
-        if yaml_content.contains("command:") {
-            // Replace existing command bot token
-            if let Some(start) = yaml_content.find("command:") {
-                if let Some(token_line) = yaml_content[start..].find("token:") {
-                    let abs_pos = start + token_line;
-                    if let Some(end) = yaml_content[abs_pos..].find('\n') {
-                        let old_line = &yaml_content[abs_pos..abs_pos + end];
-                        let new_line = format!("token: \"{}\"", body.token);
-                        yaml_content = yaml_content.replace(old_line, &new_line);
-                    }
-                }
+        // Parse existing yaml to preserve non-discord sections
+        let mut lines: Vec<String> = Vec::new();
+        let mut in_discord = false;
+        for line in existing.lines() {
+            if line.starts_with("discord:") {
+                in_discord = true;
+                continue;
             }
-        } else {
-            // Append minimal discord config
-            yaml_content.push_str(&format!(
-                "\ndiscord:\n  bots:\n    command:\n      bot_id: \"{}\"\n      token: \"{}\"\n",
-                "", body.token
-            ));
+            if in_discord && (line.starts_with(' ') || line.starts_with('\t') || line.is_empty()) {
+                continue; // skip old discord section
+            }
+            in_discord = false;
+            lines.push(line.to_string());
         }
 
-        std::fs::write(&yaml_path, &yaml_content).ok();
+        // Append fresh discord config
+        lines.push("discord:".to_string());
+        lines.push("  bots:".to_string());
+
+        // Command bot (claude or codex based on provider)
+        let cmd_label = if provider == "codex" { "codex" } else { "claude" };
+        lines.push(format!("    {}:", cmd_label));
+        lines.push(format!("      token: \"{}\"", body.token));
+
+        // Announce bot
+        if let Some(ref ann) = body.announce_token {
+            lines.push("    announce:".to_string());
+            lines.push(format!("      token: \"{}\"", ann));
+        }
+
+        // Notify bot
+        if let Some(ref ntf) = body.notify_token {
+            if !ntf.is_empty() {
+                lines.push("    notify:".to_string());
+                lines.push(format!("      token: \"{}\"", ntf));
+            }
+        }
+
+        // Second command bot (dual provider)
+        if let Some(ref cmd2) = body.command_token_2 {
+            if !cmd2.is_empty() {
+                let cmd2_label = if provider == "codex" { "claude" } else { "codex" };
+                lines.push(format!("    {}:", cmd2_label));
+                lines.push(format!("      token: \"{}\"", cmd2));
+            }
+        }
+
+        std::fs::write(&yaml_path, lines.join("\n") + "\n").ok();
     }
 
     (StatusCode::OK, Json(json!({

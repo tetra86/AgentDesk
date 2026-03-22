@@ -28,16 +28,23 @@ interface Props {
 export default function OnboardingWizard({ isKo, onComplete }: Props) {
   const tr = (ko: string, en: string) => (isKo ? ko : en);
   const [step, setStep] = useState(1);
-  const [token, setToken] = useState("");
-  const [botInfo, setBotInfo] = useState<BotInfo | null>(null);
+  const [commandToken, setCommandToken] = useState("");
+  const [commandToken2, setCommandToken2] = useState(""); // second provider
+  const [announceToken, setAnnounceToken] = useState("");
+  const [notifyToken, setNotifyToken] = useState("");
+  const [commandBotInfo, setCommandBotInfo] = useState<BotInfo | null>(null);
+  const [announceBotInfo, setAnnounceBotInfo] = useState<BotInfo | null>(null);
   const [validating, setValidating] = useState(false);
   const [guilds, setGuilds] = useState<Guild[]>([]);
   const [selectedGuild, setSelectedGuild] = useState<string>("");
   const [mappings, setMappings] = useState<ChannelMapping[]>([]);
   const [provider, setProvider] = useState("claude");
+  const [dualProvider, setDualProvider] = useState(false);
   const [ownerId, setOwnerId] = useState("");
   const [completing, setCompleting] = useState(false);
   const [error, setError] = useState("");
+  // compat alias
+  const token = commandToken;
 
   // Load existing config for pre-fill
   useEffect(() => {
@@ -46,7 +53,11 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
       .then((d) => {
         if (d.owner_id) setOwnerId(d.owner_id);
         if (d.guild_id) setSelectedGuild(d.guild_id);
-        if (d.bot_token) setToken(d.bot_token);
+        if (d.bot_tokens?.command) setCommandToken(d.bot_tokens.command);
+        if (d.bot_tokens?.command2) setCommandToken2(d.bot_tokens.command2);
+        if (d.bot_tokens?.announce) setAnnounceToken(d.bot_tokens.announce);
+        if (d.bot_tokens?.notify) setNotifyToken(d.bot_tokens.notify);
+        if (d.bot_tokens?.command2) setDualProvider(true);
         // Pre-fill agent mappings from existing agents
         if (d.agents?.length > 0) {
           setMappings(d.agents.map((a: { agent_id: string; channel_id: string; name: string }) => ({
@@ -60,20 +71,37 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
       .catch(() => {});
   }, []);
 
-  const validateToken = async () => {
+  const validateBotToken = async (tkn: string): Promise<BotInfo> => {
+    const r = await fetch("/api/onboarding/validate-token", {
+      method: "POST", credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token: tkn }),
+    });
+    return r.json();
+  };
+
+  const validateAllTokens = async () => {
     setValidating(true);
     setError("");
     try {
-      const r = await fetch("/api/onboarding/validate-token", {
-        method: "POST",
-        credentials: "include",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ token }),
-      });
-      const d: BotInfo = await r.json();
-      setBotInfo(d);
-      if (d.valid) setStep(2);
-      else setError(d.error || tr("토큰이 유효하지 않습니다.", "Invalid token."));
+      // Validate command bot (required)
+      const cmd = await validateBotToken(commandToken);
+      setCommandBotInfo(cmd);
+      if (!cmd.valid) { setError(tr("Command 봇 토큰이 유효하지 않습니다.", "Invalid command bot token.")); setValidating(false); return; }
+
+      // Validate announce bot (required)
+      if (!announceToken) { setError(tr("Announce 봇 토큰을 입력하세요.", "Enter announce bot token.")); setValidating(false); return; }
+      const ann = await validateBotToken(announceToken);
+      setAnnounceBotInfo(ann);
+      if (!ann.valid) { setError(tr("Announce 봇 토큰이 유효하지 않습니다.", "Invalid announce bot token.")); setValidating(false); return; }
+
+      // Validate second command bot if dual provider
+      if (dualProvider && commandToken2) {
+        const cmd2 = await validateBotToken(commandToken2);
+        if (!cmd2.valid) { setError(tr("두 번째 Command 봇 토큰이 유효하지 않습니다.", "Invalid second command bot token.")); setValidating(false); return; }
+      }
+
+      setStep(2);
     } catch {
       setError(tr("검증 실패", "Validation failed"));
     }
@@ -122,7 +150,10 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
         credentials: "include",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          token,
+          token: commandToken,
+          announce_token: announceToken,
+          notify_token: notifyToken || null,
+          command_token_2: dualProvider ? commandToken2 : null,
           guild_id: selectedGuild,
           owner_id: ownerId || null,
           provider,
@@ -183,37 +214,69 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
       {step === 1 && (
         <div className={stepStyle} style={{ borderColor: "rgba(148,163,184,0.2)" }}>
           <h2 className="text-lg font-semibold" style={{ color: "var(--th-text-heading)" }}>
-            {tr("Discord 봇 연결", "Connect Discord Bot")}
+            {tr("Discord 봇 연결", "Connect Discord Bots")}
           </h2>
           <p className="text-sm" style={{ color: "var(--th-text-muted)" }}>
             {tr(
-              "Discord Developer Portal에서 봇을 생성하고 토큰을 입력하세요.",
-              "Create a bot in Discord Developer Portal and enter its token.",
+              "Discord Developer Portal에서 봇을 생성하고 토큰을 입력하세요. 최소 2개(Command + Announce) 필요합니다.",
+              "Create bots in Discord Developer Portal. At least 2 required (Command + Announce).",
             )}
           </p>
-          <a
-            href="https://discord.com/developers/applications"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-sm text-indigo-400 hover:text-indigo-300"
-          >
+          <a href="https://discord.com/developers/applications" target="_blank" rel="noopener noreferrer" className="text-sm text-indigo-400 hover:text-indigo-300">
             {tr("Discord Developer Portal 열기 →", "Open Discord Developer Portal →")}
           </a>
-          <input
-            type="password"
-            placeholder={tr("봇 토큰 입력", "Enter bot token")}
-            value={token}
-            onChange={(e) => setToken(e.target.value)}
-            className={inputStyle}
-            style={{ borderColor: "rgba(148,163,184,0.24)", color: "var(--th-text-primary)" }}
-          />
-          {botInfo?.valid && (
-            <div className="text-sm text-emerald-400">
-              ✅ {botInfo.bot_name} ({botInfo.bot_id})
+
+          <div className="space-y-3">
+            <div>
+              <label className="text-xs font-medium" style={{ color: "var(--th-text-secondary)" }}>
+                Command Bot {tr("(에이전트 세션 — 필수)", "(agent sessions — required)")}
+              </label>
+              <input type="password" placeholder={tr("Command 봇 토큰", "Command bot token")} value={commandToken}
+                onChange={(e) => setCommandToken(e.target.value)} className={inputStyle}
+                style={{ borderColor: "rgba(148,163,184,0.24)", color: "var(--th-text-primary)" }} />
+              {commandBotInfo?.valid && <div className="text-xs text-emerald-400 mt-1">✅ {commandBotInfo.bot_name}</div>}
             </div>
-          )}
-          <button onClick={() => void validateToken()} disabled={!token || validating} className={btnPrimary}>
-            {validating ? tr("검증 중...", "Validating...") : tr("토큰 검증", "Validate Token")}
+
+            <div>
+              <label className="text-xs font-medium" style={{ color: "var(--th-text-secondary)" }}>
+                Announce Bot {tr("(에이전트 간 통신 — 필수)", "(agent communication — required)")}
+              </label>
+              <input type="password" placeholder={tr("Announce 봇 토큰", "Announce bot token")} value={announceToken}
+                onChange={(e) => setAnnounceToken(e.target.value)} className={inputStyle}
+                style={{ borderColor: "rgba(148,163,184,0.24)", color: "var(--th-text-primary)" }} />
+              {announceBotInfo?.valid && <div className="text-xs text-emerald-400 mt-1">✅ {announceBotInfo.bot_name}</div>}
+            </div>
+
+            <div>
+              <label className="text-xs font-medium" style={{ color: "var(--th-text-secondary)" }}>
+                Notify Bot {tr("(시스템 알림 — 선택)", "(system alerts — optional)")}
+              </label>
+              <input type="password" placeholder={tr("Notify 봇 토큰 (선택)", "Notify bot token (optional)")} value={notifyToken}
+                onChange={(e) => setNotifyToken(e.target.value)} className={inputStyle}
+                style={{ borderColor: "rgba(148,163,184,0.24)", color: "var(--th-text-primary)" }} />
+            </div>
+
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input type="checkbox" checked={dualProvider} onChange={(e) => setDualProvider(e.target.checked)} className="accent-indigo-500" />
+              <span className="text-sm" style={{ color: "var(--th-text-secondary)" }}>
+                {tr("두 번째 프로바이더 사용 (Claude + Codex)", "Use second provider (Claude + Codex)")}
+              </span>
+            </label>
+
+            {dualProvider && (
+              <div>
+                <label className="text-xs font-medium" style={{ color: "var(--th-text-secondary)" }}>
+                  Command Bot 2 {tr("(두 번째 프로바이더)", "(second provider)")}
+                </label>
+                <input type="password" placeholder={tr("두 번째 Command 봇 토큰", "Second command bot token")} value={commandToken2}
+                  onChange={(e) => setCommandToken2(e.target.value)} className={inputStyle}
+                  style={{ borderColor: "rgba(148,163,184,0.24)", color: "var(--th-text-primary)" }} />
+              </div>
+            )}
+          </div>
+
+          <button onClick={() => void validateAllTokens()} disabled={!commandToken || !announceToken || validating} className={btnPrimary}>
+            {validating ? tr("검증 중...", "Validating...") : tr("토큰 검증", "Validate Tokens")}
           </button>
         </div>
       )}
@@ -362,7 +425,7 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
             {tr("설정 확인", "Confirm Setup")}
           </h2>
           <div className="space-y-2 text-sm" style={{ color: "var(--th-text-primary)" }}>
-            <div>🤖 {botInfo?.bot_name}</div>
+            <div>🤖 {commandBotInfo?.bot_name ?? tr("Command Bot", "Command Bot")}</div>
             <div>🏠 {guilds.find((g) => g.id === selectedGuild)?.name}</div>
             <div>🔧 {provider === "claude" ? "Claude" : "Codex"}</div>
             <div>📋 {mappings.filter((m) => m.selected).length}{tr("개 채널", " channels")}</div>
