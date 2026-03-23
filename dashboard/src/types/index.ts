@@ -658,6 +658,7 @@ export interface DispatchedSession {
   department_name?: string | null;
   department_name_ko?: string | null;
   department_color?: string | null;
+  thread_channel_id?: string | null;
 }
 
 // Dashboard Stats

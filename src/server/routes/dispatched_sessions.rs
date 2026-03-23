@@ -9,6 +9,20 @@ use serde_json::json;
 use super::AppState;
 use super::session_activity::SessionActivityResolver;
 
+/// Extract parent channel name from a thread channel name.
+/// Thread names follow the convention `{parent}-t{thread_id}` where thread_id
+/// is a numeric Discord channel ID (15+ digits).
+/// Returns `(parent_channel_name, thread_id)` if the name matches.
+fn parse_thread_channel_name(channel_name: &str) -> Option<(&str, &str)> {
+    let pos = channel_name.rfind("-t")?;
+    let suffix = &channel_name[pos + 2..];
+    if suffix.len() >= 15 && suffix.chars().all(|c| c.is_ascii_digit()) {
+        Some((&channel_name[..pos], suffix))
+    } else {
+        None
+    }
+}
+
 // ── Query / Body types ────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -63,7 +77,8 @@ pub async fn list_dispatched_sessions(
         "SELECT s.id, s.session_key, s.agent_id, s.provider, s.status, s.active_dispatch_id,
                 s.model, s.tokens, s.cwd, s.last_heartbeat, s.session_info,
                 a.department, a.sprite_number, a.avatar_emoji, a.xp,
-                d.name AS department_name, d.name_ko AS department_name_ko, d.color AS department_color
+                d.name AS department_name, d.name_ko AS department_name_ko, d.color AS department_color,
+                s.thread_channel_id
          FROM sessions s
          LEFT JOIN agents a ON s.agent_id = a.id
          LEFT JOIN departments d ON a.department = d.id
@@ -72,7 +87,8 @@ pub async fn list_dispatched_sessions(
         "SELECT s.id, s.session_key, s.agent_id, s.provider, s.status, s.active_dispatch_id,
                 s.model, s.tokens, s.cwd, s.last_heartbeat, s.session_info,
                 a.department, a.sprite_number, a.avatar_emoji, a.xp,
-                d.name AS department_name, d.name_ko AS department_name_ko, d.color AS department_color
+                d.name AS department_name, d.name_ko AS department_name_ko, d.color AS department_color,
+                s.thread_channel_id
          FROM sessions s
          LEFT JOIN agents a ON s.agent_id = a.id
          LEFT JOIN departments d ON a.department = d.id
@@ -109,6 +125,7 @@ pub async fn list_dispatched_sessions(
         department_name: Option<String>,
         department_name_ko: Option<String>,
         department_color: Option<String>,
+        thread_channel_id: Option<String>,
     }
 
     let rows = stmt
@@ -132,6 +149,7 @@ pub async fn list_dispatched_sessions(
                 department_name: row.get::<_, Option<String>>(15)?,
                 department_name_ko: row.get::<_, Option<String>>(16)?,
                 department_color: row.get::<_, Option<String>>(17)?,
+                thread_channel_id: row.get::<_, Option<String>>(18).ok().flatten(),
             })
         })
         .ok();
@@ -176,6 +194,7 @@ pub async fn list_dispatched_sessions(
                     "department_name": row.department_name,
                     "department_name_ko": row.department_name_ko,
                     "department_color": row.department_color,
+                    "thread_channel_id": row.thread_channel_id,
                 }))
             })
             .collect(),
@@ -200,12 +219,22 @@ pub async fn hook_session(
         }
     };
 
-    // Resolve agent_id from channel name: check discord_channel_id or discord_channel_alt
-    let agent_id: Option<String> = body.name.as_ref().and_then(|channel_name| {
+    // Resolve agent_id from channel name: check discord_channel_id or discord_channel_alt.
+    // For thread channels (e.g. "adk-cc-t1485400795435372796"), extract the parent channel
+    // name ("adk-cc") and resolve using that.
+    let (resolved_channel_name, thread_channel_id) = body
+        .name
+        .as_deref()
+        .and_then(|n| parse_thread_channel_name(n).map(|(parent, tid)| (parent, Some(tid))))
+        .unwrap_or_else(|| (body.name.as_deref().unwrap_or(""), None));
+
+    let agent_id: Option<String> = if resolved_channel_name.is_empty() {
+        None
+    } else {
         // Try exact match first, then suffix match (e.g. "td-cc" in "cookingheart-td-cc")
         conn.query_row(
             "SELECT id FROM agents WHERE discord_channel_id = ?1 OR discord_channel_alt = ?1",
-            [channel_name],
+            [resolved_channel_name],
             |row| row.get(0),
         )
         .ok()
@@ -217,13 +246,13 @@ pub async fn hook_session(
             while let Ok(Some(row)) = rows.next() {
                 let id: String = row.get(0).ok()?;
                 let ch_id: String = row.get::<_, Option<String>>(1).ok()?.unwrap_or_default();
-                if !ch_id.is_empty() && channel_name.contains(&ch_id) {
+                if !ch_id.is_empty() && resolved_channel_name.contains(&ch_id) {
                     return Some(id);
                 }
             }
             None
         })
-    });
+    };
 
     let status = body.status.as_deref().unwrap_or("working");
     let provider = body.provider.as_deref().unwrap_or("claude");
@@ -246,8 +275,8 @@ pub async fn hook_session(
     };
 
     let result = conn.execute(
-        "INSERT INTO sessions (session_key, agent_id, provider, status, session_info, model, tokens, cwd, active_dispatch_id, last_heartbeat)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, datetime('now'))
+        "INSERT INTO sessions (session_key, agent_id, provider, status, session_info, model, tokens, cwd, active_dispatch_id, thread_channel_id, last_heartbeat)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, datetime('now'))
          ON CONFLICT(session_key) DO UPDATE SET
            status = excluded.status,
            provider = excluded.provider,
@@ -261,6 +290,7 @@ pub async fn hook_session(
              ELSE sessions.active_dispatch_id
            END,
            agent_id = COALESCE(excluded.agent_id, sessions.agent_id),
+           thread_channel_id = COALESCE(excluded.thread_channel_id, sessions.thread_channel_id),
            last_heartbeat = datetime('now')",
         rusqlite::params![
             body.session_key,
@@ -272,6 +302,7 @@ pub async fn hook_session(
             tokens,
             body.cwd,
             body.dispatch_id,
+            thread_channel_id,
         ],
     );
 
@@ -803,6 +834,83 @@ mod tests {
         assert_eq!(dispatch_status, "pending");
         assert_eq!(dispatch_result, None);
         assert_eq!(active_dispatch_id, None);
+    }
+
+    #[test]
+    fn parse_thread_channel_name_extracts_parent_and_thread_id() {
+        let result = parse_thread_channel_name("adk-cc-t1485400795435372796");
+        assert_eq!(result, Some(("adk-cc", "1485400795435372796")));
+    }
+
+    #[test]
+    fn parse_thread_channel_name_with_complex_parent() {
+        let result = parse_thread_channel_name("cookingheart-dev-cc-t1485503849761607815");
+        assert_eq!(
+            result,
+            Some(("cookingheart-dev-cc", "1485503849761607815"))
+        );
+    }
+
+    #[test]
+    fn parse_thread_channel_name_returns_none_for_regular_channel() {
+        assert_eq!(parse_thread_channel_name("adk-cc"), None);
+        assert_eq!(parse_thread_channel_name("cookingheart-dev-cc"), None);
+    }
+
+    #[test]
+    fn parse_thread_channel_name_returns_none_for_short_suffix() {
+        // "-t" followed by less than 15 digits is not a thread ID
+        assert_eq!(parse_thread_channel_name("test-t123"), None);
+    }
+
+    #[tokio::test]
+    async fn thread_session_resolves_agent_from_parent_channel() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        let state = AppState {
+            db: db.clone(),
+            engine,
+            health_registry: None,
+        };
+
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt)
+                 VALUES ('project-agentdesk', 'AgentDesk', 'adk-cc', 'adk-cdx')",
+                [],
+            )
+            .unwrap();
+        }
+
+        // Post session with thread channel name
+        let (status, _) = hook_session(
+            State(state),
+            Json(HookSessionBody {
+                session_key: "mac-mini:AgentDesk-claude-adk-cc-t1485400795435372796".to_string(),
+                status: Some("working".to_string()),
+                provider: Some("claude".to_string()),
+                session_info: Some("thread work".to_string()),
+                name: Some("adk-cc-t1485400795435372796".to_string()),
+                model: None,
+                tokens: None,
+                cwd: None,
+                dispatch_id: None,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let conn = db.lock().unwrap();
+        let (agent_id, thread_channel_id): (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT agent_id, thread_channel_id FROM sessions WHERE session_key = ?1",
+                ["mac-mini:AgentDesk-claude-adk-cc-t1485400795435372796"],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(agent_id.as_deref(), Some("project-agentdesk"));
+        assert_eq!(thread_channel_id.as_deref(), Some("1485400795435372796"));
     }
 
     #[tokio::test]
