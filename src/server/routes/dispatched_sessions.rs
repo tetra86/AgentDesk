@@ -8,6 +8,7 @@ use serde_json::json;
 
 use super::AppState;
 use super::session_activity::SessionActivityResolver;
+use crate::services::provider::parse_provider_and_channel_from_tmux_name;
 
 /// Extract parent channel name from a thread channel name.
 /// Thread names follow the convention `{parent}-t{thread_id}` where thread_id
@@ -21,6 +22,45 @@ fn parse_thread_channel_name(channel_name: &str) -> Option<(&str, &str)> {
     } else {
         None
     }
+}
+
+fn parse_channel_name_from_session_key(session_key: &str) -> Option<String> {
+    let (_, tmux_name) = session_key.split_once(':')?;
+    let (_, channel_name) = parse_provider_and_channel_from_tmux_name(tmux_name)?;
+    Some(channel_name)
+}
+
+fn resolve_agent_id_from_channel_name(
+    conn: &rusqlite::Connection,
+    channel_name: &str,
+) -> Option<String> {
+    if channel_name.is_empty() {
+        return None;
+    }
+
+    conn.query_row(
+        "SELECT id FROM agents WHERE discord_channel_id = ?1 OR discord_channel_alt = ?1",
+        [channel_name],
+        |row| row.get(0),
+    )
+    .ok()
+    .or_else(|| {
+        let mut stmt = conn
+            .prepare("SELECT id, discord_channel_id, discord_channel_alt FROM agents")
+            .ok()?;
+        let mut rows = stmt.query([]).ok()?;
+        while let Ok(Some(row)) = rows.next() {
+            let id: String = row.get(0).ok()?;
+            let ch_id: String = row.get::<_, Option<String>>(1).ok()?.unwrap_or_default();
+            let ch_alt: String = row.get::<_, Option<String>>(2).ok()?.unwrap_or_default();
+            if (!ch_id.is_empty() && channel_name.contains(&ch_id))
+                || (!ch_alt.is_empty() && channel_name.contains(&ch_alt))
+            {
+                return Some(id);
+            }
+        }
+        None
+    })
 }
 
 // ── Query / Body types ────────────────────────────────────────
@@ -222,37 +262,28 @@ pub async fn hook_session(
     // Resolve agent_id from channel name: check discord_channel_id or discord_channel_alt.
     // For thread channels (e.g. "adk-cc-t1485400795435372796"), extract the parent channel
     // name ("adk-cc") and resolve using that.
-    let (resolved_channel_name, thread_channel_id) = body
+    let session_key_channel_name = parse_channel_name_from_session_key(&body.session_key);
+    let thread_channel_id = body
         .name
         .as_deref()
-        .and_then(|n| parse_thread_channel_name(n).map(|(parent, tid)| (parent, Some(tid))))
-        .unwrap_or_else(|| (body.name.as_deref().unwrap_or(""), None));
-
-    let agent_id: Option<String> = if resolved_channel_name.is_empty() {
-        None
-    } else {
-        // Try exact match first, then suffix match (e.g. "td-cc" in "cookingheart-td-cc")
-        conn.query_row(
-            "SELECT id FROM agents WHERE discord_channel_id = ?1 OR discord_channel_alt = ?1",
-            [resolved_channel_name],
-            |row| row.get(0),
-        )
-        .ok()
+        .and_then(parse_thread_channel_name)
+        .map(|(_, tid)| tid.to_string())
         .or_else(|| {
-            let mut stmt = conn
-                .prepare("SELECT id, discord_channel_id FROM agents")
-                .ok()?;
-            let mut rows = stmt.query([]).ok()?;
-            while let Ok(Some(row)) = rows.next() {
-                let id: String = row.get(0).ok()?;
-                let ch_id: String = row.get::<_, Option<String>>(1).ok()?.unwrap_or_default();
-                if !ch_id.is_empty() && resolved_channel_name.contains(&ch_id) {
-                    return Some(id);
-                }
-            }
-            None
+            session_key_channel_name
+                .as_deref()
+                .and_then(parse_thread_channel_name)
+                .map(|(_, tid)| tid.to_string())
+        });
+
+    let agent_id = [body.name.as_deref(), session_key_channel_name.as_deref()]
+        .into_iter()
+        .flatten()
+        .map(|name| {
+            parse_thread_channel_name(name)
+                .map(|(parent, _)| parent)
+                .unwrap_or(name)
         })
-    };
+        .find_map(|channel_name| resolve_agent_id_from_channel_name(&conn, channel_name));
 
     let status = body.status.as_deref().unwrap_or("working");
     let provider = body.provider.as_deref().unwrap_or("claude");
@@ -266,7 +297,7 @@ pub async fn hook_session(
             )
             .ok()
             .and_then(|(dtype, dstatus)| {
-                ((dtype == "implementation" || dtype == "rework") && dstatus == "pending")
+                ((dtype == "implementation" || dtype == "rework" || dtype == "review" || dtype == "review-decision") && dstatus == "pending")
                     .then_some(did.clone())
             })
         })
@@ -845,10 +876,7 @@ mod tests {
     #[test]
     fn parse_thread_channel_name_with_complex_parent() {
         let result = parse_thread_channel_name("cookingheart-dev-cc-t1485503849761607815");
-        assert_eq!(
-            result,
-            Some(("cookingheart-dev-cc", "1485503849761607815"))
-        );
+        assert_eq!(result, Some(("cookingheart-dev-cc", "1485503849761607815")));
     }
 
     #[test]
@@ -911,6 +939,106 @@ mod tests {
             .unwrap();
         assert_eq!(agent_id.as_deref(), Some("project-agentdesk"));
         assert_eq!(thread_channel_id.as_deref(), Some("1485400795435372796"));
+    }
+
+    #[tokio::test]
+    async fn thread_session_resolves_alt_channel_agent_from_session_key_fallback() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        let state = AppState {
+            db: db.clone(),
+            engine,
+            health_registry: None,
+        };
+
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt)
+                 VALUES ('project-agentdesk', 'AgentDesk', 'adk-cc', 'adk-cdx')",
+                [],
+            )
+            .unwrap();
+        }
+
+        let session_key = "mac-mini:AgentDesk-codex-adk-cdx-t1485506232256168011";
+        let (status, _) = hook_session(
+            State(state),
+            Json(HookSessionBody {
+                session_key: session_key.to_string(),
+                status: Some("working".to_string()),
+                provider: Some("codex".to_string()),
+                session_info: Some("thread work".to_string()),
+                name: None,
+                model: None,
+                tokens: None,
+                cwd: None,
+                dispatch_id: Some("dispatch-1".to_string()),
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let conn = db.lock().unwrap();
+        let (agent_id, thread_channel_id): (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT agent_id, thread_channel_id FROM sessions WHERE session_key = ?1",
+                [session_key],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(agent_id.as_deref(), Some("project-agentdesk"));
+        assert_eq!(thread_channel_id.as_deref(), Some("1485506232256168011"));
+    }
+
+    #[tokio::test]
+    async fn direct_channel_session_keeps_agent_mapping_without_thread_id() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        let state = AppState {
+            db: db.clone(),
+            engine,
+            health_registry: None,
+        };
+
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt)
+                 VALUES ('project-agentdesk', 'AgentDesk', 'adk-cc', 'adk-cdx')",
+                [],
+            )
+            .unwrap();
+        }
+
+        let session_key = "mac-mini:AgentDesk-codex-adk-cdx";
+        let (status, _) = hook_session(
+            State(state),
+            Json(HookSessionBody {
+                session_key: session_key.to_string(),
+                status: Some("working".to_string()),
+                provider: Some("codex".to_string()),
+                session_info: Some("direct channel work".to_string()),
+                name: Some("adk-cdx".to_string()),
+                model: None,
+                tokens: None,
+                cwd: None,
+                dispatch_id: None,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let conn = db.lock().unwrap();
+        let (agent_id, thread_channel_id): (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT agent_id, thread_channel_id FROM sessions WHERE session_key = ?1",
+                [session_key],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(agent_id.as_deref(), Some("project-agentdesk"));
+        assert_eq!(thread_channel_id, None);
     }
 
     #[tokio::test]
