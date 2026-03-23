@@ -28,19 +28,16 @@ export function SessionPanel({ sessions, departments, agents, onAssign }: Props)
   const isKo = language === "ko";
 
   return (
-    <div
-      className="p-6 max-w-5xl mx-auto h-full overflow-auto pb-40"
-      style={{ paddingBottom: "max(10rem, calc(10rem + env(safe-area-inset-bottom)))" }}
-    >
-      <div className="flex items-center gap-3 mb-6">
-        <Monitor className="text-indigo-400" size={24} />
-        <h1 className="text-2xl font-bold">{t({ ko: "파견 인력", en: "Dispatched Sessions" })}</h1>
-        <span className="bg-emerald-600 text-white text-xs px-2 py-0.5 rounded-full">
+    <div className="space-y-4 min-w-0">
+      <div className="flex items-center gap-3">
+        <Monitor className="text-indigo-400 shrink-0" size={24} />
+        <h1 className="text-xl sm:text-2xl font-bold truncate">{t({ ko: "파견 인력", en: "Dispatched Sessions" })}</h1>
+        <span className="bg-emerald-600 text-white text-xs px-2 py-0.5 rounded-full shrink-0">
           {active.length} {t({ ko: "활성", en: "Active" })}
         </span>
       </div>
 
-      <p className="text-gray-400 text-sm mb-6">
+      <p className="text-gray-400 text-sm">
         {t({
           ko: "AgentDesk 세션이 감지되면 파견 인력으로 등록됩니다. 각 세션을 부서에 배치하여 오피스에서 시각화할 수 있습니다.",
           en: "Detected AgentDesk sessions are registered as dispatched staff. Assign each session to a department to visualize them in the office.",
@@ -48,7 +45,7 @@ export function SessionPanel({ sessions, departments, agents, onAssign }: Props)
       </p>
 
       {active.length === 0 && disconnected.length === 0 && (
-        <div className="text-center py-16 text-gray-500">
+        <div className="text-center py-12 text-gray-500">
           <Monitor size={48} className="mx-auto mb-4 opacity-30" />
           <p>{t({ ko: "현재 활성 세션이 없습니다", en: "No active sessions" })}</p>
           <p className="text-sm mt-1">{t({ ko: "AgentDesk 세션이 실행되면 자동으로 표시됩니다", en: "Sessions will appear automatically when AgentDesk starts" })}</p>
@@ -57,7 +54,7 @@ export function SessionPanel({ sessions, departments, agents, onAssign }: Props)
 
       {/* Active sessions */}
       {active.length > 0 && (
-        <div className="space-y-3 mb-8">
+        <div className="space-y-3">
           {active.map((s) => (
             <SessionCard
               key={s.id}
@@ -82,10 +79,10 @@ export function SessionPanel({ sessions, departments, agents, onAssign }: Props)
             {disconnected.slice(0, 10).map((s) => (
               <div
                 key={s.id}
-                className="bg-gray-800/50 rounded-lg px-4 py-3 flex items-center gap-3 cursor-pointer hover:bg-gray-800/70 transition-colors"
+                className="bg-gray-800/50 rounded-lg px-3 sm:px-4 py-3 flex items-center gap-2 sm:gap-3 cursor-pointer hover:bg-gray-800/70 transition-colors min-w-0"
                 onClick={() => setInfoSession(s)}
               >
-                <div className="w-7 h-7 rounded-lg overflow-hidden bg-gray-700 flex-shrink-0">
+                <div className="w-7 h-7 rounded-lg overflow-hidden bg-gray-700 shrink-0">
                   <img
                     src={`/sprites/${sessionSpriteNum(s)}-D-1.png`}
                     alt={s.name || ""}
@@ -93,14 +90,17 @@ export function SessionPanel({ sessions, departments, agents, onAssign }: Props)
                     style={{ imageRendering: "pixelated" }}
                   />
                 </div>
-                <span className="flex-1 text-sm text-gray-400">
+                <span
+                  className="flex-1 text-sm text-gray-400 truncate min-w-0"
+                  title={s.name || s.session_key.slice(0, 12)}
+                >
                   {s.name || s.session_key.slice(0, 12)}
                 </span>
-                <span className="text-xs text-gray-600">
+                <span className="text-xs text-gray-600 shrink-0">
                   {s.model || "unknown"}
                 </span>
                 {s.last_seen_at && (
-                  <span className="text-xs text-gray-600">
+                  <span className="text-xs text-gray-600 shrink-0 whitespace-nowrap">
                     {formatTimeAgo(s.last_seen_at, isKo)}
                   </span>
                 )}
@@ -148,7 +148,7 @@ function SessionCard({
   const statusColor = s.status === "working" ? "bg-emerald-500" : "bg-amber-500";
 
   return (
-    <div className="bg-gray-800 rounded-lg p-4 border border-gray-700">
+    <div className="bg-gray-800 rounded-lg p-3 sm:p-4 border border-gray-700">
       <div className="flex items-start gap-3">
         {/* Avatar + status */}
         <div className="relative cursor-pointer shrink-0" onClick={onSelect}>
@@ -168,7 +168,11 @@ function SessionCard({
         {/* Info */}
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 min-w-0">
-            <span className="font-medium cursor-pointer hover:text-indigo-400 transition-colors truncate" onClick={onSelect}>
+            <span
+              className="font-medium cursor-pointer hover:text-indigo-400 transition-colors truncate"
+              onClick={onSelect}
+              title={s.name || `Session ${s.session_key.slice(0, 8)}`}
+            >
               {s.name || `Session ${s.session_key.slice(0, 8)}`}
             </span>
             <Wifi size={14} className="text-emerald-400 shrink-0" />
@@ -189,7 +193,7 @@ function SessionCard({
               </span>
             )}
             {s.session_info && (
-              <span className="truncate max-w-full sm:max-w-[300px]">{s.session_info}</span>
+              <span className="truncate max-w-full sm:max-w-[300px]" title={s.session_info}>{s.session_info}</span>
             )}
           </div>
 
@@ -322,7 +326,10 @@ function SessionInfoCard({
             />
           </div>
           <div className="flex-1 min-w-0">
-            <div className="font-bold text-base text-gray-100">
+            <div
+              className="font-bold text-base text-gray-100 truncate"
+              title={s.name || `Session ${s.session_key.slice(0, 8)}`}
+            >
               {s.name || `Session ${s.session_key.slice(0, 8)}`}
             </div>
             <div className="flex items-center gap-2 mt-1.5 flex-wrap">
