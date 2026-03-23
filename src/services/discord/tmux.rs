@@ -508,6 +508,34 @@ pub(super) async fn tmux_output_watcher(
         .await;
     }
 
+    // Report idle status to DB so the dashboard doesn't show stale "working" state.
+    // Without this, a dead tmux session leaves the DB row as working/dispatched.
+    {
+        let api_port = shared.api_port;
+        let provider = shared.settings.read().await.provider.clone();
+        let session_key =
+            super::adk_session::build_adk_session_key(&shared, channel_id, &provider).await;
+        let channel_name = {
+            let data = shared.core.lock().await;
+            data.sessions
+                .get(&channel_id)
+                .and_then(|s| s.channel_name.clone())
+        };
+        super::adk_session::post_adk_session_status(
+            session_key.as_deref(),
+            channel_name.as_deref(),
+            None, // model
+            "idle",
+            &provider,
+            None, // session_info
+            None, // tokens
+            None, // cwd
+            None, // dispatch_id
+            api_port,
+        )
+        .await;
+    }
+
     let ts = chrono::Local::now().format("%H:%M:%S");
     println!("  [{ts}] 👁 tmux watcher stopped for #{tmux_session_name}");
 }
@@ -773,7 +801,15 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
         initial_offset: u64,
     }
 
+    // Dead sessions that need DB cleanup (idle status report + tmux kill)
+    struct DeadSessionCleanup {
+        channel_id: ChannelId,
+        channel_name: String,
+        session_name: String,
+    }
+
     let mut pending: Vec<PendingWatcher> = Vec::new();
+    let mut dead_cleanups: Vec<DeadSessionCleanup> = Vec::new();
     let mut owned_sessions: std::collections::HashMap<ChannelId, String> =
         std::collections::HashMap::new();
 
@@ -847,6 +883,12 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
                     session_name
                 );
             }
+            // Schedule DB cleanup + tmux kill for this dead session
+            dead_cleanups.push(DeadSessionCleanup {
+                channel_id: *channel_id,
+                channel_name: channel_name.clone(),
+                session_name: session_name.to_string(),
+            });
             continue;
         }
 
@@ -949,6 +991,54 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
             turn_delivered,
         ));
     }
+
+    // Clean up dead sessions: report idle to DB and kill tmux sessions
+    if !dead_cleanups.is_empty() {
+        let api_port = shared.api_port;
+        let provider = shared.settings.read().await.provider.clone();
+
+        for dc in &dead_cleanups {
+            let tmux_name = provider.build_tmux_session_name(&dc.channel_name);
+            let hostname = std::process::Command::new("hostname")
+                .arg("-s")
+                .output()
+                .ok()
+                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .map(|s| s.trim().to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            let session_key = format!("{}:{}", hostname, tmux_name);
+
+            super::adk_session::post_adk_session_status(
+                Some(&session_key),
+                Some(&dc.channel_name),
+                None,
+                "idle",
+                &provider,
+                None,
+                None,
+                None,
+                None,
+                api_port,
+            )
+            .await;
+
+            // Kill the dead tmux session
+            let sess = dc.session_name.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                record_tmux_exit_reason(&sess, "startup cleanup: dead session");
+                let _ = std::process::Command::new("tmux")
+                    .args(["kill-session", "-t", &sess])
+                    .output();
+            })
+            .await;
+        }
+
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        println!(
+            "  [{ts}] 🧹 Cleaned {} dead tmux session(s) on startup",
+            dead_cleanups.len()
+        );
+    }
 }
 
 /// Kill orphan tmux sessions (AgentDesk-*) that don't map to any known channel.
@@ -1047,5 +1137,118 @@ pub(super) async fn cleanup_orphan_tmux_sessions(shared: &Arc<SharedData>) {
             ));
             let _ = std::fs::remove_file(tmux_owner_path(name));
         }
+    }
+}
+
+/// Periodically reap dead tmux sessions (pane_dead=1) that still have DB rows
+/// showing working/dispatched status. This catches cases where the watcher
+/// missed cleanup (e.g. crashed, or session died between watcher polls).
+pub(super) async fn reap_dead_tmux_sessions(shared: &Arc<SharedData>) {
+    let provider = shared.settings.read().await.provider.clone();
+    let current_owner_marker = current_tmux_owner_marker();
+    let api_port = shared.api_port;
+
+    // List all tmux sessions
+    let output = match tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        tokio::task::spawn_blocking(|| {
+            std::process::Command::new("tmux")
+                .args(["list-sessions", "-F", "#{session_name}"])
+                .output()
+        }),
+    )
+    .await
+    {
+        Ok(Ok(Ok(o))) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
+        _ => return,
+    };
+
+    let mut reaped = 0u32;
+
+    for session_name in output.lines() {
+        let session_name = session_name.trim();
+        let Some((session_provider, _)) =
+            parse_provider_and_channel_from_tmux_name(session_name)
+        else {
+            continue;
+        };
+        if session_provider != provider {
+            continue;
+        }
+        if !session_belongs_to_current_runtime(session_name, &current_owner_marker) {
+            continue;
+        }
+
+        // Skip sessions that have a live pane (actually working)
+        if tmux_session_has_live_pane(session_name) {
+            continue;
+        }
+
+        // Skip sessions that already have an active watcher (watcher handles its own cleanup)
+        let channel_id_for_session = {
+            let data = shared.core.lock().await;
+            data.sessions
+                .iter()
+                .find(|(_, s)| {
+                    s.channel_name
+                        .as_ref()
+                        .map(|ch| provider.build_tmux_session_name(ch) == session_name)
+                        .unwrap_or(false)
+                })
+                .map(|(ch, s)| (*ch, s.channel_name.clone()))
+        };
+
+        let Some((channel_id, channel_name)) = channel_id_for_session else {
+            continue; // orphan — handled by cleanup_orphan_tmux_sessions
+        };
+
+        // If a watcher is attached, let it handle the cleanup
+        if shared.tmux_watchers.contains_key(&channel_id) {
+            continue;
+        }
+
+        // Dead session with no watcher — report idle to DB and kill
+        let tmux_name = provider.build_tmux_session_name(
+            channel_name.as_deref().unwrap_or("unknown"),
+        );
+        let hostname = std::process::Command::new("hostname")
+            .arg("-s")
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        let session_key = format!("{}:{}", hostname, tmux_name);
+
+        super::adk_session::post_adk_session_status(
+            Some(&session_key),
+            channel_name.as_deref(),
+            None,
+            "idle",
+            &provider,
+            None,
+            None,
+            None,
+            None,
+            api_port,
+        )
+        .await;
+
+        // Kill the dead tmux session
+        let sess = session_name.to_string();
+        let _ = tokio::task::spawn_blocking(move || {
+            record_tmux_exit_reason(&sess, "reaper: dead session with no watcher");
+            let _ = std::process::Command::new("tmux")
+                .args(["kill-session", "-t", &sess])
+                .output();
+        })
+        .await;
+
+        reaped += 1;
+    }
+
+    if reaped > 0 {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        println!("  [{ts}] 🪦 Reaped {reaped} dead tmux session(s)");
     }
 }

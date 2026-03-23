@@ -65,7 +65,10 @@ use shared_memory::{
     append_shared_memory_turn, build_shared_memory_context, latest_shared_memory_ts,
 };
 #[cfg(unix)]
-use tmux::{cleanup_orphan_tmux_sessions, restore_tmux_watchers, tmux_output_watcher};
+use tmux::{
+    cleanup_orphan_tmux_sessions, reap_dead_tmux_sessions, restore_tmux_watchers,
+    tmux_output_watcher,
+};
 use turn_bridge::{TurnBridgeContext, spawn_turn_bridge, tmux_runtime_paths};
 
 pub use settings::{
@@ -81,6 +84,7 @@ const UPLOAD_CLEANUP_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const UPLOAD_MAX_AGE: Duration = Duration::from_secs(3 * 24 * 60 * 60);
 const SESSION_CLEANUP_INTERVAL: Duration = Duration::from_secs(60 * 60); // 1 hour
 const SESSION_MAX_IDLE: Duration = Duration::from_secs(24 * 60 * 60); // 1 day
+const DEAD_SESSION_REAP_INTERVAL: Duration = Duration::from_secs(60); // 1 minute
 const RESTART_REPORT_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 const DEFERRED_RESTART_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -1490,6 +1494,21 @@ pub async fn run_bot(
                         cleanup_old_uploads(UPLOAD_MAX_AGE);
                     }
                 });
+
+                // Background: periodic reaper for dead tmux sessions that
+                // still show as working in the DB (catches watcher gaps)
+                #[cfg(unix)]
+                {
+                    let shared_for_reaper = shared_clone.clone();
+                    tokio::spawn(async move {
+                        // Initial delay: let startup recovery finish first
+                        tokio::time::sleep(tokio::time::Duration::from_secs(90)).await;
+                        loop {
+                            reap_dead_tmux_sessions(&shared_for_reaper).await;
+                            tokio::time::sleep(DEAD_SESSION_REAP_INTERVAL).await;
+                        }
+                    });
+                }
 
                 Ok(Data {
                     shared: shared_clone,
