@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type DragEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type DragEvent } from "react";
 import * as api from "../../api";
 import type { GitHubIssue, GitHubRepoOption, KanbanRepoSource } from "../../api";
 import AutoQueuePanel from "./AutoQueuePanel";
@@ -70,6 +70,13 @@ interface KanbanTabProps {
   onDeleteCard: (id: string) => Promise<void>;
 }
 
+const TIMELINE_KIND_STYLE: Record<string, { bg: string; text: string }> = {
+  review: { bg: "rgba(20,184,166,0.16)", text: "#5eead4" },
+  pm: { bg: "rgba(244,114,182,0.16)", text: "#f9a8d4" },
+  work: { bg: "rgba(96,165,250,0.16)", text: "#93c5fd" },
+  general: { bg: "rgba(148,163,184,0.10)", text: "#94a3b8" },
+};
+
 export default function KanbanTab({
   tr,
   locale,
@@ -132,6 +139,8 @@ export default function KanbanTab({
   const [cancelBusy, setCancelBusy] = useState(false);
   const [auditLog, setAuditLog] = useState<api.CardAuditLogEntry[]>([]);
   const [ghComments, setGhComments] = useState<api.GitHubComment[]>([]);
+  const [timelineFilter, setTimelineFilter] = useState<"review" | "pm" | "work" | "general" | null>(null);
+  const ghCommentsCache = useRef<Map<string, { comments: api.GitHubComment[]; ts: number }>>(new Map());
 
   const agentMap = useMemo(() => new Map(agents.map((agent) => [agent.id, agent])), [agents]);
   const cardsById = useMemo(() => new Map(cards.map((card) => [card.id, card])), [cards]);
@@ -226,11 +235,21 @@ export default function KanbanTab({
     setReviewDecisions({});
     setAuditLog([]);
     setGhComments([]);
+    setTimelineFilter(null);
     // Fetch audit log and GitHub comments for selected card
     if (selectedCard) {
       api.getCardAuditLog(selectedCard.id).then(setAuditLog).catch(() => {});
       if (selectedCard.github_issue_number) {
-        api.getCardGitHubComments(selectedCard.id).then(setGhComments).catch(() => {});
+        const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+        const cached = ghCommentsCache.current.get(selectedCard.id);
+        if (cached && Date.now() - cached.ts < CACHE_TTL) {
+          setGhComments(cached.comments);
+        } else {
+          api.getCardGitHubComments(selectedCard.id).then((comments) => {
+            ghCommentsCache.current.set(selectedCard.id, { comments, ts: Date.now() });
+            setGhComments(comments);
+          }).catch(() => {});
+        }
       }
     }
     // Fetch review data for suggestion_pending/dilemma_pending cards
@@ -329,7 +348,7 @@ export default function KanbanTab({
     return localeName(locale, agent);
   };
 
-  const getTimelineKindLabel = (kind: "review" | "pm" | "work") => {
+  const getTimelineKindLabel = (kind: "review" | "pm" | "work" | "general") => {
     switch (kind) {
       case "review":
         return tr("리뷰", "Review");
@@ -337,10 +356,12 @@ export default function KanbanTab({
         return tr("PM 결정", "PM Decision");
       case "work":
         return tr("작업 이력", "Work Log");
+      case "general":
+        return tr("코멘트", "Comment");
     }
   };
 
-  const getTimelineStatusLabel = (status: "reviewing" | "changes_requested" | "passed" | "decision" | "completed") => {
+  const getTimelineStatusLabel = (status: "reviewing" | "changes_requested" | "passed" | "decision" | "completed" | "comment") => {
     switch (status) {
       case "reviewing":
         return tr("진행 중", "In Progress");
@@ -352,10 +373,12 @@ export default function KanbanTab({
         return tr("결정", "Decision");
       case "completed":
         return tr("완료", "Completed");
+      case "comment":
+        return tr("일반", "General");
     }
   };
 
-  const getTimelineStatusStyle = (status: "reviewing" | "changes_requested" | "passed" | "decision" | "completed") => {
+  const getTimelineStatusStyle = (status: "reviewing" | "changes_requested" | "passed" | "decision" | "completed" | "comment") => {
     switch (status) {
       case "reviewing":
         return { bg: "rgba(20,184,166,0.16)", text: "#5eead4" };
@@ -367,6 +390,8 @@ export default function KanbanTab({
         return { bg: "rgba(244,114,182,0.16)", text: "#f9a8d4" };
       case "completed":
         return { bg: "rgba(96,165,250,0.16)", text: "#93c5fd" };
+      case "comment":
+        return { bg: "rgba(148,163,184,0.12)", text: "#94a3b8" };
     }
   };
 
@@ -2253,85 +2278,118 @@ export default function KanbanTab({
               </div>
             )}
 
-            {/* Parsed GitHub timeline */}
+            {/* Unified GitHub comment timeline */}
             {parsedGitHubTimeline.length > 0 && (
               <div className="rounded-2xl border p-4 bg-white/5 space-y-3" style={{ borderColor: "rgba(148,163,184,0.18)" }}>
                 <h4 className="font-medium" style={{ color: "var(--th-text-heading)" }}>
-                  {tr("GitHub 이력 요약", "GitHub Timeline")}
+                  {tr("GitHub 코멘트 타임라인", "GitHub Comment Timeline")}
                   <span className="ml-2 text-xs font-normal" style={{ color: "var(--th-text-muted)" }}>
                     ({parsedGitHubTimeline.length})
                   </span>
                 </h4>
-                <div className="space-y-3 max-h-80 overflow-y-auto">
-                  {parsedGitHubTimeline.map((entry, idx) => {
+                {/* Filter tabs */}
+                {(() => {
+                  const kindCounts = parsedGitHubTimeline.reduce<Record<string, number>>((acc, e) => {
+                    acc[e.kind] = (acc[e.kind] ?? 0) + 1;
+                    return acc;
+                  }, {});
+                  const hasMultipleKinds = Object.keys(kindCounts).length > 1;
+                  return hasMultipleKinds ? (
+                    <div className="flex flex-wrap gap-1.5">
+                      <button
+                        className="px-2 py-0.5 rounded-full text-xs font-medium transition-colors"
+                        style={{
+                          backgroundColor: !timelineFilter ? "rgba(96,165,250,0.18)" : "rgba(148,163,184,0.08)",
+                          color: !timelineFilter ? "#93c5fd" : "var(--th-text-muted)",
+                        }}
+                        onClick={() => setTimelineFilter(null)}
+                      >
+                        {tr("전체", "All")} ({parsedGitHubTimeline.length})
+                      </button>
+                      {(["review", "pm", "work", "general"] as const).filter((k) => kindCounts[k]).map((k) => (
+                        <button
+                          key={k}
+                          className="px-2 py-0.5 rounded-full text-xs font-medium transition-colors"
+                          style={{
+                            backgroundColor: timelineFilter === k ? TIMELINE_KIND_STYLE[k].bg : "rgba(148,163,184,0.08)",
+                            color: timelineFilter === k ? TIMELINE_KIND_STYLE[k].text : "var(--th-text-muted)",
+                          }}
+                          onClick={() => setTimelineFilter(timelineFilter === k ? null : k)}
+                        >
+                          {getTimelineKindLabel(k)} ({kindCounts[k]})
+                        </button>
+                      ))}
+                    </div>
+                  ) : null;
+                })()}
+                <div className="space-y-3 max-h-96 overflow-y-auto">
+                  {parsedGitHubTimeline
+                    .filter((entry) => !timelineFilter || entry.kind === timelineFilter)
+                    .map((entry, idx) => {
                     const statusStyle = getTimelineStatusStyle(entry.status);
+                    const kindStyle = TIMELINE_KIND_STYLE[entry.kind];
+                    const isGeneral = entry.kind === "general";
+                    // Find original comment for general entries to render markdown
+                    const originalComment = isGeneral ? ghComments.find(
+                      (c) => c.createdAt === entry.createdAt && (c.author?.login ?? "unknown") === entry.author
+                    ) : null;
                     return (
                       <div
                         key={`${entry.kind}-${entry.createdAt}-${idx}`}
                         className="rounded-xl border p-3 space-y-2"
-                        style={{ borderColor: "rgba(148,163,184,0.12)", backgroundColor: "rgba(255,255,255,0.02)" }}
+                        style={{
+                          borderColor: isGeneral ? "rgba(148,163,184,0.08)" : `${kindStyle.text}22`,
+                          backgroundColor: isGeneral ? "rgba(255,255,255,0.02)" : `${kindStyle.text}06`,
+                        }}
                       >
                         <div className="flex flex-wrap items-center gap-2 text-xs">
                           <span
                             className="px-2 py-0.5 rounded-full font-medium"
-                            style={{ backgroundColor: "rgba(148,163,184,0.12)", color: "var(--th-text-secondary)" }}
+                            style={{ backgroundColor: kindStyle.bg, color: kindStyle.text }}
                           >
                             {getTimelineKindLabel(entry.kind)}
                           </span>
-                          <span
-                            className="px-2 py-0.5 rounded-full font-medium"
-                            style={{ backgroundColor: statusStyle.bg, color: statusStyle.text }}
-                          >
-                            {getTimelineStatusLabel(entry.status)}
-                          </span>
+                          {!isGeneral && (
+                            <span
+                              className="px-2 py-0.5 rounded-full font-medium"
+                              style={{ backgroundColor: statusStyle.bg, color: statusStyle.text }}
+                            >
+                              {getTimelineStatusLabel(entry.status)}
+                            </span>
+                          )}
                           <span className="font-medium" style={{ color: "#93c5fd" }}>{entry.author}</span>
                           <span style={{ color: "var(--th-text-muted)" }}>{formatIso(entry.createdAt, locale)}</span>
                         </div>
                         <div className="space-y-1">
-                          <div className="text-sm font-medium" style={{ color: "var(--th-text-heading)" }}>
-                            {entry.title}
-                          </div>
-                          {entry.summary && (
-                            <div className="text-sm" style={{ color: "var(--th-text-primary)" }}>
-                              {entry.summary}
+                          {!isGeneral && (
+                            <div className="text-sm font-medium" style={{ color: "var(--th-text-heading)" }}>
+                              {entry.title}
                             </div>
                           )}
-                          {entry.details.length > 0 && (
-                            <ul className="space-y-1 pl-4 text-xs list-disc" style={{ color: "var(--th-text-secondary)" }}>
-                              {entry.details.map((detail, detailIdx) => (
-                                <li key={detailIdx}>{detail}</li>
-                              ))}
-                            </ul>
+                          {isGeneral && originalComment ? (
+                            <div className="text-sm" style={{ color: "var(--th-text-primary)" }}>
+                              <MarkdownContent content={originalComment.body} />
+                            </div>
+                          ) : (
+                            <>
+                              {entry.summary && (
+                                <div className="text-sm" style={{ color: "var(--th-text-primary)" }}>
+                                  {entry.summary}
+                                </div>
+                              )}
+                              {entry.details.length > 0 && (
+                                <ul className="space-y-1 pl-4 text-xs list-disc" style={{ color: "var(--th-text-secondary)" }}>
+                                  {entry.details.map((detail, detailIdx) => (
+                                    <li key={detailIdx}>{detail}</li>
+                                  ))}
+                                </ul>
+                              )}
+                            </>
                           )}
                         </div>
                       </div>
                     );
                   })}
-                </div>
-              </div>
-            )}
-
-            {/* GitHub comments */}
-            {ghComments.length > 0 && (
-              <div className="rounded-2xl border p-4 bg-white/5 space-y-3" style={{ borderColor: "rgba(148,163,184,0.18)" }}>
-                <h4 className="font-medium" style={{ color: "var(--th-text-heading)" }}>
-                  {tr("원본 GitHub 코멘트", "Raw GitHub Comments")}
-                  <span className="ml-2 text-xs font-normal" style={{ color: "var(--th-text-muted)" }}>
-                    ({ghComments.length})
-                  </span>
-                </h4>
-                <div className="space-y-3 max-h-96 overflow-y-auto">
-                  {ghComments.map((comment, idx) => (
-                    <div key={idx} className="rounded-xl border p-3 space-y-1" style={{ borderColor: "rgba(148,163,184,0.12)", backgroundColor: "rgba(255,255,255,0.02)" }}>
-                      <div className="flex items-center gap-2 text-xs">
-                        <span className="font-medium" style={{ color: "#93c5fd" }}>{comment.author?.login ?? "unknown"}</span>
-                        <span style={{ color: "var(--th-text-muted)" }}>{formatIso(comment.createdAt, locale)}</span>
-                      </div>
-                      <div className="text-sm" style={{ color: "var(--th-text-primary)" }}>
-                        <MarkdownContent content={comment.body} />
-                      </div>
-                    </div>
-                  ))}
                 </div>
               </div>
             )}

@@ -233,13 +233,14 @@ export function syncDodToChecklist(
 // GitHub Comment Timeline Parser
 // ---------------------------------------------------------------------------
 
-export type GitHubTimelineKind = "review" | "pm" | "work";
+export type GitHubTimelineKind = "review" | "pm" | "work" | "general";
 export type GitHubTimelineStatus =
   | "reviewing"
   | "changes_requested"
   | "passed"
   | "decision"
-  | "completed";
+  | "completed"
+  | "comment";
 
 export interface ParsedGitHubComment {
   kind: GitHubTimelineKind;
@@ -373,7 +374,17 @@ export function parseGitHubCommentTimeline(comments: GitHubComment[]): ParsedGit
       }];
     }
 
-    return [];
+    // Fallback: unrecognized comments shown as "general" type
+    const truncated = body.length > 200 ? body.slice(0, 200) + "…" : body;
+    return [{
+      kind: "general",
+      status: "comment",
+      title: heading ?? cleanMarkdownLine(firstLine ?? "코멘트"),
+      summary: truncated,
+      details: [],
+      createdAt: comment.createdAt,
+      author,
+    }];
   });
 }
 

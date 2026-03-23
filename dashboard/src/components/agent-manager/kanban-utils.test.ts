@@ -72,4 +72,45 @@ describe("parseGitHubCommentTimeline", () => {
     });
     expect(entry.details).toEqual(["변경 요약", "검증", "DoD"]);
   });
+
+  it("미분류 코멘트를 general 타입으로 반환한다", () => {
+    const [entry] = parseGitHubCommentTimeline([
+      makeComment("이건 그냥 일반 코멘트입니다."),
+    ]);
+
+    expect(entry).toMatchObject({
+      kind: "general",
+      status: "comment",
+      title: "이건 그냥 일반 코멘트입니다.",
+      author: "itismyfield",
+    });
+  });
+
+  it("빈 코멘트는 무시한다", () => {
+    const result = parseGitHubCommentTimeline([makeComment("")]);
+    expect(result).toHaveLength(0);
+  });
+
+  it("긴 코멘트의 summary를 200자로 잘라낸다", () => {
+    const longBody = "A".repeat(300);
+    const [entry] = parseGitHubCommentTimeline([makeComment(longBody)]);
+
+    expect(entry.kind).toBe("general");
+    expect(entry.summary!.length).toBeLessThanOrEqual(201); // 200 + "…"
+  });
+
+  it("PM 결정 코멘트를 pm 타입으로 파싱한다", () => {
+    const [entry] = parseGitHubCommentTimeline([
+      makeComment(`## PM 결정
+
+- 이 방향으로 진행
+- 리스크 수용`),
+    ]);
+
+    expect(entry).toMatchObject({
+      kind: "pm",
+      status: "decision",
+      title: "PM 결정",
+    });
+  });
 });
