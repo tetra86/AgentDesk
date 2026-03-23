@@ -42,6 +42,8 @@ sleep 2
 echo "▸ Copying binary from dev..."
 cp "$ADK_DEV/bin/agentdesk" "$ADK_REL/bin/agentdesk"
 chmod +x "$ADK_REL/bin/agentdesk"
+xattr -d com.apple.provenance "$ADK_REL/bin/agentdesk" 2>/dev/null || true
+codesign -f -s - "$ADK_REL/bin/agentdesk" 2>/dev/null || true
 
 # Copy dashboard from dev
 echo "▸ Copying dashboard from dev..."
