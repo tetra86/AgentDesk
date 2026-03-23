@@ -42,7 +42,7 @@ pub(super) async fn handle_event(
                     if count % 50 == 0 {
                         data.shared.intake_dedup.retain(|k, v| {
                             if k.starts_with("mid:") {
-                                now.duration_since(*v) < MSG_DEDUP_TTL
+                                now.duration_since(v.0) < MSG_DEDUP_TTL
                             } else {
                                 true // non-mid entries are cleaned by their own path
                             }
@@ -57,21 +57,22 @@ pub(super) async fn handle_event(
 
                 let is_dup = match data.shared.intake_dedup.entry(key.clone()) {
                     dashmap::mapref::entry::Entry::Occupied(mut e) => {
-                        if now.duration_since(*e.get()) >= MSG_DEDUP_TTL {
+                        let (ts, was_thread) = *e.get();
+                        if now.duration_since(ts) >= MSG_DEDUP_TTL {
                             // Entry expired — treat as new
-                            e.insert(now);
+                            e.insert((now, is_thread_context));
                             false
-                        } else if is_thread_context {
-                            // Thread event for a message already seen via parent —
-                            // allow thread through (refresh timestamp).
-                            e.insert(now);
+                        } else if is_thread_context && !was_thread {
+                            // Thread event for a message previously seen via parent —
+                            // allow thread through and mark as thread-processed.
+                            e.insert((now, true));
                             false
                         } else {
-                            true // genuine duplicate from same or parent context
+                            true // genuine duplicate (same context or already thread-processed)
                         }
                     }
                     dashmap::mapref::entry::Entry::Vacant(e) => {
-                        e.insert(now);
+                        e.insert((now, is_thread_context));
                         false
                     }
                 };
@@ -248,7 +249,7 @@ pub(super) async fn handle_event(
                     if k.starts_with("mid:") {
                         true // preserved; cleaned by universal dedup cleanup
                     } else {
-                        now.duration_since(*v) < INTAKE_DEDUP_TTL
+                        now.duration_since(v.0) < INTAKE_DEDUP_TTL
                     }
                 });
 
@@ -256,10 +257,10 @@ pub(super) async fn handle_event(
                 // simultaneous arrivals cannot both see a miss.
                 let is_duplicate = match data.shared.intake_dedup.entry(dedup_key.clone()) {
                     dashmap::mapref::entry::Entry::Occupied(e) => {
-                        now.duration_since(*e.get()) < INTAKE_DEDUP_TTL
+                        now.duration_since(e.get().0) < INTAKE_DEDUP_TTL
                     }
                     dashmap::mapref::entry::Entry::Vacant(e) => {
-                        e.insert(now);
+                        e.insert((now, false));
                         false
                     }
                 };
@@ -2746,18 +2747,18 @@ mod tests {
     fn mid_entries_survive_bot_cleanup() {
         use std::time::{Duration, Instant};
 
-        let map = dashmap::DashMap::new();
+        let map: dashmap::DashMap<String, (Instant, bool)> = dashmap::DashMap::new();
         let now = Instant::now();
 
         // Simulate: mid:* entry inserted 40s ago (within 60s TTL, outside 30s TTL)
         let mid_time = now - Duration::from_secs(40);
-        map.insert("mid:123".to_string(), mid_time);
+        map.insert("mid:123".to_string(), (mid_time, false));
 
         // Simulate: dispatch:* entry inserted 40s ago (outside 30s TTL)
-        map.insert("dispatch:abc".to_string(), mid_time);
+        map.insert("dispatch:abc".to_string(), (mid_time, false));
 
         // Simulate: fresh bot entry inserted just now
-        map.insert("msg:456".to_string(), now);
+        map.insert("msg:456".to_string(), (now, false));
 
         // Bot cleanup: retain non-mid entries only if within 30s TTL
         let intake_dedup_ttl = Duration::from_secs(30);
@@ -2765,7 +2766,7 @@ mod tests {
             if k.starts_with("mid:") {
                 true // preserved; cleaned by universal dedup cleanup
             } else {
-                now.duration_since(*v) < intake_dedup_ttl
+                now.duration_since(v.0) < intake_dedup_ttl
             }
         });
 
@@ -2780,7 +2781,7 @@ mod tests {
         let msg_dedup_ttl = Duration::from_secs(60);
         map.retain(|k, v| {
             if k.starts_with("mid:") {
-                now.duration_since(*v) < msg_dedup_ttl
+                now.duration_since(v.0) < msg_dedup_ttl
             } else {
                 true
             }
@@ -2791,14 +2792,54 @@ mod tests {
 
         // Now simulate mid:* at 65s ago (outside 60s TTL)
         let old_mid_time = now - Duration::from_secs(65);
-        map.insert("mid:old".to_string(), old_mid_time);
+        map.insert("mid:old".to_string(), (old_mid_time, false));
         map.retain(|k, v| {
             if k.starts_with("mid:") {
-                now.duration_since(*v) < msg_dedup_ttl
+                now.duration_since(v.0) < msg_dedup_ttl
             } else {
                 true
             }
         });
         assert!(!map.contains_key("mid:old"), "expired mid:* must be cleaned by universal cleanup");
+    }
+
+    /// Thread-preference dedup: once a message is processed as thread context,
+    /// subsequent thread duplicates (e.g. gateway reconnection) must be blocked.
+    /// Only parent→thread promotion is allowed, not thread→thread re-processing.
+    #[test]
+    fn thread_dedup_blocks_duplicate_thread_context() {
+        use std::time::{Duration, Instant};
+
+        let map: dashmap::DashMap<String, (Instant, bool)> = dashmap::DashMap::new();
+        let now = Instant::now();
+        let msg_dedup_ttl = Duration::from_secs(60);
+
+        // Case 1: First seen as parent context, then thread arrives → allow
+        map.insert("mid:100".to_string(), (now, false)); // was_thread = false
+        let entry = map.get("mid:100").unwrap();
+        let (ts, was_thread) = *entry;
+        drop(entry);
+        // is_thread_context=true, was_thread=false → should allow
+        let allow = now.duration_since(ts) < msg_dedup_ttl
+            && !was_thread; // this is the "allow" condition for thread promotion
+        assert!(allow, "thread should be allowed when previous was parent");
+
+        // Case 2: First seen as thread context, then thread arrives again → block
+        map.insert("mid:200".to_string(), (now, true)); // was_thread = true
+        let entry = map.get("mid:200").unwrap();
+        let (ts2, was_thread2) = *entry;
+        drop(entry);
+        // is_thread_context=true, was_thread=true → should block
+        let allow2 = now.duration_since(ts2) < msg_dedup_ttl
+            && !was_thread2;
+        assert!(!allow2, "duplicate thread context must be blocked");
+
+        // Case 3: First seen as thread context, then parent arrives → block
+        let entry = map.get("mid:200").unwrap();
+        let (ts3, _was_thread3) = *entry;
+        drop(entry);
+        // is_thread_context=false → always blocked by the main branch
+        let is_dup = now.duration_since(ts3) < msg_dedup_ttl;
+        assert!(is_dup, "parent duplicate after thread must be blocked");
     }
 }

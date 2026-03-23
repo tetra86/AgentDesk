@@ -324,8 +324,9 @@ pub(super) struct SharedData {
     pub(super) shutdown_counted: std::sync::atomic::AtomicBool,
     /// Intake-level dedup cache: prevents the same message from starting two turns
     /// when duplicate bot dispatches arrive nearly simultaneously.
-    /// Key: dedup key (dispatch_id or channel+author+text hash), Value: first-seen Instant.
-    pub(super) intake_dedup: dashmap::DashMap<String, std::time::Instant>,
+    /// Key: dedup key (dispatch_id or channel+author+text hash).
+    /// Value: (first-seen Instant, was_thread_context).
+    pub(super) intake_dedup: dashmap::DashMap<String, (std::time::Instant, bool)>,
     /// Maps parent channel → active dispatch thread channel.
     /// When a dispatch creates a thread, the parent is recorded here so that
     /// subsequent bot messages to the parent are queued instead of starting
