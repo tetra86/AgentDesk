@@ -862,14 +862,37 @@ pub(super) async fn send_review_result_to_primary(
             _ => false,
         };
         if valid {
-            // Unarchive if needed
-            let _ = client
+            // Unarchive if needed — check result and fallback to channel on failure
+            let unarchive_ok = match client
                 .patch(&info_url)
                 .header("Authorization", format!("Bot {}", &token))
                 .json(&serde_json::json!({"archived": false}))
                 .send()
-                .await;
-            tid.clone()
+                .await
+            {
+                Ok(r) if r.status().is_success() => true,
+                Ok(r) => {
+                    tracing::warn!("[review] Failed to unarchive thread {tid}: HTTP {}", r.status());
+                    false
+                }
+                Err(e) => {
+                    tracing::warn!("[review] Failed to unarchive thread {tid}: {e}");
+                    false
+                }
+            };
+            if unarchive_ok {
+                tid.clone()
+            } else {
+                // Unarchive failed — clear stale mapping and fall back to channel
+                if let Ok(conn) = db.lock() {
+                    conn.execute(
+                        "UPDATE kanban_cards SET active_thread_id = NULL WHERE id = ?1",
+                        [card_id],
+                    )
+                    .ok();
+                }
+                format!("{}", channel_id_num)
+            }
         } else {
             // Thread is locked or inaccessible — clear stale mapping and fall back to channel
             if let Ok(conn) = db.lock() {
