@@ -145,8 +145,15 @@ pub async fn patch_config_entries(
             );
         }
     };
+    let allowed: std::collections::HashSet<&str> =
+        CONFIG_KEYS.iter().map(|(k, _, _, _)| *k).collect();
     let mut updated = 0;
+    let mut rejected = Vec::new();
     for (key, value) in entries {
+        if !allowed.contains(key.as_str()) {
+            rejected.push(key.clone());
+            continue;
+        }
         let v = match value {
             serde_json::Value::String(s) => s.clone(),
             other => other.to_string(),
@@ -158,9 +165,12 @@ pub async fn patch_config_entries(
         .ok();
         updated += 1;
     }
+    if !rejected.is_empty() {
+        tracing::warn!("patch_config_entries: rejected unknown keys: {:?}", rejected);
+    }
     (
         StatusCode::OK,
-        Json(json!({"ok": true, "updated": updated})),
+        Json(json!({"ok": true, "updated": updated, "rejected": rejected})),
     )
 }
 
