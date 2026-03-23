@@ -41,16 +41,8 @@ var autoQueue = {
       var entry = nextEntry[0];
       agentdesk.log.info("[auto-queue] Dispatching next entry for " + agentId + ": " + entry.kanban_card_id);
 
-      // Set card to requested
-      agentdesk.kanban.setStatus(entry.kanban_card_id, "requested");
-
-      // Mark entry as dispatched
-      agentdesk.db.execute(
-        "UPDATE auto_queue_entries SET status = 'dispatched', dispatched_at = datetime('now') WHERE id = ?",
-        [entry.id]
-      );
-
-      // Create dispatch
+      // Create dispatch first — only mark entry as dispatched on success
+      // dispatch.create sets card status to 'requested' internally
       try {
         agentdesk.dispatch.create(
           entry.kanban_card_id,
@@ -58,20 +50,26 @@ var autoQueue = {
           "implementation",
           entry.title
         );
-      } catch (e) {
-        agentdesk.log.warn("[auto-queue] dispatch failed: " + e);
-      }
 
-      // Check if run is complete
-      var remaining = agentdesk.db.query(
-        "SELECT COUNT(*) as cnt FROM auto_queue_entries WHERE run_id = ? AND status = 'pending'",
-        [entry.run_id]
-      );
-      if (remaining.length > 0 && remaining[0].cnt === 0) {
+        // Dispatch succeeded — now mark entry
         agentdesk.db.execute(
-          "UPDATE auto_queue_runs SET status = 'completed', completed_at = datetime('now') WHERE id = ?",
+          "UPDATE auto_queue_entries SET status = 'dispatched', dispatched_at = datetime('now') WHERE id = ?",
+          [entry.id]
+        );
+
+        // Check if run is complete
+        var remaining = agentdesk.db.query(
+          "SELECT COUNT(*) as cnt FROM auto_queue_entries WHERE run_id = ? AND status = 'pending'",
           [entry.run_id]
         );
+        if (remaining.length > 0 && remaining[0].cnt === 0) {
+          agentdesk.db.execute(
+            "UPDATE auto_queue_runs SET status = 'completed', completed_at = datetime('now') WHERE id = ?",
+            [entry.run_id]
+          );
+        }
+      } catch (e) {
+        agentdesk.log.warn("[auto-queue] dispatch failed, entry stays pending for retry: " + e);
       }
     }
   },
