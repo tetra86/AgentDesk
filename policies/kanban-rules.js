@@ -377,6 +377,30 @@ var rules = {
         "UPDATE kanban_cards SET completed_at = datetime('now') WHERE id = ? AND completed_at IS NULL",
         [payload.card_id]
       );
+
+      // Mark auto-queue entry as done and activate next dispatch
+      var card = agentdesk.db.query(
+        "SELECT assigned_agent_id FROM kanban_cards WHERE id = ?",
+        [payload.card_id]
+      );
+      if (card.length > 0 && card[0].assigned_agent_id) {
+        var agentId = card[0].assigned_agent_id;
+        // Update auto-queue entry status
+        agentdesk.db.execute(
+          "UPDATE auto_queue_entries SET status = 'done', completed_at = datetime('now') WHERE kanban_card_id = ? AND status IN ('dispatched', 'pending')",
+          [payload.card_id]
+        );
+        // Trigger next dispatch via HTTP API
+        var port = agentdesk.config.get("server_port") || 8791;
+        try {
+          agentdesk.http.post("http://127.0.0.1:" + port + "/api/auto-queue/activate", {
+            agent_id: agentId
+          });
+          agentdesk.log.info("[kanban] auto-queue activated for " + agentId + " after card " + payload.card_id + " → done");
+        } catch (e) {
+          agentdesk.log.warn("[kanban] auto-queue activate failed: " + e);
+        }
+      }
     }
   }
 };
