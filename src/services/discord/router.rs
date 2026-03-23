@@ -704,15 +704,13 @@ pub(super) async fn handle_text_message(
         } else {
             // Check if card already has an active thread via internal API
             let existing_thread = lookup_card_thread(shared.api_port, did).await;
-            if let Some(ref existing_tid) = existing_thread {
-                // Try to use the existing thread — verify it's accessible and not locked
-                let tid = ChannelId::new(existing_tid.parse::<u64>().unwrap_or(0));
-                let thread_valid = if tid.get() != 0 {
-                    verify_thread_accessible(ctx, tid).await
-                } else {
-                    false
-                };
-                if thread_valid {
+            let reuse_tid = existing_thread.as_ref().and_then(|t| {
+                let id = t.parse::<u64>().unwrap_or(0);
+                if id != 0 { Some(ChannelId::new(id)) } else { None }
+            });
+
+            let reused = if let Some(tid) = reuse_tid {
+                if verify_thread_accessible(ctx, tid).await {
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     println!(
                         "  [{ts}] 🧵 Reusing existing thread {} for dispatch {}",
@@ -720,19 +718,23 @@ pub(super) async fn handle_text_message(
                     );
                     super::bootstrap_thread_session(shared, tid, &current_path, ctx).await;
                     shared.dispatch_thread_parents.insert(channel_id, tid);
-                    tid
-                } else if tid.get() != 0 {
+                    Some(tid)
+                } else {
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     println!(
                         "  [{ts}] 🧵 Thread {} is locked/inaccessible, creating new for {}",
                         tid, did
                     );
-                    channel_id // fall through to thread creation below
-                } else {
-                    channel_id
+                    None
                 }
             } else {
-                // No existing thread — create new
+                None
+            };
+
+            if let Some(tid) = reused {
+                tid
+            } else {
+                // No existing usable thread — create new
                 let thread_title = user_text
                     .find(" - ")
                     .map(|idx| &user_text[idx + 3..])
@@ -758,13 +760,9 @@ pub(super) async fn handle_text_message(
                             "  [{ts}] 🧵 Created dispatch thread {} for dispatch {}",
                             thread.id, did
                         );
-                        // Bootstrap session for the thread from parent channel
                         super::bootstrap_thread_session(shared, thread.id, &current_path, ctx)
                             .await;
-                        // Record parent→thread mapping so subsequent bot messages
-                        // to the parent are queued instead of starting parallel turns.
                         shared.dispatch_thread_parents.insert(channel_id, thread.id);
-                        // Link thread to card's active_thread_id via internal API
                         link_dispatch_thread(shared.api_port, did, thread.id.get()).await;
                         thread.id
                     }
@@ -2546,7 +2544,13 @@ async fn verify_thread_accessible(
                     if metadata.archived {
                         let edit =
                             poise::serenity_prelude::builder::EditThread::new().archived(false);
-                        let _ = thread_id.edit_thread(&ctx.http, edit).await;
+                        if let Err(e) = thread_id.edit_thread(&ctx.http, edit).await {
+                            let ts = chrono::Local::now().format("%H:%M:%S");
+                            println!(
+                                "  [{ts}] ⚠️ Failed to unarchive thread {thread_id}: {e}"
+                            );
+                            return false;
+                        }
                     }
                 }
                 true
