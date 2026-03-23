@@ -502,7 +502,7 @@ pub async fn activate(
     State(state): State<AppState>,
     Json(body): Json<ActivateBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let conn = match state.db.lock() {
+    let mut conn = match state.db.lock() {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -637,13 +637,6 @@ pub async fn activate(
 
     let mut dispatched = Vec::new();
     for (entry_id, card_id, agent_id) in &pending {
-        // Mark entry as dispatched
-        conn.execute(
-            "UPDATE auto_queue_entries SET status = 'dispatched', dispatched_at = datetime('now') WHERE id = ?1",
-            [entry_id],
-        )
-        .ok();
-
         // Get card title for dispatch creation
         let title: String = conn
             .query_row(
@@ -655,8 +648,8 @@ pub async fn activate(
 
         drop(conn);
 
-        // Create dispatch
-        let _ = crate::dispatch::create_dispatch(
+        // Create dispatch first — only mark entry as dispatched on success
+        let dispatch_result = crate::dispatch::create_dispatch(
             &state.db,
             &state.engine,
             card_id,
@@ -665,6 +658,22 @@ pub async fn activate(
             &title,
             &json!({"auto_queue": true, "entry_id": entry_id}),
         );
+
+        let conn_reacquired = state.db.lock().unwrap();
+        if dispatch_result.is_err() {
+            tracing::error!("[auto-queue] create_dispatch failed for entry {entry_id}, leaving as pending for retry");
+            drop(conn_reacquired);
+            conn = state.db.lock().unwrap();
+            continue;
+        }
+
+        // Dispatch succeeded — now mark entry
+        conn_reacquired.execute(
+            "UPDATE auto_queue_entries SET status = 'dispatched', dispatched_at = datetime('now') WHERE id = ?1",
+            [entry_id],
+        )
+        .ok();
+        drop(conn_reacquired);
 
         // Async Discord notification
         let db_clone = state.db.clone();
@@ -697,11 +706,8 @@ pub async fn activate(
 
         let conn_inner = state.db.lock().unwrap();
         dispatched.push(entry_to_json(&conn_inner, entry_id));
-        // Re-lock for next iteration — but we need to break the borrow
         drop(conn_inner);
 
-        // Re-acquire for next iteration
-        let _conn = state.db.lock().unwrap();
         break; // Dispatch one at a time — next one starts when this one completes
     }
 
