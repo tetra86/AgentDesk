@@ -705,9 +705,14 @@ pub(super) async fn handle_text_message(
             // Check if card already has an active thread via internal API
             let existing_thread = lookup_card_thread(shared.api_port, did).await;
             if let Some(ref existing_tid) = existing_thread {
-                // Try to use the existing thread
+                // Try to use the existing thread — verify it's accessible and not locked
                 let tid = ChannelId::new(existing_tid.parse::<u64>().unwrap_or(0));
-                if tid.get() != 0 {
+                let thread_valid = if tid.get() != 0 {
+                    verify_thread_accessible(ctx, tid).await
+                } else {
+                    false
+                };
+                if thread_valid {
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     println!(
                         "  [{ts}] 🧵 Reusing existing thread {} for dispatch {}",
@@ -716,6 +721,13 @@ pub(super) async fn handle_text_message(
                     super::bootstrap_thread_session(shared, tid, &current_path, ctx).await;
                     shared.dispatch_thread_parents.insert(channel_id, tid);
                     tid
+                } else if tid.get() != 0 {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    println!(
+                        "  [{ts}] 🧵 Thread {} is locked/inaccessible, creating new for {}",
+                        tid, did
+                    );
+                    channel_id // fall through to thread creation below
                 } else {
                     channel_id
                 }
@@ -2514,6 +2526,36 @@ async fn lookup_card_thread(api_port: u16, dispatch_id: &str) -> Option<String> 
     body.get("active_thread_id")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
+}
+
+/// Verify a thread is accessible and not locked via Discord API.
+/// Returns true if the thread exists and is not locked.
+async fn verify_thread_accessible(
+    ctx: &poise::serenity_prelude::Context,
+    thread_id: ChannelId,
+) -> bool {
+    match ctx.http.get_channel(thread_id).await {
+        Ok(channel) => {
+            if let Some(guild_channel) = channel.guild() {
+                // Check if thread is locked
+                if let Some(ref metadata) = guild_channel.thread_metadata {
+                    if metadata.locked {
+                        return false;
+                    }
+                    // Unarchive if needed — send will fail on archived threads via gateway
+                    if metadata.archived {
+                        let edit =
+                            poise::serenity_prelude::builder::EditThread::new().archived(false);
+                        let _ = thread_id.edit_thread(&ctx.http, edit).await;
+                    }
+                }
+                true
+            } else {
+                false
+            }
+        }
+        Err(_) => false,
+    }
 }
 
 /// Link a newly created dispatch thread to the card's active_thread_id via internal API.

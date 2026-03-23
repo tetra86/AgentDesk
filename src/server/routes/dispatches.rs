@@ -649,7 +649,7 @@ async fn try_reuse_thread(
     client: &reqwest::Client,
     token: &str,
     thread_id: &str,
-    expected_parent: u64,
+    _expected_parent: u64,
     dispatch_type: &str,
     message: &str,
     dispatch_id: &str,
@@ -680,18 +680,11 @@ async fn try_reuse_thread(
 
     let body: serde_json::Value = resp.json().await.ok()?;
 
-    // Verify parent channel matches
-    let parent_id = body
-        .get("parent_id")
-        .and_then(|v| v.as_str())
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(0);
-    if parent_id != expected_parent {
-        tracing::info!(
-            "[dispatch] Thread {thread_id} parent {parent_id} != expected {expected_parent}, skipping reuse"
-        );
-        return None;
-    }
+    // Note: We intentionally do NOT check parent_id here.
+    // The thread may have been created under a different channel (e.g. primary vs alt),
+    // but Discord allows sending messages to any thread by ID regardless of parent.
+    // This enables cross-channel thread reuse for the same-issue lifecycle
+    // (implementation on primary → review on alt → review-decision on primary).
 
     // Check if thread is locked — locked threads cannot be reused
     let metadata = body.get("thread_metadata");
@@ -843,9 +836,10 @@ pub(super) async fn send_review_result_to_primary(
         .ok()
     };
 
-    // Determine target: existing thread (if valid) or main channel
+    // Determine target: existing thread (if valid) or main channel.
+    // Note: We do NOT check parent_id — the thread may have been created under
+    // a different channel (primary vs alt) but is still valid for the same-issue lifecycle.
     let target_channel = if let Some(ref tid) = active_thread_id {
-        // Verify thread is accessible and belongs to the right parent
         let info_url = format!("https://discord.com/api/v10/channels/{}", tid);
         let valid = match client
             .get(&info_url)
@@ -855,16 +849,12 @@ pub(super) async fn send_review_result_to_primary(
         {
             Ok(resp) if resp.status().is_success() => {
                 if let Ok(body) = resp.json::<serde_json::Value>().await {
-                    let parent = body
-                        .get("parent_id")
-                        .and_then(|v| v.as_str())
-                        .and_then(|s| s.parse::<u64>().ok());
                     let locked = body
                         .get("thread_metadata")
                         .and_then(|m| m.get("locked"))
                         .and_then(|v| v.as_bool())
                         .unwrap_or(false);
-                    parent == Some(channel_id_num) && !locked
+                    !locked
                 } else {
                     false
                 }
@@ -881,6 +871,14 @@ pub(super) async fn send_review_result_to_primary(
                 .await;
             tid.clone()
         } else {
+            // Thread is locked or inaccessible — clear stale mapping and fall back to channel
+            if let Ok(conn) = db.lock() {
+                conn.execute(
+                    "UPDATE kanban_cards SET active_thread_id = NULL WHERE id = ?1",
+                    [card_id],
+                )
+                .ok();
+            }
             format!("{}", channel_id_num)
         }
     } else {
@@ -1181,7 +1179,10 @@ pub fn resolve_channel_alias_pub(alias: &str) -> Option<u64> {
 }
 
 fn use_counter_model_channel(dispatch_type: Option<&str>) -> bool {
-    matches!(dispatch_type, Some("review") | Some("review-decision"))
+    // Only "review" goes to the counter-model channel.
+    // "review-decision" is sent to the original agent's primary channel
+    // so it reuses the implementation thread.
+    matches!(dispatch_type, Some("review"))
 }
 
 fn format_dispatch_message(
@@ -1398,7 +1399,9 @@ mod tests {
     #[test]
     fn review_dispatch_uses_counter_model_channel() {
         assert!(use_counter_model_channel(Some("review")));
-        assert!(use_counter_model_channel(Some("review-decision")));
+        // review-decision goes to the original agent's primary channel,
+        // not the counter-model channel, to reuse the implementation thread
+        assert!(!use_counter_model_channel(Some("review-decision")));
         assert!(!use_counter_model_channel(Some("implementation")));
         assert!(!use_counter_model_channel(Some("rework")));
         assert!(!use_counter_model_channel(None));
