@@ -8,6 +8,34 @@ pub(super) async fn handle_event(
     maybe_cleanup_sessions(&data.shared).await;
     match event {
         serenity::FullEvent::Message { new_message } => {
+            // ── Universal message-ID dedup ─────────────────────────────
+            // Guards against the same Discord message being processed twice,
+            // which can happen when thread messages are delivered as both a
+            // thread-context event AND a parent-channel event, or during
+            // gateway reconnections.
+            {
+                const MSG_DEDUP_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+                let now = std::time::Instant::now();
+                let key = format!("mid:{}", new_message.id);
+                let is_dup = match data.shared.intake_dedup.entry(key.clone()) {
+                    dashmap::mapref::entry::Entry::Occupied(e) => {
+                        now.duration_since(*e.get()) < MSG_DEDUP_TTL
+                    }
+                    dashmap::mapref::entry::Entry::Vacant(e) => {
+                        e.insert(now);
+                        false
+                    }
+                };
+                if is_dup {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    println!(
+                        "  [{ts}] ⏭ MSG-DEDUP: skipping duplicate message {} in channel {}",
+                        new_message.id, new_message.channel_id
+                    );
+                    return Ok(());
+                }
+            }
+
             // Ignore bot messages, unless the bot is in the allowed_bot_ids list
             if new_message.author.bot {
                 let allowed = {
