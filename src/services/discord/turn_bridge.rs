@@ -290,6 +290,25 @@ pub(super) fn spawn_turn_bridge(
         }
         let _completion_guard = CompletionGuard(completion_tx);
 
+        // Guard: ensure inflight state file is cleaned up even if the task
+        // panics or exits early.  On the normal path we defuse the guard
+        // after the explicit clear_inflight_state() call.
+        struct InflightCleanupGuard {
+            provider: Option<ProviderKind>,
+            channel_id: u64,
+        }
+        impl Drop for InflightCleanupGuard {
+            fn drop(&mut self) {
+                if let Some(ref provider) = self.provider {
+                    clear_inflight_state(provider, self.channel_id);
+                }
+            }
+        }
+        let mut inflight_guard = InflightCleanupGuard {
+            provider: Some(provider.clone()),
+            channel_id: channel_id.get(),
+        };
+
         let mut inflight_state = bridge.inflight_state.clone();
         let mut last_status_edit = tokio::time::Instant::now();
         let status_interval = super::status_update_interval();
@@ -938,6 +957,8 @@ pub(super) fn spawn_turn_bridge(
         }
 
         clear_inflight_state(&provider, channel_id.get());
+        // Defuse the guard — cleanup already done above.
+        inflight_guard.provider.take();
         shared_owned.recovering_channels.remove(&channel_id);
 
         // For dispatch-based turns (threads), kill the tmux session after
