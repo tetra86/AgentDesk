@@ -994,6 +994,15 @@ pub(super) async fn send_review_result_to_primary(
                     rusqlite::params![target_channel, dispatch_id],
                 )
                 .ok();
+                // Mark as notified so timeouts.js [I-0] won't resend
+                conn.execute(
+                    "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
+                    rusqlite::params![
+                        format!("dispatch_notified:{}", dispatch_id),
+                        dispatch_id
+                    ],
+                )
+                .ok();
             }
             tracing::info!(
                 "[review] Sent review-decision to existing thread {target_channel} for {agent_id}"
@@ -1012,6 +1021,17 @@ pub(super) async fn send_review_result_to_primary(
             .await
         {
             Ok(resp) if resp.status().is_success() => {
+                // Mark as notified so timeouts.js [I-0] won't resend
+                if let Ok(conn) = db.lock() {
+                    conn.execute(
+                        "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
+                        rusqlite::params![
+                            format!("dispatch_notified:{}", dispatch_id),
+                            dispatch_id
+                        ],
+                    )
+                    .ok();
+                }
                 tracing::info!("[review] Sent review result to {agent_id} (channel {channel_id})");
             }
             Ok(resp) => {
@@ -1077,6 +1097,10 @@ pub(super) async fn handle_completed_dispatch_followups(db: &crate::db::Db, disp
         return;
     }
 
+    // Track whether send_review_result_to_primary already created+sent a followup dispatch.
+    // If so, skip the generic latest_dispatch_id resend below to prevent duplicate notifications.
+    let mut review_followup_handled = false;
+
     if dispatch_type == "review" {
         let verdict = extract_review_verdict(result_json.as_deref());
         let ts = chrono::Local::now().format("%H:%M:%S");
@@ -1090,6 +1114,12 @@ pub(super) async fn handle_completed_dispatch_followups(db: &crate::db::Db, disp
         // submitted via the verdict API — these have a real "verdict" field in the result.
         if verdict != "unknown" {
             send_review_result_to_primary(db, &card_id, &verdict).await;
+            // For improve/rework/reject, send_review_result_to_primary already created
+            // the review-decision dispatch AND sent it to Discord. Mark as handled to
+            // prevent the generic latest_dispatch_id check below from re-sending it.
+            if verdict != "pass" && verdict != "accept" && verdict != "approved" {
+                review_followup_handled = true;
+            }
         } else {
             println!(
                 "  [{ts}] ⏭ REVIEW-FOLLOWUP: skipping send_review_result_to_primary (verdict=unknown)"
@@ -1166,7 +1196,7 @@ pub(super) async fn handle_completed_dispatch_followups(db: &crate::db::Db, disp
     };
 
     if let Some(new_dispatch_id) = latest_dispatch_id {
-        if new_dispatch_id != dispatch_id && !agent_id.is_empty() {
+        if new_dispatch_id != dispatch_id && !agent_id.is_empty() && !review_followup_handled {
             send_dispatch_to_discord(db, &agent_id, &title, &card_id, &new_dispatch_id).await;
         }
     }
@@ -1357,21 +1387,27 @@ pub async fn get_card_thread(
         }
     };
 
-    let result: Option<(String, Option<String>)> = conn
+    let result: Option<(String, Option<String>, Option<String>, Option<String>)> = conn
         .query_row(
-            "SELECT kc.id, kc.active_thread_id \
+            "SELECT kc.id, kc.active_thread_id, td.dispatch_type, \
+                    (SELECT a.discord_channel_alt FROM agents a WHERE a.id = td.to_agent_id) \
              FROM task_dispatches td \
              JOIN kanban_cards kc ON kc.id = td.kanban_card_id \
              WHERE td.id = ?1",
             [dispatch_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .ok();
 
     match result {
-        Some((card_id, thread_id)) => (
+        Some((card_id, thread_id, dispatch_type, alt_channel)) => (
             StatusCode::OK,
-            Json(json!({"card_id": card_id, "active_thread_id": thread_id})),
+            Json(json!({
+                "card_id": card_id,
+                "active_thread_id": thread_id,
+                "dispatch_type": dispatch_type,
+                "discord_channel_alt": alt_channel,
+            })),
         ),
         None => (
             StatusCode::NOT_FOUND,
@@ -1719,5 +1755,69 @@ mod tests {
             )
             .unwrap();
         assert!(active_thread.is_none());
+    }
+
+    /// When an explicit review verdict (improve/rework/reject) completes,
+    /// send_review_result_to_primary creates the review-decision dispatch
+    /// and sets review_followup_handled=true, preventing duplicate resend
+    /// via the generic latest_dispatch_id check.
+    #[tokio::test]
+    async fn review_followup_skips_generic_resend_for_explicit_verdict() {
+        let db = test_db();
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) VALUES ('agent-1', 'Agent 1', '123', '456')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, latest_dispatch_id, created_at, updated_at)
+                 VALUES ('card-1', 'Review test', 'review', 'agent-1', 'dispatch-review', datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, result, created_at, updated_at)
+                 VALUES ('dispatch-review', 'card-1', 'agent-1', 'review', 'completed', '[Review R1] card-1', '{\"verdict\":\"rework\"}', datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+        }
+
+        handle_completed_dispatch_followups(&db, "dispatch-review").await;
+
+        let conn = db.lock().unwrap();
+        // A review-decision dispatch should have been created
+        let latest_dispatch_id: String = conn
+            .query_row(
+                "SELECT latest_dispatch_id FROM kanban_cards WHERE id = 'card-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_ne!(latest_dispatch_id, "dispatch-review");
+
+        // Count total dispatches — should be exactly 2 (original review + one review-decision).
+        // Before this fix, the generic latest_dispatch_id check would call send_dispatch_to_discord
+        // again, potentially creating duplicate notifications.
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM task_dispatches WHERE kanban_card_id = 'card-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 2, "should have exactly 2 dispatches (review + review-decision), not more");
+
+        let (dt, ds): (String, String) = conn
+            .query_row(
+                "SELECT dispatch_type, status FROM task_dispatches WHERE id = ?1",
+                [&latest_dispatch_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(dt, "review-decision");
+        assert_eq!(ds, "pending");
     }
 }

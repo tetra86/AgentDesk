@@ -705,6 +705,8 @@ pub(super) fn spawn_turn_bridge(
             shared_owned
                 .dispatch_thread_parents
                 .retain(|_, thread| *thread != channel_id);
+            // Clean up cross-channel role override for this thread.
+            shared_owned.dispatch_role_overrides.remove(&channel_id);
             let mut remove_queue = false;
             let has_pending = if let Some(queue) = data.intervention_queue.get_mut(&channel_id) {
                 let has_pending = super::has_soft_intervention(queue);

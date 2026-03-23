@@ -337,6 +337,12 @@ pub(super) struct SharedData {
     /// Per-channel model override, independent of session lifecycle.
     /// Takes priority over role-map model. Cleared via `/model default`.
     pub(super) model_overrides: dashmap::DashMap<ChannelId, String>,
+    /// Per-thread role/model override for cross-channel dispatch reuse.
+    /// When a review dispatch reuses an implementation thread, this maps
+    /// thread_channel_id → alt_channel_id so role_binding and model_for_turn
+    /// resolve from the counter-model channel instead of the thread's parent.
+    /// Cleared when the turn completes.
+    pub(super) dispatch_role_overrides: dashmap::DashMap<ChannelId, ChannelId>,
     /// Per-channel last processed message ID — used for startup catch-up polling.
     pub(super) last_message_ids: dashmap::DashMap<ChannelId, u64>,
     /// Per-channel turn start time — used for metrics duration calculation.
@@ -1230,6 +1236,7 @@ pub async fn run_bot(
         bot_connected: std::sync::atomic::AtomicBool::new(false),
         last_turn_at: std::sync::Mutex::new(None),
         model_overrides: dashmap::DashMap::new(),
+        dispatch_role_overrides: dashmap::DashMap::new(),
         last_message_ids: dashmap::DashMap::new(),
         turn_start_times: dashmap::DashMap::new(),
         cached_serenity_ctx: tokio::sync::OnceCell::new(),

@@ -228,7 +228,7 @@ pub async fn agent_dispatched_sessions(
 
     let mut stmt = match conn.prepare(
         "SELECT id, session_key, agent_id, provider, status, active_dispatch_id,
-                model, tokens, cwd, last_heartbeat
+                model, tokens, cwd, last_heartbeat, thread_channel_id
          FROM sessions
          WHERE agent_id = ?1
          ORDER BY id",
@@ -255,6 +255,7 @@ pub async fn agent_dispatched_sessions(
                 row.get::<_, i64>(7)?,
                 row.get::<_, Option<String>>(8)?,
                 row.get::<_, Option<String>>(9)?,
+                row.get::<_, Option<String>>(10)?,
             ))
         })
         .ok();
@@ -275,6 +276,7 @@ pub async fn agent_dispatched_sessions(
                     tokens,
                     cwd,
                     last_heartbeat,
+                    thread_channel_id,
                 )| {
                     let effective = resolver.resolve(
                         session_key.as_deref(),
@@ -293,6 +295,7 @@ pub async fn agent_dispatched_sessions(
                         "tokens": tokens,
                         "cwd": cwd,
                         "last_heartbeat": last_heartbeat,
+                        "thread_channel_id": thread_channel_id,
                     })
                 },
             )
@@ -514,4 +517,58 @@ pub async fn agent_channels(
         .unwrap_or_default();
 
     (StatusCode::OK, Json(json!({"channels": channels})))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::Db;
+    use crate::engine::PolicyEngine;
+    use std::sync::{Arc, Mutex};
+
+    fn test_db() -> Db {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        crate::db::schema::migrate(&conn).unwrap();
+        Arc::new(Mutex::new(conn))
+    }
+
+    fn test_engine(db: &Db) -> PolicyEngine {
+        let config = crate::config::Config::default();
+        PolicyEngine::new(&config, db.clone()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn agent_dispatched_sessions_include_thread_channel_id() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        let state = AppState {
+            db: db.clone(),
+            engine,
+            health_registry: None,
+        };
+
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO agents (id, name, provider, status, xp) VALUES ('project-agentdesk', 'AgentDesk', 'codex', 'idle', 0)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO sessions (session_key, agent_id, provider, status, active_dispatch_id, thread_channel_id, last_heartbeat)
+                 VALUES (?1, 'project-agentdesk', 'codex', 'working', 'dispatch-1', '1485506232256168011', datetime('now'))",
+                ["mac-mini:AgentDesk-codex-adk-cdx-t1485506232256168011"],
+            )
+            .unwrap();
+        }
+
+        let (status, Json(body)) =
+            agent_dispatched_sessions(State(state), Path("project-agentdesk".to_string())).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body["sessions"][0]["thread_channel_id"],
+            serde_json::Value::String("1485506232256168011".to_string())
+        );
+    }
 }

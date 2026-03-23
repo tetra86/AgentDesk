@@ -695,15 +695,42 @@ pub(super) async fn handle_text_message(
         .is_some();
     let dispatch_id_for_thread = super::adk_session::parse_dispatch_id(user_text);
     let channel_id = if let Some(ref did) = dispatch_id_for_thread {
+        // Fetch dispatch metadata for thread reuse and cross-channel role override
+        let dispatch_info = lookup_dispatch_info(shared.api_port, did).await;
+        let is_review_dispatch = dispatch_info
+            .as_ref()
+            .and_then(|i| i.dispatch_type.as_deref())
+            .map(|t| t == "review")
+            .unwrap_or(false);
+        let alt_channel_id = dispatch_info
+            .as_ref()
+            .and_then(|i| i.discord_channel_alt.as_deref())
+            .and_then(|s| s.parse::<u64>().ok())
+            .map(ChannelId::new);
+
         if is_already_thread {
             let ts = chrono::Local::now().format("%H:%M:%S");
             println!(
                 "  [{ts}] 🧵 Dispatch {did} arrived in existing thread, skipping thread creation"
             );
+            // For review dispatches in reused threads, set role override
+            // so this turn uses the counter-model channel's role/model.
+            if is_review_dispatch {
+                if let Some(alt_ch) = alt_channel_id {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    println!(
+                        "  [{ts}] 🔄 Review dispatch in reused thread: overriding role to alt channel {}",
+                        alt_ch
+                    );
+                    shared.dispatch_role_overrides.insert(channel_id, alt_ch);
+                }
+            }
             channel_id
         } else {
             // Check if card already has an active thread via internal API
-            let existing_thread = lookup_card_thread(shared.api_port, did).await;
+            let existing_thread = dispatch_info
+                .as_ref()
+                .and_then(|i| i.active_thread_id.clone());
             let reuse_tid = existing_thread.as_ref().and_then(|t| {
                 let id = t.parse::<u64>().unwrap_or(0);
                 if id != 0 { Some(ChannelId::new(id)) } else { None }
@@ -718,6 +745,18 @@ pub(super) async fn handle_text_message(
                     );
                     super::bootstrap_thread_session(shared, tid, &current_path, ctx).await;
                     shared.dispatch_thread_parents.insert(channel_id, tid);
+                    // For review dispatches reusing an implementation thread,
+                    // override role/model to use the counter-model channel.
+                    if is_review_dispatch {
+                        if let Some(alt_ch) = alt_channel_id {
+                            let ts = chrono::Local::now().format("%H:%M:%S");
+                            println!(
+                                "  [{ts}] 🔄 Review dispatch reusing thread: overriding role to alt channel {}",
+                                alt_ch
+                            );
+                            shared.dispatch_role_overrides.insert(tid, alt_ch);
+                        }
+                    }
                     Some(tid)
                 } else {
                     let ts = chrono::Local::now().format("%H:%M:%S");
@@ -796,12 +835,19 @@ pub(super) async fn handle_text_message(
     let sanitized_input = ai_screen::sanitize_user_input(user_text);
 
     let role_binding = {
-        let data = shared.core.lock().await;
-        let ch_name = data
-            .sessions
-            .get(&channel_id)
-            .and_then(|s| s.channel_name.as_deref());
-        resolve_role_binding(channel_id, ch_name)
+        // For cross-channel dispatch reuse (e.g. review in implementation thread),
+        // resolve role from the override channel instead of the thread's parent.
+        if let Some(override_ch) = shared.dispatch_role_overrides.get(&channel_id) {
+            let alt_ch = *override_ch;
+            resolve_role_binding(alt_ch, None)
+        } else {
+            let data = shared.core.lock().await;
+            let ch_name = data
+                .sessions
+                .get(&channel_id)
+                .and_then(|s| s.channel_name.as_deref());
+            resolve_role_binding(channel_id, ch_name)
+        }
     };
 
     // Prepend pending file uploads
@@ -1196,11 +1242,14 @@ pub(super) async fn handle_text_message(
         }
     }
 
-    // Resolve model: DashMap override > role-map > default
+    // Resolve model: DashMap override > dispatch role override > role-map > default
     let model_for_turn: Option<String> = {
         let dashmap_model = shared.model_overrides.get(&channel_id).map(|v| v.clone());
         if dashmap_model.is_some() {
             dashmap_model
+        } else if let Some(override_ch) = shared.dispatch_role_overrides.get(&channel_id) {
+            let alt_ch = *override_ch;
+            resolve_role_binding(alt_ch, None).and_then(|rb| rb.model)
         } else {
             let ch_name = {
                 let data = shared.core.lock().await;
@@ -2506,7 +2555,19 @@ Any other message is sent to {p}.
 }
 
 /// Look up the active_thread_id for a dispatch's kanban card via internal API.
+/// Dispatch info returned by the card-thread internal API.
+struct DispatchInfo {
+    active_thread_id: Option<String>,
+    dispatch_type: Option<String>,
+    discord_channel_alt: Option<String>,
+}
+
 async fn lookup_card_thread(api_port: u16, dispatch_id: &str) -> Option<String> {
+    let info = lookup_dispatch_info(api_port, dispatch_id).await?;
+    info.active_thread_id
+}
+
+async fn lookup_dispatch_info(api_port: u16, dispatch_id: &str) -> Option<DispatchInfo> {
     let url = format!(
         "http://127.0.0.1:{}/api/internal/card-thread?dispatch_id={}",
         api_port, dispatch_id
@@ -2521,9 +2582,20 @@ async fn lookup_card_thread(api_port: u16, dispatch_id: &str) -> Option<String> 
         return None;
     }
     let body: serde_json::Value = resp.json().await.ok()?;
-    body.get("active_thread_id")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
+    Some(DispatchInfo {
+        active_thread_id: body
+            .get("active_thread_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        dispatch_type: body
+            .get("dispatch_type")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        discord_channel_alt: body
+            .get("discord_channel_alt")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+    })
 }
 
 /// Verify a thread is accessible and not locked via Discord API.

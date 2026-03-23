@@ -54,6 +54,7 @@ export interface Agent {
   session_info?: string | null;
   activity_source?: ActivitySource;
   agentdesk_working_count?: number;
+  current_thread_channel_id?: string | null;
   workflow_pack_key?: string | null;
   department_name?: string | null;
   department_name_ko?: string | null;

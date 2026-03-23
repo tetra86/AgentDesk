@@ -263,7 +263,9 @@ var timeouts = {
       );
       if (agentChannel.length === 0) continue;
 
-      var useAlt = (ud.dispatch_type === "review" || ud.dispatch_type === "review-decision");
+      // Only "review" goes to the counter-model alt channel.
+      // "review-decision" is sent to the primary channel to reuse the implementation thread.
+      var useAlt = (ud.dispatch_type === "review");
       var channelId = useAlt ? agentChannel[0].discord_channel_alt : agentChannel[0].discord_channel_id;
       if (!channelId) continue;
 

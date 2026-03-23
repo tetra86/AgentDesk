@@ -328,6 +328,50 @@ function getMeaningfulLines(body: string): string[] {
     .filter((line) => line && line !== "---");
 }
 
+const REVIEW_PASS_PATTERNS = [
+  "추가 blocking finding은 없습니다",
+  "현재 diff 기준으로 머지를 막을 추가 결함은 확인하지 못했습니다",
+  "머지를 막을 추가 결함은 확인하지 못했습니다",
+  "추가 결함은 확인하지 못했습니다",
+];
+
+const REVIEW_BLOCKING_PATTERNS = [
+  /blocking finding\s*\d+건/i,
+  /blocking \d+건/i,
+  /확인된 이슈 \d+건/,
+  /결함 \d+건/,
+  /문제 \d+건/,
+  /남아 있습니다/,
+];
+
+const REVIEW_FEEDBACK_PREFIXES = [
+  "리뷰했습니다",
+  "추가 리뷰했습니다",
+  "재확인했습니다",
+  "코드 리뷰 결과",
+];
+
+const PM_MARKER_PATTERNS = [
+  /^PM 결정(?:[:\s]|$)/u,
+  /^PM 판단(?:[:\s]|$)/u,
+  /^PMD 결정(?:[:\s]|$)/u,
+  /^PMD 판단(?:[:\s]|$)/u,
+  /^프로듀서 결정(?:[:\s]|$)/u,
+  /^프로듀서 판단(?:[:\s]|$)/u,
+  /^PM Decision\b/i,
+  /^PM Verdict\b/i,
+];
+
+const WORK_HEADING_PATTERNS = [
+  /완료 보고/u,
+  /^#\d+\s+작업 완료(?:[:\s]|$)/u,
+  /^작업 완료(?:[:\s]|$)/u,
+];
+
+function matchesAny(text: string, patterns: RegExp[]): boolean {
+  return patterns.some((pattern) => pattern.test(text));
+}
+
 export function parseGitHubCommentTimeline(comments: GitHubComment[]): ParsedGitHubComment[] {
   return comments.flatMap<ParsedGitHubComment>((comment) => {
     const body = comment.body.trim();
@@ -338,7 +382,7 @@ export function parseGitHubCommentTimeline(comments: GitHubComment[]): ParsedGit
     const meaningfulLines = getMeaningfulLines(classificationBody);
     const firstLine = meaningfulLines[0] ?? firstMeaningfulLine(body);
     const heading = getHeading(classificationBody);
-    const leadText = meaningfulLines.slice(0, 2).join(" ");
+    const leadText = meaningfulLines.slice(0, 3).join(" ");
     const author = comment.author?.login ?? "unknown";
 
     if (body.startsWith("🔍 칸반 상태:") || firstLine?.startsWith("🔍 칸반 상태:")) {
@@ -354,18 +398,11 @@ export function parseGitHubCommentTimeline(comments: GitHubComment[]): ParsedGit
       }];
     }
 
-    const passed = [
-      "추가 blocking finding은 없습니다",
-      "현재 diff 기준으로 머지를 막을 추가 결함은 확인하지 못했습니다",
-      "머지를 막을 추가 결함은 확인하지 못했습니다",
-      "추가 결함은 확인하지 못했습니다",
-    ].some((pattern) => leadText.startsWith(pattern));
+    const passed = REVIEW_PASS_PATTERNS.some((pattern) => leadText.includes(pattern))
+      && !matchesAny(leadText, REVIEW_BLOCKING_PATTERNS);
     const reviewFeedback =
-      leadText.startsWith("리뷰했습니다")
-      || leadText.startsWith("추가 리뷰했습니다")
-      || leadText.startsWith("재확인했습니다")
-      || leadText.startsWith("코드 리뷰 결과")
-      || leadText.startsWith("재검토 결과")
+      REVIEW_FEEDBACK_PREFIXES.some((prefix) => leadText.startsWith(prefix))
+      || leadText.includes("재검토 결과")
       || /blocking finding/i.test(leadText)
       || /blocking \d+건/i.test(leadText)
       || /확인된 이슈 \d+건/.test(leadText)
@@ -387,14 +424,7 @@ export function parseGitHubCommentTimeline(comments: GitHubComment[]): ParsedGit
     }
 
     const pmMarker = heading ?? firstLine ?? "";
-    if (
-      pmMarker.startsWith("PM 결정")
-      || pmMarker.startsWith("PM 판단")
-      || pmMarker.startsWith("PMD 결정")
-      || pmMarker.startsWith("PMD 판단")
-      || pmMarker.startsWith("프로듀서 결정")
-      || pmMarker.startsWith("프로듀서 판단")
-    ) {
+    if (matchesAny(pmMarker, PM_MARKER_PATTERNS)) {
       return [{
         kind: "pm",
         status: "decision",
@@ -408,12 +438,13 @@ export function parseGitHubCommentTimeline(comments: GitHubComment[]): ParsedGit
     }
 
     const workMarker = heading ?? firstLine ?? "";
-    if (
-      workMarker.includes("완료 보고")
+    const isWorkHeading = heading ? matchesAny(heading, WORK_HEADING_PATTERNS) : false;
+    const isWorkLead =
+      (!heading && (workMarker.includes("완료 보고") || /^#\d+\s+작업 완료(?:[:\s]|$)/u.test(workMarker)))
       || workMarker.startsWith("구현 완료")
       || workMarker.startsWith("수정 완료")
-      || workMarker.startsWith("배포 완료")
-    ) {
+      || workMarker.startsWith("배포 완료");
+    if (isWorkHeading || isWorkLead) {
       return [{
         kind: "work",
         status: "completed",

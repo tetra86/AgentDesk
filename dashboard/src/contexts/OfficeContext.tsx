@@ -19,79 +19,11 @@ import type {
   WSEvent,
 } from "../types";
 import * as api from "../api/client";
-
-// ── Derived helpers ──
-
-function deriveSubAgents(sessions: DispatchedSession[]): SubAgent[] {
-  return sessions
-    .filter((s) => s.status === "working" && s.linked_agent_id)
-    .map((s) => ({
-      id: s.id,
-      parentAgentId: s.linked_agent_id!,
-      task: s.name || s.session_info || "파견 세션",
-      status: "working" as const,
-    }));
-}
-
-function deriveDispatchedAsAgents(sessions: DispatchedSession[]): Agent[] {
-  const visible = sessions.filter((s) => s.status !== "disconnected" && !s.linked_agent_id);
-  return visible
-    .filter((s) => s.department_id)
-    .map((s) => ({
-      id: `dispatched:${s.id}`,
-      name: s.name || s.session_key,
-      name_ko: s.name || s.session_key,
-      department_id: s.department_id,
-      role: "intern" as const,
-      avatar_emoji: s.avatar_emoji || "📡",
-      sprite_number: s.sprite_number,
-      personality: null,
-      status: s.status === "working" ? ("working" as const) : ("idle" as const),
-      current_task_id: null,
-      stats_tasks_done: 0,
-      stats_xp: s.stats_xp,
-      stats_tokens: s.tokens || 0,
-      created_at: s.connected_at,
-      session_info: s.session_info,
-      department_name: s.department_name,
-      department_name_ko: s.department_name_ko,
-      department_color: s.department_color,
-    }));
-}
-
-function applySessionOverlay(baseAgents: Agent[], sessions: DispatchedSession[]): Agent[] {
-  const overlay = new Map<string, { workingCount: number; sessionInfo: string | null }>();
-
-  for (const session of sessions) {
-    if (session.status === "disconnected") continue;
-    const agentId =
-      session.linked_agent_id ??
-      (session as DispatchedSession & { agent_id?: string | null }).agent_id ??
-      null;
-    const isWorking = session.status === "working";
-    if (!agentId || !isWorking) continue;
-
-    const prev = overlay.get(agentId);
-    overlay.set(agentId, {
-      workingCount: (prev?.workingCount ?? 0) + 1,
-      sessionInfo: session.session_info ?? prev?.sessionInfo ?? session.name ?? "작업 중",
-    });
-  }
-
-  if (overlay.size === 0) return baseAgents;
-
-  return baseAgents.map((agent) => {
-    const sessionState = overlay.get(agent.id);
-    if (!sessionState) return agent;
-    return {
-      ...agent,
-      status: "working",
-      session_info: sessionState.sessionInfo ?? agent.session_info ?? "작업 중",
-      activity_source: "agentdesk",
-      agentdesk_working_count: sessionState.workingCount,
-    };
-  });
-}
+import {
+  applySessionOverlay,
+  deriveDispatchedAsAgents,
+  deriveSubAgents,
+} from "./office-session-overlay";
 
 // ── Context value ──
 

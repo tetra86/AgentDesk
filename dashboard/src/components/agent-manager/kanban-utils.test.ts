@@ -55,6 +55,18 @@ describe("parseGitHubCommentTimeline", () => {
     });
   });
 
+  it("재검토 pass 코멘트도 review passed로 유지한다", () => {
+    const [entry] = parseGitHubCommentTimeline([
+      makeComment("라운드 2 재검토 결과 추가 blocking finding은 없습니다. 현재 diff 기준으로 머지를 막을 추가 결함은 확인하지 못했습니다."),
+    ]);
+
+    expect(entry).toMatchObject({
+      kind: "review",
+      status: "passed",
+      title: "리뷰 통과",
+    });
+  });
+
   it("완료 보고 코멘트를 작업 이력 이벤트로 파싱한다", () => {
     const [entry] = parseGitHubCommentTimeline([
       makeComment(`## #68 완료 보고
@@ -118,6 +130,20 @@ describe("parseGitHubCommentTimeline", () => {
     });
   });
 
+  it("영문 PM Decision 헤더도 pm 타입으로 파싱한다", () => {
+    const [entry] = parseGitHubCommentTimeline([
+      makeComment(`## PM Decision: ✅ Accept
+
+- proceed`),
+    ]);
+
+    expect(entry).toMatchObject({
+      kind: "pm",
+      status: "decision",
+      title: "PM Decision: ✅ Accept",
+    });
+  });
+
   it("실사용 리뷰 피드백 코멘트를 review 타입으로 분류한다", () => {
     const [entry] = parseGitHubCommentTimeline([
       makeComment(`리뷰했습니다. 확인된 이슈 3건 남깁니다.
@@ -177,6 +203,21 @@ describe("parseGitHubCommentTimeline", () => {
       kind: "work",
       status: "completed",
       title: "#65 완료 보고",
+    });
+  });
+
+  it("이슈 번호 작업 완료 헤더를 work 타입으로 파싱한다", () => {
+    const [entry] = parseGitHubCommentTimeline([
+      makeComment(`## #53 작업 완료
+
+### 변경 요약
+- 타임라인 분류 확장`),
+    ]);
+
+    expect(entry).toMatchObject({
+      kind: "work",
+      status: "completed",
+      title: "#53 작업 완료",
     });
   });
 });
