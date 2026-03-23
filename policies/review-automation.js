@@ -230,6 +230,16 @@ var reviewAutomation = {
 };
 
 function processVerdict(cardId, verdict, result) {
+  // Guard: skip processing for done cards — prevents stale dispatches from
+  // re-triggering review state changes after dismiss.
+  var cardCheck = agentdesk.db.query(
+    "SELECT status FROM kanban_cards WHERE id = ?", [cardId]
+  );
+  if (cardCheck.length > 0 && cardCheck[0].status === "done") {
+    agentdesk.log.info("[review] processVerdict skipped — card " + cardId + " already done");
+    return;
+  }
+
   if (verdict === "pass" || verdict === "accept" || verdict === "approved") {
     agentdesk.db.execute(
       "UPDATE kanban_cards SET review_status = NULL, updated_at = datetime('now') WHERE id = ?",

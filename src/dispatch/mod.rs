@@ -139,12 +139,13 @@ pub fn complete_dispatch(
         .map_err(|e| anyhow::anyhow!("DB lock error: {e}"))?;
 
     let changed = conn.execute(
-        "UPDATE task_dispatches SET status = 'completed', result = ?1, updated_at = datetime('now') WHERE id = ?2 AND status != 'completed'",
+        "UPDATE task_dispatches SET status = 'completed', result = ?1, updated_at = datetime('now') \
+         WHERE id = ?2 AND status IN ('pending', 'dispatched')",
         rusqlite::params![result_str, dispatch_id],
     )?;
 
     if changed == 0 {
-        // Either not found or already completed — skip hook firing
+        // Either not found, already completed, or cancelled — skip hook firing
         let exists: bool = conn
             .query_row(
                 "SELECT COUNT(*) > 0 FROM task_dispatches WHERE id = ?1",
@@ -154,7 +155,7 @@ pub fn complete_dispatch(
             .unwrap_or(false);
         if exists {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            println!("  [{ts}] ⏭ complete_dispatch: {dispatch_id} already completed, skipping hooks");
+            println!("  [{ts}] ⏭ complete_dispatch: {dispatch_id} already completed/cancelled, skipping hooks");
             let dispatch = query_dispatch_row(&conn, dispatch_id)?;
             drop(conn);
             return Ok(dispatch);
@@ -378,5 +379,41 @@ mod tests {
 
         let result = complete_dispatch(&db, &engine, "nonexistent", &json!({}));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn complete_dispatch_skips_cancelled() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        seed_card(&db, "card-cancel", "review");
+
+        let dispatch = create_dispatch(
+            &db,
+            &engine,
+            "card-cancel",
+            "agent-1",
+            "review-decision",
+            "Decision",
+            &json!({}),
+        )
+        .unwrap();
+        let dispatch_id = dispatch["id"].as_str().unwrap().to_string();
+
+        // Simulate dismiss: cancel the dispatch
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "UPDATE task_dispatches SET status = 'cancelled' WHERE id = ?1",
+                [&dispatch_id],
+            )
+            .unwrap();
+        }
+
+        // Delayed completion attempt should NOT re-complete the cancelled dispatch
+        let result = complete_dispatch(&db, &engine, &dispatch_id, &json!({"verdict": "pass"}));
+        // Should return Ok (dispatch found) but status should remain cancelled
+        assert!(result.is_ok());
+        let returned = result.unwrap();
+        assert_eq!(returned["status"], "cancelled", "cancelled dispatch must not be re-completed");
     }
 }
