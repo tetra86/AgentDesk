@@ -7,8 +7,8 @@ use serenity::ChannelId;
 use crate::services::claude;
 use crate::services::provider::parse_provider_and_channel_from_tmux_name;
 use crate::services::tmux_diagnostics::{
-    build_tmux_death_diagnostic, record_tmux_exit_reason, tmux_session_exists,
-    tmux_session_has_live_pane,
+    build_tmux_death_diagnostic, read_tmux_exit_reason, record_tmux_exit_reason,
+    tmux_session_exists, tmux_session_has_live_pane,
 };
 
 use super::formatting::{
@@ -127,12 +127,18 @@ pub(super) async fn tmux_output_watcher(
                 println!("  [{ts}] 👁 tmux session {tmux_session_name} ended, watcher stopping");
             }
             if !prompt_too_long_killed {
-                let _ = channel_id
-                    .say(
-                        &http,
-                        "⚠️ 작업 세션이 종료되었습니다. 다음 메시지를 보내면 새 세션이 시작됩니다.",
-                    )
-                    .await;
+                // Suppress warning for normal dispatch completion — not an error
+                let is_normal_completion = read_tmux_exit_reason(&tmux_session_name)
+                    .map(|r| r.contains("dispatch turn completed"))
+                    .unwrap_or(false);
+                if !is_normal_completion {
+                    let _ = channel_id
+                        .say(
+                            &http,
+                            "⚠️ 작업 세션이 종료되었습니다. 다음 메시지를 보내면 새 세션이 시작됩니다.",
+                        )
+                        .await;
+                }
             }
             break;
         }

@@ -127,7 +127,7 @@ export default function KanbanTab({
   const [bulkBusy, setBulkBusy] = useState(false);
   const [deferredDodPopup, setDeferredDodPopup] = useState(false);
   const [assignBeforeReady, setAssignBeforeReady] = useState<{ cardId: string; agentId: string } | null>(null);
-  const [cancelConfirm, setCancelConfirm] = useState<{ cardIds: string[]; closeGithub: boolean; source: "bulk" | "single" } | null>(null);
+  const [cancelConfirm, setCancelConfirm] = useState<{ cardIds: string[]; source: "bulk" | "single" } | null>(null);
   const [cancelBusy, setCancelBusy] = useState(false);
 
   const agentMap = useMemo(() => new Map(agents.map((agent) => [agent.id, agent])), [agents]);
@@ -177,7 +177,7 @@ export default function KanbanTab({
     if (stalledSelected.size === 0) return;
     if (action === "cancel") {
       // Show confirmation modal for cancel — check if any selected cards have GitHub issues
-      setCancelConfirm({ cardIds: Array.from(stalledSelected), closeGithub: false, source: "bulk" });
+      setCancelConfirm({ cardIds: Array.from(stalledSelected), source: "bulk" });
       return;
     }
     setBulkBusy(true);
@@ -192,31 +192,14 @@ export default function KanbanTab({
     }
   };
 
-  const executeBulkCancel = async (closeGithub: boolean) => {
+  const executeBulkCancel = async () => {
     if (!cancelConfirm) return;
     setCancelBusy(true);
     try {
-      if (cancelConfirm.source === "bulk") {
-        await api.bulkKanbanAction("cancel", cancelConfirm.cardIds);
-      } else {
-        // Single card cancel — transition to done
-        for (const cardId of cancelConfirm.cardIds) {
-          await onUpdateCard(cardId, { status: "done" });
-        }
-      }
-      if (closeGithub) {
-        // Close GitHub issues for cards that have them
-        for (const cardId of cancelConfirm.cardIds) {
-          const card = cardsById.get(cardId);
-          if (card?.github_repo && card.github_issue_number) {
-            try {
-              await api.closeGitHubIssue(card.github_repo, card.github_issue_number);
-            } catch {
-              // Best-effort — card is already cancelled
-            }
-          }
-        }
-      }
+      // Both bulk and single cancel use bulkKanbanAction which calls
+      // transition_status with force=true, avoiding blocked transitions.
+      // GitHub issues are automatically closed server-side when status → done.
+      await api.bulkKanbanAction("cancel", cancelConfirm.cardIds);
       if (cancelConfirm.source === "bulk") {
         setStalledSelected(new Set());
         setStalledPopup(false);
@@ -1291,15 +1274,12 @@ export default function KanbanTab({
                       </li>
                     ))}
                   </ul>
-                  <label className="flex items-center gap-2 text-sm cursor-pointer" style={{ color: "var(--th-text-primary)" }}>
-                    <input
-                      type="checkbox"
-                      checked={cancelConfirm.closeGithub}
-                      onChange={(e) => setCancelConfirm((prev) => prev ? { ...prev, closeGithub: e.target.checked } : prev)}
-                      className="rounded"
-                    />
-                    {tr("GitHub 이슈도 함께 닫기", "Also close GitHub issues")}
-                  </label>
+                  <p className="text-xs" style={{ color: "var(--th-text-muted)" }}>
+                    {tr(
+                      "※ GitHub 이슈는 카드 완료 시 자동으로 닫힙니다.",
+                      "※ GitHub issues are automatically closed when the card is completed.",
+                    )}
+                  </p>
                 </div>
               )}
               <div className="flex justify-end gap-2 pt-2">
@@ -1312,7 +1292,7 @@ export default function KanbanTab({
                   {tr("돌아가기", "Go back")}
                 </button>
                 <button
-                  onClick={() => void executeBulkCancel(cancelConfirm.closeGithub)}
+                  onClick={() => void executeBulkCancel()}
                   disabled={cancelBusy}
                   className="rounded-xl px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
                   style={{ backgroundColor: "#dc2626" }}
@@ -2197,7 +2177,7 @@ export default function KanbanTab({
                 </button>
                 {selectedCard.status !== "done" && (
                   <button
-                    onClick={() => setCancelConfirm({ cardIds: [selectedCard.id], closeGithub: false, source: "single" })}
+                    onClick={() => setCancelConfirm({ cardIds: [selectedCard.id], source: "single" })}
                     disabled={savingCard}
                     className="rounded-xl px-4 py-2 text-sm font-medium"
                     style={{ color: "#9ca3af", backgroundColor: "rgba(107,114,128,0.18)" }}
