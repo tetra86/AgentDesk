@@ -439,12 +439,30 @@ pub(super) async fn send_dispatch_to_discord(
         .unwrap_or_default()
     };
 
+    // For review dispatches, look up the reviewed commit SHA from dispatch context
+    let reviewed_commit: Option<String> = if use_alt {
+        let conn = match db.lock() {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        conn.query_row(
+            "SELECT json_extract(context, '$.reviewed_commit') FROM task_dispatches WHERE id = ?1",
+            [dispatch_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .ok()
+        .flatten()
+    } else {
+        None
+    };
+
     let message = format_dispatch_message(
         dispatch_id,
         title,
         issue_url.as_deref(),
         issue_number,
         use_alt,
+        reviewed_commit.as_deref(),
     );
 
     // Send via Discord HTTP API using the announce bot
@@ -837,6 +855,7 @@ fn format_dispatch_message(
     issue_url: Option<&str>,
     issue_number: Option<i64>,
     use_alt: bool,
+    reviewed_commit: Option<&str>,
 ) -> String {
     // Format issue link as markdown hyperlink with angle brackets to suppress embed
     let issue_link = match (issue_url, issue_number) {
@@ -855,6 +874,17 @@ fn format_dispatch_message(
             message.push('\n');
             message.push_str(&issue_link);
         }
+        // Append verdict API call instructions for the counter-model reviewer
+        let commit_arg = reviewed_commit
+            .map(|c| format!(r#","commit":"{}""#, c))
+            .unwrap_or_default();
+        message.push_str(&format!(
+            "\n---\n\
+             리뷰 완료 후 verdict API를 호출하세요:\n\
+             `curl -sf -X POST http://127.0.0.1:8791/api/review-verdict \
+             -H \"Content-Type: application/json\" \
+             -d '{{\"dispatch_id\":\"{dispatch_id}\",\"overall\":\"pass 또는 improve\"{commit_arg}}}'`"
+        ));
         message
     } else if !issue_link.is_empty() {
         format!("DISPATCH:{dispatch_id} - {title}\n{issue_link}")
@@ -949,6 +979,7 @@ mod tests {
             Some("https://github.com/itismyfield/AgentDesk/issues/19"),
             Some(19),
             true,
+            Some("abc123"),
         );
 
         assert!(message.starts_with("DISPATCH:dispatch-1 - [Review R1] card-1"));
@@ -957,6 +988,27 @@ mod tests {
         assert!(message.contains(
             "[Review R1] card-1 #19](<https://github.com/itismyfield/AgentDesk/issues/19>)"
         ));
+        // Verdict API instructions must be present for counter-model reviewers
+        assert!(message.contains("review-verdict"));
+        assert!(message.contains("dispatch-1"));
+        assert!(message.contains("abc123"));
+    }
+
+    #[test]
+    fn review_dispatch_message_without_commit() {
+        let message = format_dispatch_message(
+            "dispatch-no-commit",
+            "[Review R1] card-1",
+            None,
+            None,
+            true,
+            None,
+        );
+
+        assert!(message.contains("review-verdict"));
+        assert!(message.contains("dispatch-no-commit"));
+        // No commit arg in the curl command
+        assert!(!message.contains(r#""commit""#));
     }
 
     #[test]
@@ -967,12 +1019,15 @@ mod tests {
             Some("https://github.com/itismyfield/AgentDesk/issues/24"),
             Some(24),
             false,
+            None,
         );
 
         assert!(message.contains(
             "[Implement feature #24](<https://github.com/itismyfield/AgentDesk/issues/24>)"
         ));
         assert!(!message.contains("검토 전용"));
+        // Implementation dispatches should NOT include verdict instructions
+        assert!(!message.contains("review-verdict"));
     }
 
     #[test]
