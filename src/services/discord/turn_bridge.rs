@@ -3,7 +3,7 @@ use super::restart_report::{RestartCompletionReport, clear_restart_report, save_
 use super::*;
 #[cfg(unix)]
 use crate::services::tmux_diagnostics::record_tmux_exit_reason;
-use crate::utils::format::tail_with_ellipsis;
+use crate::utils::format::{safe_suffix, tail_with_ellipsis};
 
 pub(super) fn cancel_active_token(token: &Arc<CancelToken>, cleanup_tmux: bool, reason: &str) {
     token.cancelled.store(true, Ordering::Relaxed);
@@ -144,12 +144,8 @@ fn extract_review_decision(full_response: &str) -> Option<&'static str> {
             _ => None,
         };
     }
-    // Fallback: scan for standalone keywords in the last 500 chars (most likely the conclusion)
-    let tail = if full_response.len() > 500 {
-        &full_response[full_response.len() - 500..]
-    } else {
-        full_response
-    };
+    // Fallback: scan for standalone keywords in the last ~500 bytes (char-boundary safe)
+    let tail = safe_suffix(full_response, 500);
     let keyword_re =
         regex::Regex::new(r"(?im)\b(accept|dispute|dismiss)\b").ok()?;
     let mut found: Option<&'static str> = None;
@@ -222,6 +218,7 @@ async fn submit_review_verdict_fallback(
     dispatch_id: &str,
     verdict: &str,
     full_response: &str,
+    provider: &str,
 ) -> Result<(), String> {
     let feedback = truncate_str(full_response.trim(), 4000).to_string();
     let url = format!("http://127.0.0.1:{api_port}/api/review-verdict");
@@ -231,6 +228,7 @@ async fn submit_review_verdict_fallback(
             "dispatch_id": dispatch_id,
             "overall": verdict,
             "feedback": feedback,
+            "provider": provider,
         }))
         .send()
         .await
@@ -248,6 +246,7 @@ async fn guard_review_dispatch_completion(
     api_port: u16,
     dispatch_id: Option<&str>,
     full_response: &str,
+    provider: &str,
 ) -> Option<String> {
     let dispatch_id = dispatch_id?;
     let snapshot = fetch_dispatch_snapshot(api_port, dispatch_id).await?;
@@ -258,8 +257,10 @@ async fn guard_review_dispatch_completion(
     match snapshot.dispatch_type.as_str() {
         "review" => {
             if let Some(verdict) = extract_explicit_review_verdict(full_response) {
-                match submit_review_verdict_fallback(api_port, dispatch_id, verdict, full_response)
-                    .await
+                match submit_review_verdict_fallback(
+                    api_port, dispatch_id, verdict, full_response, provider,
+                )
+                .await
                 {
                     Ok(()) => return None,
                     Err(err) => {
@@ -745,6 +746,7 @@ pub(super) fn spawn_turn_bridge(
                 shared_owned.api_port,
                 dispatch_id.as_deref(),
                 &full_response,
+                provider.as_str(),
             )
             .await
         } else {
@@ -1288,5 +1290,14 @@ mod tests {
             extract_review_decision("DECISION: accept\n이 dismiss는 무시해도 됩니다."),
             Some("accept")
         );
+    }
+
+    #[test]
+    fn review_decision_parser_handles_korean_text_over_500_bytes() {
+        // Korean chars are 3 bytes each in UTF-8; build a response > 500 bytes
+        // to exercise the safe_suffix path without panicking
+        let padding = "가".repeat(200); // 600 bytes of Korean text
+        let response = format!("{padding}\ndismiss");
+        assert_eq!(extract_review_decision(&response), Some("dismiss"));
     }
 }
