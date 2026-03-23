@@ -918,22 +918,10 @@ pub(super) fn spawn_turn_bridge(
             }
         };
         // File I/O runs without holding core lock
-        if let Some((path, channel_name, session_snapshot)) = file_save_info {
-            if let Some(binding) = role_binding.as_ref() {
-                if let Err(e) = append_shared_memory_turn(
-                    &binding.role_id,
-                    &provider,
-                    channel_id,
-                    channel_name.as_deref(),
-                    &path,
-                    Some(request_owner_name.as_str()),
-                    &user_text_owned,
-                    &full_response,
-                ) {
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    println!("  [{ts}]   ⚠ shared memory save failed: {e}");
-                }
-            }
+        if let Some((path, _channel_name, session_snapshot)) = file_save_info {
+            // NOTE: append_shared_memory_turn removed — shared agent memory is for
+            // cross-provider shared instructions (like CLAUDE.md), NOT conversation history.
+            // History was inflating token costs without providing value.
             save_session_to_file(&session_snapshot, &path);
         }
 
