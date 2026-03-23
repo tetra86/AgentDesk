@@ -21,7 +21,7 @@ impl DispatchProfile {
     /// Derive profile from dispatch type string.
     pub fn from_dispatch_type(dispatch_type: Option<&str>) -> Self {
         match dispatch_type {
-            Some("review") | Some("review-decision") | Some("rework") => Self::ReviewLite,
+            Some("review") | Some("review-decision") => Self::ReviewLite,
             _ => Self::Full,
         }
     }
@@ -239,7 +239,7 @@ mod tests {
         );
         assert_eq!(
             DispatchProfile::from_dispatch_type(Some("rework")),
-            DispatchProfile::ReviewLite
+            DispatchProfile::Full
         );
     }
 

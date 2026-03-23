@@ -919,7 +919,7 @@ pub(super) async fn handle_text_message(
     // ReviewLite dispatches skip shared knowledge to save tokens.
     let is_review_lite = matches!(
         dispatch_type_str.as_deref(),
-        Some("review") | Some("review-decision") | Some("rework")
+        Some("review") | Some("review-decision")
     );
     if session_id.is_none() && !is_review_lite {
         if let Some(knowledge) = load_shared_knowledge() {
