@@ -1120,10 +1120,6 @@ pub(super) async fn handle_completed_dispatch_followups(db: &crate::db::Db, disp
         return;
     }
 
-    // Track whether send_review_result_to_primary already created+sent a followup dispatch.
-    // If so, skip the generic latest_dispatch_id resend below to prevent duplicate notifications.
-    let mut review_followup_handled = false;
-
     if dispatch_type == "review" {
         let verdict = extract_review_verdict(result_json.as_deref());
         let ts = chrono::Local::now().format("%H:%M:%S");
@@ -1137,12 +1133,6 @@ pub(super) async fn handle_completed_dispatch_followups(db: &crate::db::Db, disp
         // submitted via the verdict API — these have a real "verdict" field in the result.
         if verdict != "unknown" {
             send_review_result_to_primary(db, &card_id, &verdict).await;
-            // For improve/rework/reject, send_review_result_to_primary already created
-            // the review-decision dispatch AND sent it to Discord. Mark as handled to
-            // prevent the generic latest_dispatch_id check below from re-sending it.
-            if verdict != "pass" && verdict != "accept" && verdict != "approved" {
-                review_followup_handled = true;
-            }
         } else {
             println!(
                 "  [{ts}] ⏭ REVIEW-FOLLOWUP: skipping send_review_result_to_primary (verdict=unknown)"
@@ -1219,7 +1209,11 @@ pub(super) async fn handle_completed_dispatch_followups(db: &crate::db::Db, disp
     };
 
     if let Some(new_dispatch_id) = latest_dispatch_id {
-        if new_dispatch_id != dispatch_id && !agent_id.is_empty() && !review_followup_handled {
+        // Skip generic resend for review dispatches — send_review_result_to_primary()
+        // already handles all review completion notifications. Without this guard,
+        // JS policy state transitions (e.g. improve → rework) can change
+        // latest_dispatch_id and trigger a duplicate notification here.
+        if new_dispatch_id != dispatch_id && !agent_id.is_empty() && dispatch_type != "review" {
             send_dispatch_to_discord(db, &agent_id, &title, &card_id, &new_dispatch_id).await;
         }
     }

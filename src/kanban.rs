@@ -355,11 +355,15 @@ fn notify_new_dispatches_after_hooks(db: &Db, card_id: &str, pre_dispatch_id: Op
         })
         .unwrap_or_default();
 
-    // Filter out review/review-decision dispatches — these are notified by
-    // handle_completed_dispatch_followups / send_review_result_to_primary
+    // Filter out review/review-decision/rework dispatches — these are notified by
+    // handle_completed_dispatch_followups / send_review_result_to_primary.
+    // Rework dispatches are created by review-automation.js processVerdict() and
+    // already have their own notification paths.
     let pending_dispatches: Vec<_> = pending_dispatches
         .into_iter()
-        .filter(|(_, _, dtype, _, _, _)| dtype != "review" && dtype != "review-decision")
+        .filter(|(_, _, dtype, _, _, _)| {
+            dtype != "review" && dtype != "review-decision" && dtype != "rework"
+        })
         .collect();
 
     if pending_dispatches.is_empty() {
