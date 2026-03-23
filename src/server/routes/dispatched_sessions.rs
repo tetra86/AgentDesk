@@ -310,44 +310,10 @@ pub async fn hook_session(
                 }
             }
 
-            // Additional idle-specific: check if the policy auto-completed a review dispatch.
-            if status == "idle" {
-                if let Some(ref did) = dispatch_id {
-                    let conn = state.db.lock().ok();
-                    if let Some(conn) = conn {
-                        let dispatch_status: Option<(String, String)> = conn
-                            .query_row(
-                                "SELECT dispatch_type, status FROM task_dispatches WHERE id = ?1",
-                                [did],
-                                |row| Ok((row.get(0)?, row.get(1)?)),
-                            )
-                            .ok();
-                        drop(conn);
-                        if let Some((dtype, dstatus)) = dispatch_status {
-                            if (dtype == "review" || dtype == "review-decision")
-                                && dstatus == "completed"
-                            {
-                                // Policy auto-completed this review dispatch — fire OnDispatchCompleted
-                                let _ = state.engine.fire_hook(
-                                    crate::engine::hooks::Hook::OnDispatchCompleted,
-                                    json!({
-                                        "dispatch_id": did,
-                                    }),
-                                );
-
-                                let db_clone = state.db.clone();
-                                let did_owned = did.clone();
-                                tokio::spawn(async move {
-                                    super::dispatches::handle_completed_dispatch_followups(
-                                        &db_clone, &did_owned,
-                                    )
-                                    .await;
-                                });
-                            }
-                        }
-                    }
-                }
-            }
+            // NOTE: The additional idle-specific re-fire of OnDispatchCompleted was removed.
+            // complete_dispatch() already fires OnDispatchCompleted + handle_completed_dispatch_followups
+            // is spawned from the auto-complete path above (line ~252). Re-firing here caused
+            // double hook execution → duplicate review-decision dispatches.
 
             (StatusCode::OK, Json(json!({"ok": true})))
         }
