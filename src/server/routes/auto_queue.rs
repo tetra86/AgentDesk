@@ -1032,6 +1032,25 @@ pub async fn enqueue(
         }
     };
 
+    // Only allow 'ready' cards into the queue
+    let card_status: String = conn
+        .query_row(
+            "SELECT status FROM kanban_cards WHERE id = ?1",
+            [&card_id],
+            |row| row.get(0),
+        )
+        .unwrap_or_default();
+    if card_status != "ready" {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": format!("card status is '{}', only 'ready' cards can be enqueued", card_status),
+                "card_id": card_id,
+                "status": card_status,
+            })),
+        );
+    }
+
     // Find or create active run (filtered by repo/agent)
     let run_id: String = conn
         .query_row(
@@ -1167,6 +1186,21 @@ pub async fn submit_order(
         };
 
         let Some(card_id) = card_id else { continue };
+
+        // Only enqueue cards with 'ready' status
+        let card_status: String = conn
+            .query_row(
+                "SELECT COALESCE(status, '') FROM kanban_cards WHERE id = ?1",
+                [&card_id],
+                |row| row.get(0),
+            )
+            .unwrap_or_default();
+        if card_status != "ready" {
+            tracing::info!(
+                "[auto-queue] Skipping card {card_id} (status={card_status}, expected 'ready')"
+            );
+            continue;
+        }
 
         let agent_id: String = conn
             .query_row(
