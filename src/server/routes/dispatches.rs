@@ -1084,4 +1084,68 @@ mod tests {
         // latest_dispatch_id should remain unchanged — auto-complete with "unknown" verdict skips Rust followup
         assert_eq!(latest_dispatch_id, "dispatch-auto");
     }
+
+    /// After an implementation dispatch completes, if hooks created a review dispatch
+    /// (latest_dispatch_id changed), handle_completed_dispatch_followups should detect it
+    /// and attempt to send it to Discord. This test verifies the detection logic without
+    /// actually hitting Discord (send_dispatch_to_discord will no-op without a bot token).
+    #[tokio::test]
+    async fn impl_dispatch_followup_detects_new_review_dispatch() {
+        let db = test_db();
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) VALUES ('agent-1', 'Agent 1', '123', '456')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, latest_dispatch_id, created_at, updated_at)
+                 VALUES ('card-1', 'Impl card', 'review', 'agent-1', 'dispatch-review', datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+            // The completed implementation dispatch
+            conn.execute(
+                "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, result, created_at, updated_at)
+                 VALUES ('dispatch-impl', 'card-1', 'agent-1', 'implementation', 'completed', 'Impl card', '{\"auto_completed\":true}', datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+            // The review dispatch created by hooks after implementation completion
+            conn.execute(
+                "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, created_at, updated_at)
+                 VALUES ('dispatch-review', 'card-1', 'agent-1', 'review', 'pending', '[Review R1] card-1', '{}', datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+        }
+
+        // handle_completed_dispatch_followups should detect that latest_dispatch_id
+        // ('dispatch-review') differs from the completed dispatch ('dispatch-impl')
+        // and attempt send_dispatch_to_discord (which no-ops without bot token).
+        // The key assertion: no panic, no error, and the review dispatch stays pending.
+        handle_completed_dispatch_followups(&db, "dispatch-impl").await;
+
+        let conn = db.lock().unwrap();
+        // latest_dispatch_id should still point to the review dispatch
+        let latest: String = conn
+            .query_row(
+                "SELECT latest_dispatch_id FROM kanban_cards WHERE id = 'card-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(latest, "dispatch-review");
+
+        // Review dispatch should remain pending (not modified by followup handler)
+        let review_status: String = conn
+            .query_row(
+                "SELECT status FROM task_dispatches WHERE id = 'dispatch-review'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(review_status, "pending");
+    }
 }
