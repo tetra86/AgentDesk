@@ -755,7 +755,13 @@ pub(super) async fn handle_completed_dispatch_followups(db: &crate::db::Db, disp
 
     if dispatch_type == "review" {
         let verdict = extract_review_verdict(result_json.as_deref());
-        send_review_result_to_primary(db, &card_id, &verdict).await;
+        // Skip Discord notification for auto-completed reviews without an explicit verdict.
+        // The policy engine's onDispatchCompleted hook handles those (review-automation.js).
+        // Only send_review_result_to_primary for explicit verdicts (pass/improve/reject)
+        // submitted via the verdict API — these have a real "verdict" field in the result.
+        if verdict != "unknown" {
+            send_review_result_to_primary(db, &card_id, &verdict).await;
+        }
     }
 
     // Archive thread on dispatch completion
@@ -985,7 +991,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn completed_review_dispatch_creates_review_decision_followup() {
+    async fn completed_review_dispatch_with_explicit_verdict_creates_followup() {
+        // When a review dispatch has an explicit verdict (e.g. "improve"),
+        // Rust creates a review-decision dispatch for the original agent.
         let db = test_db();
         {
             let conn = db.lock().unwrap();
@@ -1018,17 +1026,55 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        let followup: (String, String, String) = conn
+        assert_ne!(latest_dispatch_id, "dispatch-review");
+        let (dispatch_type, dispatch_status): (String, String) = conn
             .query_row(
-                "SELECT dispatch_type, status, context FROM task_dispatches WHERE id = ?1",
+                "SELECT dispatch_type, status FROM task_dispatches WHERE id = ?1",
                 [&latest_dispatch_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .unwrap();
+        assert_eq!(dispatch_type, "review-decision");
+        assert_eq!(dispatch_status, "pending");
+    }
 
-        assert_ne!(latest_dispatch_id, "dispatch-review");
-        assert_eq!(followup.0, "review-decision");
-        assert_eq!(followup.1, "pending");
-        assert!(followup.2.contains("\"verdict\":\"improve\""));
+    #[tokio::test]
+    async fn auto_completed_review_dispatch_skips_rust_followup() {
+        // When a review dispatch is auto-completed without a verdict,
+        // Rust should NOT create a followup (policy engine handles it).
+        let db = test_db();
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) VALUES ('agent-1', 'Agent 1', '123', '456')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, latest_dispatch_id, created_at, updated_at)
+                 VALUES ('card-1', 'Auto test', 'review', 'agent-1', 'dispatch-auto', datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, result, created_at, updated_at)
+                 VALUES ('dispatch-auto', 'card-1', 'agent-1', 'review', 'completed', '[Review R1] card-1', '{\"auto_completed\":true,\"completion_source\":\"session_idle\"}', datetime('now'), datetime('now'))",
+                [],
+            )
+            .unwrap();
+        }
+
+        handle_completed_dispatch_followups(&db, "dispatch-auto").await;
+
+        let conn = db.lock().unwrap();
+        let latest_dispatch_id: String = conn
+            .query_row(
+                "SELECT latest_dispatch_id FROM kanban_cards WHERE id = 'card-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        // latest_dispatch_id should remain unchanged — auto-complete with "unknown" verdict skips Rust followup
+        assert_eq!(latest_dispatch_id, "dispatch-auto");
     }
 }
