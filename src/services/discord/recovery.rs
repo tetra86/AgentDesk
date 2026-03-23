@@ -1,4 +1,3 @@
-use super::shared_memory::latest_shared_memory_ts;
 use super::turn_bridge::stale_inflight_message;
 use super::*;
 #[cfg(unix)]
@@ -477,7 +476,7 @@ pub(super) async fn restore_inflight_turns(
                     category_name: None,
                     last_active: tokio::time::Instant::now(),
                     worktree: None,
-                    last_shared_memory_ts: None,
+
                     born_generation: super::runtime_store::load_generation(),
                 });
             session.channel_id = Some(channel_id.get());
@@ -490,14 +489,6 @@ pub(super) async fn restore_inflight_turns(
             }
             if session.remote_profile_name.is_none() {
                 session.remote_profile_name = saved_remote;
-            }
-            // Restore shared memory dedup timestamp to prevent re-injection after restart
-            if session.last_shared_memory_ts.is_none() {
-                let role_id = resolve_role_binding(channel_id, channel_name.as_deref())
-                    .map(|b| b.role_id.clone());
-                if let Some(ref rid) = role_id {
-                    session.last_shared_memory_ts = latest_shared_memory_ts(rid);
-                }
             }
             if !data.cancel_tokens.contains_key(&channel_id) {
                 shared

@@ -22,7 +22,7 @@ pub fn create_dispatch(
 ) -> Result<serde_json::Value> {
     let dispatch_id = uuid::Uuid::new_v4().to_string();
 
-    // For review dispatches, inject reviewed_commit (HEAD) as server-side source of truth
+    // For review dispatches, inject reviewed_commit (HEAD) and provider info
     let context_str = if dispatch_type == "review" {
         let mut ctx_val = if context.is_object() {
             context.clone()
@@ -42,6 +42,27 @@ pub fn create_dispatch(
                     .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
                 {
                     obj.insert("reviewed_commit".to_string(), json!(commit));
+                }
+            }
+            // Inject from_provider/target_provider for cross-provider review validation
+            if !obj.contains_key("from_provider") || !obj.contains_key("target_provider") {
+                if let Ok(conn) = db.lock() {
+                    if let Ok((ch, alt)) = conn.query_row(
+                        "SELECT discord_channel_id, discord_channel_alt FROM agents WHERE id = ?1",
+                        [to_agent_id],
+                        |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?)),
+                    ) {
+                        if !obj.contains_key("from_provider") {
+                            if let Some(fp) = ch.as_deref().and_then(provider_from_channel_suffix) {
+                                obj.insert("from_provider".to_string(), json!(fp));
+                            }
+                        }
+                        if !obj.contains_key("target_provider") {
+                            if let Some(tp) = alt.as_deref().and_then(provider_from_channel_suffix) {
+                                obj.insert("target_provider".to_string(), json!(tp));
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -211,7 +232,7 @@ pub fn query_dispatch_row(
     dispatch_id: &str,
 ) -> Result<serde_json::Value> {
     conn.query_row(
-        "SELECT id, kanban_card_id, from_agent_id, to_agent_id, dispatch_type, status, title, context, result, parent_dispatch_id, chain_depth, created_at, updated_at
+        "SELECT id, kanban_card_id, from_agent_id, to_agent_id, dispatch_type, status, title, context, result, parent_dispatch_id, chain_depth, created_at, updated_at, COALESCE(retry_count, 0)
          FROM task_dispatches WHERE id = ?1",
         [dispatch_id],
         |row| {
@@ -229,10 +250,22 @@ pub fn query_dispatch_row(
                 "chain_depth": row.get::<_, i64>(10)?,
                 "created_at": row.get::<_, String>(11)?,
                 "updated_at": row.get::<_, String>(12)?,
+                "retry_count": row.get::<_, i64>(13)?,
             }))
         },
     )
     .map_err(|e| anyhow::anyhow!("Dispatch query error: {e}"))
+}
+
+/// Determine provider from a Discord channel name suffix.
+fn provider_from_channel_suffix(channel: &str) -> Option<&'static str> {
+    if channel.ends_with("-cc") {
+        Some("claude")
+    } else if channel.ends_with("-cdx") {
+        Some("codex")
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]

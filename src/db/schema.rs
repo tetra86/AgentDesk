@@ -44,6 +44,7 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     let _ = conn.execute_batch("ALTER TABLE agents ADD COLUMN description TEXT;");
     let _ = conn.execute_batch("ALTER TABLE agents ADD COLUMN system_prompt TEXT;");
     let _ = conn.execute_batch("ALTER TABLE task_dispatches ADD COLUMN thread_id TEXT;");
+    let _ = conn.execute_batch("ALTER TABLE task_dispatches ADD COLUMN retry_count INTEGER DEFAULT 0;");
     let _ = conn.execute_batch("ALTER TABLE meetings ADD COLUMN thread_id TEXT;");
     let _ = conn.execute_batch("ALTER TABLE sessions ADD COLUMN thread_channel_id TEXT;");
 

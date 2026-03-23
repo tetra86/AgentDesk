@@ -940,9 +940,6 @@ pub(super) fn spawn_turn_bridge(
         };
         // File I/O runs without holding core lock
         if let Some((path, _channel_name, session_snapshot)) = file_save_info {
-            // NOTE: append_shared_memory_turn removed — shared agent memory is for
-            // cross-provider shared instructions (like CLAUDE.md), NOT conversation history.
-            // History was inflating token costs without providing value.
             save_session_to_file(&session_snapshot, &path);
         }
 

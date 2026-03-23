@@ -48,51 +48,69 @@ var timeouts = {
 
   onTick: function() {
     // ─── [A] Requested 타임아웃 (45분) ─────────────────────
+    // retry_count < 10이면 pending_decision 대신 failed만 마크 → [J]가 30초 후 재시도
+    var MAX_DISPATCH_RETRIES = 10;
     var staleRequested = agentdesk.db.query(
-      "SELECT id, assigned_agent_id, latest_dispatch_id FROM kanban_cards " +
-      "WHERE status = 'requested' AND updated_at < datetime('now', '-45 minutes')"
+      "SELECT kc.id, kc.assigned_agent_id, kc.latest_dispatch_id, " +
+      "COALESCE(td.retry_count, 0) as retry_count " +
+      "FROM kanban_cards kc " +
+      "LEFT JOIN task_dispatches td ON td.id = kc.latest_dispatch_id " +
+      "WHERE kc.status = 'requested' AND kc.updated_at < datetime('now', '-45 minutes')"
     );
     for (var i = 0; i < staleRequested.length; i++) {
+      var rc = staleRequested[i];
       // Dispatch를 failed로
-      if (staleRequested[i].latest_dispatch_id) {
+      if (rc.latest_dispatch_id) {
         agentdesk.db.execute(
           "UPDATE task_dispatches SET status = 'failed', result ='Timed out waiting for agent', updated_at = datetime('now') WHERE id = ? AND status IN ('pending','dispatched')",
-          [staleRequested[i].latest_dispatch_id]
+          [rc.latest_dispatch_id]
         );
       }
-      // 카드는 pending_decision으로 (PMD가 판단)
-      agentdesk.kanban.setStatus(staleRequested[i].id, "pending_decision");
-      agentdesk.db.execute(
-        "UPDATE kanban_cards SET blocked_reason = 'Timed out waiting for agent acceptance' WHERE id = ?",
-        [staleRequested[i].id]
-      );
-      agentdesk.log.warn("[timeout] Card " + staleRequested[i].id + " requested timeout → pending_decision");
-      // PMD에게 결정 요청 (announce bot — 에이전트가 반응)
-      var cardInfo = agentdesk.db.query(
-        "SELECT title, github_issue_url, assigned_agent_id FROM kanban_cards WHERE id = ?",
-        [staleRequested[i].id]
-      );
-      var cardTitle = (cardInfo.length > 0) ? cardInfo[0].title : staleRequested[i].id;
-      var cardUrl = (cardInfo.length > 0 && cardInfo[0].github_issue_url) ? "\n" + cardInfo[0].github_issue_url : "";
-      var assignee = (cardInfo.length > 0 && cardInfo[0].assigned_agent_id) ? cardInfo[0].assigned_agent_id : "미배정";
-      var kmChannel = getPMDChannel();
-      if (kmChannel) try {
-        var port = agentdesk.config.get("server_port") || 8791;
-        agentdesk.http.post("http://127.0.0.1:" + port + "/api/send", {
-          target: kmChannel,
-          content: "[칸반매니저] ⏰ 타임아웃 결정 요청\n\n" +
-            "카드: " + cardTitle + "\n" +
-            "담당: " + assignee + "\n" +
-            "사유: 45분간 에이전트 무응답\n\n" +
-            "다음 중 하나를 선택해주세요:\n" +
-            "• 재디스패치 → 같은/다른 에이전트에게 재전송\n" +
-            "• 백로그 → 우선순위 재조정\n" +
-            "• 취소 → 이슈 닫기" + cardUrl,
-          source: "timeouts",
-          bot: "announce"
-        });
-      } catch(e) {
-        agentdesk.log.warn("[timeout] PMD decision request failed: " + e);
+
+      if (rc.retry_count < MAX_DISPATCH_RETRIES) {
+        // 재시도 여유 있음 → card 상태 유지 (updated_at만 갱신하여 [A] 재트리거 방지)
+        // [J] 섹션에서 30초 후 자동 재시도
+        agentdesk.db.execute(
+          "UPDATE kanban_cards SET updated_at = datetime('now') WHERE id = ?",
+          [rc.id]
+        );
+        agentdesk.log.warn("[timeout] Card " + rc.id + " requested timeout — retry " +
+          rc.retry_count + "/" + MAX_DISPATCH_RETRIES + ", will auto-retry in 30s");
+      } else {
+        // 10회 재시도 소진 → pending_decision + PMD 알림
+        agentdesk.kanban.setStatus(rc.id, "pending_decision");
+        agentdesk.db.execute(
+          "UPDATE kanban_cards SET blocked_reason = 'Timed out waiting for agent (" + MAX_DISPATCH_RETRIES + " retries exhausted)' WHERE id = ?",
+          [rc.id]
+        );
+        agentdesk.log.warn("[timeout] Card " + rc.id + " requested timeout → pending_decision (" + MAX_DISPATCH_RETRIES + " retries exhausted)");
+        // PMD에게 결정 요청
+        var cardInfo = agentdesk.db.query(
+          "SELECT title, github_issue_url, assigned_agent_id FROM kanban_cards WHERE id = ?",
+          [rc.id]
+        );
+        var cardTitle = (cardInfo.length > 0) ? cardInfo[0].title : rc.id;
+        var cardUrl = (cardInfo.length > 0 && cardInfo[0].github_issue_url) ? "\n" + cardInfo[0].github_issue_url : "";
+        var assignee = (cardInfo.length > 0 && cardInfo[0].assigned_agent_id) ? cardInfo[0].assigned_agent_id : "미배정";
+        var kmChannel = getPMDChannel();
+        if (kmChannel) try {
+          var port = agentdesk.config.get("server_port") || 8791;
+          agentdesk.http.post("http://127.0.0.1:" + port + "/api/send", {
+            target: kmChannel,
+            content: "[칸반매니저] 🔴 디스패치 재시도 소진\n\n" +
+              "카드: " + cardTitle + "\n" +
+              "담당: " + assignee + "\n" +
+              "사유: " + MAX_DISPATCH_RETRIES + "회 재시도 모두 실패 (에이전트 무응답)\n\n" +
+              "다음 중 하나를 선택해주세요:\n" +
+              "• 재디스패치 → 같은/다른 에이전트에게 재전송\n" +
+              "• 백로그 → 우선순위 재조정\n" +
+              "• 취소 → 이슈 닫기" + cardUrl,
+            source: "timeouts",
+            bot: "announce"
+          });
+        } catch(e) {
+          agentdesk.log.warn("[timeout] PMD decision request failed: " + e);
+        }
       }
     }
 
@@ -297,6 +315,50 @@ var timeouts = {
         }
       } catch(e) {
         agentdesk.log.warn("[notify-recovery] Failed: " + e + " — will retry next tick");
+      }
+    }
+
+    // ─── [J] Failed 디스패치 자동 재시도 (30초 간격, 최대 10회) ──
+    // failed 상태의 디스패치 중 retry_count < 10이고 30초 이상 경과한 것을 재시도
+    var failedForRetry = agentdesk.db.query(
+      "SELECT td.id, td.kanban_card_id, td.to_agent_id, td.dispatch_type, td.title, " +
+      "COALESCE(td.retry_count, 0) as retry_count " +
+      "FROM task_dispatches td " +
+      "JOIN kanban_cards kc ON kc.id = td.kanban_card_id " +
+      "WHERE td.status = 'failed' " +
+      "AND COALESCE(td.retry_count, 0) < " + MAX_DISPATCH_RETRIES + " " +
+      "AND td.updated_at < datetime('now', '-30 seconds') " +
+      "AND td.updated_at > datetime('now', '-10 minutes') " +
+      "AND kc.latest_dispatch_id = td.id " +
+      "AND kc.status NOT IN ('done', 'pending_decision')"
+    );
+    for (var jr = 0; jr < failedForRetry.length; jr++) {
+      var fd = failedForRetry[jr];
+      var newRetryCount = fd.retry_count + 1;
+      try {
+        var newDispatchId = agentdesk.dispatch.create(
+          fd.kanban_card_id,
+          fd.to_agent_id,
+          fd.dispatch_type || "implementation",
+          fd.title
+        );
+        // 새 디스패치에 retry_count 기록
+        agentdesk.db.execute(
+          "UPDATE task_dispatches SET retry_count = ? WHERE id = ?",
+          [newRetryCount, newDispatchId]
+        );
+        agentdesk.log.info("[retry] Auto-retry dispatch for card " + fd.kanban_card_id +
+          " — attempt " + newRetryCount + "/" + MAX_DISPATCH_RETRIES +
+          " (old: " + fd.id + " → new: " + newDispatchId + ")");
+      } catch (e) {
+        agentdesk.log.error("[retry] Failed to create retry dispatch for card " +
+          fd.kanban_card_id + ": " + e);
+        // 재시도 디스패치 생성 실패 → pending_decision으로 이관
+        agentdesk.kanban.setStatus(fd.kanban_card_id, "pending_decision");
+        agentdesk.db.execute(
+          "UPDATE kanban_cards SET blocked_reason = 'Auto-retry dispatch creation failed: " + e + "' WHERE id = ?",
+          [fd.kanban_card_id]
+        );
       }
     }
 

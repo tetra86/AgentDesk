@@ -497,7 +497,7 @@ pub async fn handle_session_start<'a>(registry: &HealthRegistry, body: &str) -> 
                 channel_id: Some(channel_id_raw),
                 last_active: tokio::time::Instant::now(),
                 worktree: None,
-                last_shared_memory_ts: None,
+
                 born_generation: super::runtime_store::load_generation(),
             });
         session.current_path = Some(effective_path.clone());

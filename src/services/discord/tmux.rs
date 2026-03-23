@@ -930,18 +930,10 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
 
                         last_active: tokio::time::Instant::now(),
                         worktree: None,
-                        last_shared_memory_ts: None,
+
                         born_generation: super::runtime_store::load_generation(),
                     });
 
-            // Restore shared memory dedup timestamp to prevent re-injection after restart
-            if session.last_shared_memory_ts.is_none() {
-                let role = super::settings::resolve_role_binding(*channel_id, Some(channel_name));
-                if let Some(ref binding) = role {
-                    session.last_shared_memory_ts =
-                        super::shared_memory::latest_shared_memory_ts(&binding.role_id);
-                }
-            }
 
             // Restore current_path from saved settings so message handler accepts messages
             if session.current_path.is_none() {

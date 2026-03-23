@@ -61,10 +61,7 @@ use settings::{
     RoleBinding, channel_supports_provider, channel_upload_dir, cleanup_old_uploads,
     load_bot_settings, resolve_role_binding, save_bot_settings,
 };
-use shared_memory::{
-    append_shared_memory_turn, build_shared_memory_context, latest_shared_memory_ts,
-    load_shared_knowledge,
-};
+use shared_memory::load_shared_knowledge;
 #[cfg(unix)]
 use tmux::{
     cleanup_orphan_tmux_sessions, reap_dead_tmux_sessions, restore_tmux_watchers,
@@ -188,8 +185,6 @@ pub(super) struct DiscordSession {
     pub(super) last_active: tokio::time::Instant,
     /// If this session runs in a git worktree, store the info here
     pub(super) worktree: Option<WorktreeInfo>,
-    /// Timestamp of newest shared-memory turn already injected (dedup)
-    pub(super) last_shared_memory_ts: Option<String>,
     /// Restart generation at which this session was created/restored.
     pub(super) born_generation: u64,
 }
@@ -2333,7 +2328,7 @@ pub(super) async fn auto_restore_session(
 
                     last_active: tokio::time::Instant::now(),
                     worktree: None,
-                    last_shared_memory_ts: None,
+
                     born_generation: runtime_store::load_generation(),
                 });
             session.channel_id = Some(channel_id.get());
@@ -2410,7 +2405,6 @@ async fn bootstrap_thread_session(
             remote_profile_name: None,
             last_active: tokio::time::Instant::now(),
             worktree: None,
-            last_shared_memory_ts: None,
             born_generation: runtime_store::load_generation(),
         });
     session.current_path = Some(parent_path.to_string());
