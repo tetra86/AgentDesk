@@ -738,12 +738,15 @@ pub(super) async fn handle_text_message(
         .await
         .is_some();
     let dispatch_id_for_thread = super::adk_session::parse_dispatch_id(user_text);
+    let mut dispatch_type_str: Option<String> = None;
     let channel_id = if let Some(ref did) = dispatch_id_for_thread {
         // Fetch dispatch metadata for thread reuse and cross-channel role override
         let dispatch_info = lookup_dispatch_info(shared.api_port, did).await;
-        let is_review_dispatch = dispatch_info
+        dispatch_type_str = dispatch_info
             .as_ref()
-            .and_then(|i| i.dispatch_type.as_deref())
+            .and_then(|i| i.dispatch_type.clone());
+        let is_review_dispatch = dispatch_type_str
+            .as_deref()
             .map(|t| t == "review")
             .unwrap_or(false);
         let alt_channel_id = dispatch_info
@@ -913,7 +916,12 @@ pub(super) async fn handle_text_message(
     }
     // Only inject shared knowledge on the first turn (no existing session).
     // Subsequent turns already have it in the system prompt context.
-    if session_id.is_none() {
+    // ReviewLite dispatches skip shared knowledge to save tokens.
+    let is_review_lite = matches!(
+        dispatch_type_str.as_deref(),
+        Some("review") | Some("review-decision") | Some("rework")
+    );
+    if session_id.is_none() && !is_review_lite {
         if let Some(knowledge) = load_shared_knowledge() {
             context_chunks.push(knowledge);
         }
@@ -1010,6 +1018,13 @@ pub(super) async fn handle_text_message(
         }
     };
 
+    // Derive dispatch prompt profile: review/rework dispatches get a lighter prompt.
+    let dispatch_profile = DispatchProfile::from_dispatch_type(
+        dispatch_id_for_thread
+            .as_ref()
+            .and_then(|_| dispatch_type_str.as_deref()),
+    );
+
     let system_prompt_owned = build_system_prompt(
         &discord_context,
         &current_path,
@@ -1019,6 +1034,7 @@ pub(super) async fn handle_text_message(
         &skills_notice,
         role_binding.as_ref(),
         reply_to_user_message,
+        dispatch_profile,
     );
 
     // Create cancel token — with second check to close the TOCTOU race window.

@@ -4,6 +4,29 @@ use super::settings::{
 };
 use super::*;
 
+/// Dispatch prompt profile — controls which system prompt sections are injected.
+/// `Full` includes everything (used for implementation dispatches and normal turns).
+/// `ReviewLite` strips peer agents, long-term memory, and skills to reduce token cost.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DispatchProfile {
+    /// Full system prompt — all sections included (implementation, normal turns)
+    Full,
+    /// Minimal prompt for review/review-decision dispatches.
+    /// Includes: base context, shared agent rules, role binding.
+    /// Excludes: skills, peer agent directory, long-term memory.
+    ReviewLite,
+}
+
+impl DispatchProfile {
+    /// Derive profile from dispatch type string.
+    pub fn from_dispatch_type(dispatch_type: Option<&str>) -> Self {
+        match dispatch_type {
+            Some("review") | Some("review-decision") | Some("rework") => Self::ReviewLite,
+            _ => Self::Full,
+        }
+    }
+}
+
 pub(super) fn build_system_prompt(
     discord_context: &str,
     current_path: &str,
@@ -13,6 +36,7 @@ pub(super) fn build_system_prompt(
     skills_notice: &str,
     role_binding: Option<&RoleBinding>,
     queued_turn: bool,
+    profile: DispatchProfile,
 ) -> String {
     let mut system_prompt_owned = format!(
         "You are chatting with a user through Discord.\n\
@@ -41,7 +65,8 @@ pub(super) fn build_system_prompt(
         channel_id.get(),
         discord_token_hash(token),
         disabled_notice,
-        skills_notice
+        // ReviewLite: omit skills to save tokens — reviewer only submits verdict
+        if profile == DispatchProfile::ReviewLite { "" } else { skills_notice }
     );
 
     if let Some(binding) = role_binding {
@@ -81,17 +106,21 @@ pub(super) fn build_system_prompt(
                 );
             }
         }
-        if let Some(catalog) = load_longterm_memory_catalog(&binding.role_id) {
-            system_prompt_owned.push_str(
-                "\n\n[Long-term Memory]\n\
-                 Available memory files for this agent. Use the Read tool to load full content when needed:\n",
-            );
-            system_prompt_owned.push_str(&catalog);
-        }
 
-        if let Some(peer_guidance) = render_peer_agent_guidance(&binding.role_id) {
-            system_prompt_owned.push_str("\n\n");
-            system_prompt_owned.push_str(&peer_guidance);
+        // ReviewLite: skip long-term memory and peer agents to save tokens
+        if profile == DispatchProfile::Full {
+            if let Some(catalog) = load_longterm_memory_catalog(&binding.role_id) {
+                system_prompt_owned.push_str(
+                    "\n\n[Long-term Memory]\n\
+                     Available memory files for this agent. Use the Read tool to load full content when needed:\n",
+                );
+                system_prompt_owned.push_str(&catalog);
+            }
+
+            if let Some(peer_guidance) = render_peer_agent_guidance(&binding.role_id) {
+                system_prompt_owned.push_str("\n\n");
+                system_prompt_owned.push_str(&peer_guidance);
+            }
         }
     }
 
@@ -105,6 +134,15 @@ pub(super) fn build_system_prompt(
         );
     }
 
+    if profile == DispatchProfile::ReviewLite {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        println!(
+            "  [{ts}] 📉 ReviewLite prompt: {} chars (channel {})",
+            system_prompt_owned.len(),
+            channel_id.get()
+        );
+    }
+
     system_prompt_owned
 }
 
@@ -112,7 +150,7 @@ pub(super) fn build_system_prompt(
 mod tests {
     use super::*;
 
-    /// Helper: call build_system_prompt with minimal/default arguments.
+    /// Helper: call build_system_prompt with minimal/default arguments (Full profile).
     fn call_build(
         discord_context: &str,
         current_path: &str,
@@ -130,6 +168,7 @@ mod tests {
             skills_notice,
             None,  // role_binding
             false, // queued_turn
+            DispatchProfile::Full,
         )
     }
 
@@ -178,5 +217,47 @@ mod tests {
             output.contains("Never use tools that expect user interaction"),
             "System prompt should instruct not to use interactive tools"
         );
+    }
+
+    #[test]
+    fn test_dispatch_profile_from_dispatch_type() {
+        assert_eq!(
+            DispatchProfile::from_dispatch_type(None),
+            DispatchProfile::Full
+        );
+        assert_eq!(
+            DispatchProfile::from_dispatch_type(Some("implementation")),
+            DispatchProfile::Full
+        );
+        assert_eq!(
+            DispatchProfile::from_dispatch_type(Some("review")),
+            DispatchProfile::ReviewLite
+        );
+        assert_eq!(
+            DispatchProfile::from_dispatch_type(Some("review-decision")),
+            DispatchProfile::ReviewLite
+        );
+        assert_eq!(
+            DispatchProfile::from_dispatch_type(Some("rework")),
+            DispatchProfile::ReviewLite
+        );
+    }
+
+    #[test]
+    fn test_review_lite_omits_skills() {
+        let with_skills = build_system_prompt(
+            "ctx", "/tmp", ChannelId::new(1), "tok", "",
+            "\n\nAvailable skills:\n  - /commit: Commit changes",
+            None, false, DispatchProfile::Full,
+        );
+        let without_skills = build_system_prompt(
+            "ctx", "/tmp", ChannelId::new(1), "tok", "",
+            "\n\nAvailable skills:\n  - /commit: Commit changes",
+            None, false, DispatchProfile::ReviewLite,
+        );
+        assert!(with_skills.contains("Available skills"));
+        assert!(!without_skills.contains("Available skills"));
+        // ReviewLite prompt should be shorter
+        assert!(without_skills.len() < with_skills.len());
     }
 }

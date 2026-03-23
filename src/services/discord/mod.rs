@@ -52,7 +52,7 @@ use handoff::{clear_handoff, load_handoffs, update_handoff_state};
 use inflight::{
     InflightTurnState, clear_inflight_state, load_inflight_states, save_inflight_state,
 };
-use prompt_builder::build_system_prompt;
+use prompt_builder::{DispatchProfile, build_system_prompt};
 use recovery::restore_inflight_turns;
 use restart_report::flush_restart_reports;
 use router::{handle_event, handle_text_message};
