@@ -79,6 +79,36 @@ pub async fn submit_verdict(
         }
     };
 
+    // A: Validate dispatch_type — only 'review' dispatches should go through the verdict API.
+    //    implementation/rework dispatches have their own completion path (session idle auto-complete),
+    //    review-decision dispatches should use /api/review-decision (accept/dispute/dismiss).
+    let dispatch_type: Option<String> = conn
+        .query_row(
+            "SELECT dispatch_type FROM task_dispatches WHERE id = ?1",
+            [&body.dispatch_id],
+            |row| row.get(0),
+        )
+        .ok()
+        .flatten();
+
+    match dispatch_type.as_deref() {
+        Some("review") => {} // allowed
+        Some(dtype) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": format!("review-verdict only accepts 'review' dispatches, got '{}'", dtype)
+                })),
+            );
+        }
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "dispatch not found"})),
+            );
+        }
+    }
+
     // B: Validate reviewed commit — the dispatch context stores the HEAD that was
     //    actually sent for review. Reject mismatched commits to prevent arbitrary SHA injection.
     let stored_reviewed_commit: Option<String> = conn
@@ -544,7 +574,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn implementation_dispatch_verdict_allowed() {
+    async fn implementation_dispatch_verdict_rejected() {
         let db = test_db();
         let conn = db.lock().unwrap();
         conn.execute(
@@ -569,7 +599,7 @@ mod tests {
             health_registry: None,
         };
 
-        let (status, _) = submit_verdict(
+        let (status, body) = submit_verdict(
             State(state),
             Json(SubmitVerdictBody {
                 dispatch_id: "dispatch-self".to_string(),
@@ -582,11 +612,12 @@ mod tests {
         )
         .await;
 
-        assert_eq!(status, StatusCode::OK, "implementation dispatch verdict should be allowed");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body.0["error"].as_str().unwrap().contains("implementation"));
     }
 
     #[tokio::test]
-    async fn review_decision_dispatch_verdict_allowed() {
+    async fn review_decision_dispatch_verdict_rejected() {
         let db = test_db();
         let conn = db.lock().unwrap();
         conn.execute(
@@ -611,7 +642,7 @@ mod tests {
             health_registry: None,
         };
 
-        let (status, _) = submit_verdict(
+        let (status, body) = submit_verdict(
             State(state),
             Json(SubmitVerdictBody {
                 dispatch_id: "dispatch-rd".to_string(),
@@ -624,6 +655,7 @@ mod tests {
         )
         .await;
 
-        assert_eq!(status, StatusCode::OK, "review-decision dispatch verdict should be allowed");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body.0["error"].as_str().unwrap().contains("review-decision"));
     }
 }
