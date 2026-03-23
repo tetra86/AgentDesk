@@ -520,22 +520,30 @@ pub(super) async fn send_dispatch_to_discord(
                         "https://discord.com/api/v10/channels/{}/messages",
                         thread_id
                     );
-                    let _ = client
+                    let thread_msg_ok = client
                         .post(&thread_msg_url)
                         .header("Authorization", format!("Bot {}", token))
                         .json(&serde_json::json!({"content": message}))
                         .send()
-                        .await;
-                    // Mark as notified so timeouts.js [I-0] won't resend
-                    if let Ok(conn) = db.lock() {
-                        conn.execute(
-                            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-                            rusqlite::params![
-                                format!("dispatch_notified:{}", dispatch_id),
-                                dispatch_id
-                            ],
-                        )
-                        .ok();
+                        .await
+                        .map(|r| r.status().is_success())
+                        .unwrap_or(false);
+                    // Mark as notified only if the POST succeeded
+                    if thread_msg_ok {
+                        if let Ok(conn) = db.lock() {
+                            conn.execute(
+                                "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
+                                rusqlite::params![
+                                    format!("dispatch_notified:{}", dispatch_id),
+                                    dispatch_id
+                                ],
+                            )
+                            .ok();
+                        }
+                    } else {
+                        tracing::warn!(
+                            "[dispatch] Thread message POST failed for dispatch {dispatch_id}, skipping notified marker"
+                        );
                     }
                     tracing::info!(
                         "[dispatch] Created thread {thread_id} and sent dispatch {dispatch_id} to {agent_id}"

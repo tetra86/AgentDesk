@@ -774,8 +774,14 @@ fn register_exec_ops<'js>(ctx: &Ctx<'js>) -> JsResult<()> {
     session_obj.set(
         "kill",
         rquickjs::Function::new(ctx.clone(), |session_key: String| -> String {
+            // session_key is "hostname:tmux_name"; tmux interprets colon as
+            // session:window separator, so extract only the tmux_name part.
+            let tmux_name = session_key
+                .split_once(':')
+                .map(|(_, name)| name)
+                .unwrap_or(&session_key);
             let result = std::process::Command::new("tmux")
-                .args(["kill-session", "-t", &session_key])
+                .args(["kill-session", "-t", tmux_name])
                 .output();
             match result {
                 Ok(out) if out.status.success() => {
