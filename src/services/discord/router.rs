@@ -850,6 +850,17 @@ pub(super) async fn handle_text_message(
         }
     };
 
+    // For cross-channel dispatch reuse, override the provider so the turn
+    // executes via the counter-model CLI (e.g. Codex reviews Claude's work).
+    let provider = if shared.dispatch_role_overrides.contains_key(&channel_id) {
+        role_binding
+            .as_ref()
+            .and_then(|rb| rb.provider.clone())
+            .unwrap_or(provider)
+    } else {
+        provider
+    };
+
     // Prepend pending file uploads
     let mut context_chunks = Vec::new();
     if !pending_uploads.is_empty() {
