@@ -20,6 +20,64 @@ interface RateLimitData {
   providers: RateLimitProvider[];
 }
 
+/* --- Raw API types (from backend rate_limit_cache) --- */
+interface RawBucket {
+  name: string;
+  limit: number;
+  used: number;
+  remaining: number;
+  reset: number; // unix timestamp
+}
+
+interface RawProvider {
+  provider: string;
+  buckets: RawBucket[];
+  fetched_at: number;
+  stale: boolean;
+}
+
+interface RawRateLimitData {
+  providers: RawProvider[];
+}
+
+/** Friendly label for GitHub API rate-limit bucket names */
+const BUCKET_LABELS: Record<string, string> = {
+  core: "Core",
+  search: "Search",
+  graphql: "GraphQL",
+  code_search: "CodeSearch",
+  code_scanning_upload: "Scan",
+  actions_runner_registration: "Actions",
+  scim: "SCIM",
+};
+
+/** Only show these buckets to avoid clutter */
+const VISIBLE_BUCKETS = new Set(["core", "search", "graphql", "code_search"]);
+
+function transformRawData(raw: RawRateLimitData): RateLimitData {
+  return {
+    providers: raw.providers.map((rp) => ({
+      provider: rp.provider.charAt(0).toUpperCase() + rp.provider.slice(1),
+      fetched_at: rp.fetched_at,
+      stale: rp.stale,
+      buckets: rp.buckets
+        .filter((b) => VISIBLE_BUCKETS.has(b.name))
+        .map((b) => {
+          const utilization = b.limit > 0 ? Math.round((b.used / b.limit) * 100) : 0;
+          const level: "normal" | "warning" | "danger" =
+            utilization >= 90 ? "danger" : utilization >= 70 ? "warning" : "normal";
+          return {
+            id: b.name,
+            label: BUCKET_LABELS[b.name] ?? b.name,
+            utilization,
+            resets_at: b.reset > 0 ? new Date(b.reset * 1000).toISOString() : null,
+            level,
+          };
+        }),
+    })),
+  };
+}
+
 interface ProviderPalette {
   accent: string;
   normal: { bar: string; text: string; glow: string };
@@ -70,6 +128,12 @@ const PROVIDER_PALETTES: Record<string, ProviderPalette> = {
     warning: { bar: "#f59e0b", text: "#fbbf24", glow: "rgba(245,158,11,0.4)" },
     danger: { bar: "#ef4444", text: "#fca5a5", glow: "rgba(239,68,68,0.5)" },
   },
+  Github: {
+    accent: "#e6edf3",
+    normal: { bar: "#e6edf3", text: "#f0f6fc", glow: "rgba(230,237,243,0.3)" },
+    warning: { bar: "#f59e0b", text: "#fbbf24", glow: "rgba(245,158,11,0.4)" },
+    danger: { bar: "#ef4444", text: "#fca5a5", glow: "rgba(239,68,68,0.5)" },
+  },
 };
 
 const DEFAULT_PALETTE: ProviderPalette = PROVIDER_PALETTES.Codex;
@@ -81,6 +145,7 @@ const PROVIDER_ICONS: Record<string, string> = {
   Copilot: "🛩️",
   Antigravity: "🌀",
   API: "🔌",
+  Github: "🐙",
 };
 
 function getColors(provider: string, level: string) {
@@ -120,8 +185,8 @@ export default function RateLimitWidget({ t }: RateLimitWidgetProps) {
       try {
         const res = await fetch("/api/rate-limits", { credentials: "include" });
         if (!res.ok) return;
-        const json = (await res.json()) as RateLimitData;
-        if (mounted) setData(json);
+        const raw = (await res.json()) as RawRateLimitData;
+        if (mounted) setData(transformRawData(raw));
       } catch { /* ignore */ }
     };
     load();
@@ -136,7 +201,7 @@ export default function RateLimitWidget({ t }: RateLimitWidgetProps) {
       <div className="flex flex-col gap-1.5 sm:flex-row sm:items-center sm:gap-x-6">
         {data.providers.map((provider) => {
           const accent = getAccent(provider.provider);
-          const visibleBuckets = provider.buckets.filter((b) => b.id !== "7d_sonnet");
+          const visibleBuckets = provider.buckets;
           return (
             <div key={provider.provider} className="flex items-center gap-0 min-w-0">
               {/* Fixed-width left: provider + stale */}
