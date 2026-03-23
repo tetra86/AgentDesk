@@ -802,7 +802,8 @@ pub(super) async fn handle_text_message(
                         super::bootstrap_thread_session(shared, thread.id, &current_path, ctx)
                             .await;
                         shared.dispatch_thread_parents.insert(channel_id, thread.id);
-                        link_dispatch_thread(shared.api_port, did, thread.id.get()).await;
+                        link_dispatch_thread(shared.api_port, did, thread.id.get(), channel_id.get())
+                            .await;
                         thread.id
                     }
                     Err(e) => {
@@ -2646,7 +2647,12 @@ async fn verify_thread_accessible(
 }
 
 /// Link a newly created dispatch thread to the card's active_thread_id via internal API.
-async fn link_dispatch_thread(api_port: u16, dispatch_id: &str, thread_id: u64) {
+async fn link_dispatch_thread(
+    api_port: u16,
+    dispatch_id: &str,
+    thread_id: u64,
+    channel_id: u64,
+) {
     let url = format!(
         "http://127.0.0.1:{}/api/internal/link-dispatch-thread",
         api_port
@@ -2657,6 +2663,7 @@ async fn link_dispatch_thread(api_port: u16, dispatch_id: &str, thread_id: u64) 
         .json(&serde_json::json!({
             "dispatch_id": dispatch_id,
             "thread_id": thread_id.to_string(),
+            "channel_id": channel_id.to_string(),
         }))
         .send()
         .await;

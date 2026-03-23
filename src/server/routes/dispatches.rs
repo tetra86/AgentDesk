@@ -37,6 +37,7 @@ pub struct UpdateDispatchBody {
 pub struct LinkDispatchThreadBody {
     pub dispatch_id: String,
     pub thread_id: String,
+    pub channel_id: Option<String>,
 }
 
 // ── Handlers ───────────────────────────────────────────────────
@@ -356,6 +357,112 @@ fn dispatch_row_to_json(row: &rusqlite::Row) -> rusqlite::Result<serde_json::Val
     }))
 }
 
+// ── Channel-thread map helpers ────────────────────────────────
+
+/// Look up the thread_id for a specific channel from channel_thread_map.
+/// Falls back to active_thread_id for backward compatibility.
+fn get_thread_for_channel(
+    conn: &rusqlite::Connection,
+    card_id: &str,
+    channel_id: u64,
+) -> Option<String> {
+    let map_json: Option<String> = conn
+        .query_row(
+            "SELECT channel_thread_map FROM kanban_cards WHERE id = ?1",
+            [card_id],
+            |row| row.get(0),
+        )
+        .ok()
+        .flatten();
+
+    if let Some(ref json_str) = map_json {
+        if let Ok(map) = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(json_str)
+        {
+            let key = channel_id.to_string();
+            if let Some(tid) = map.get(&key).and_then(|v| v.as_str()) {
+                return Some(tid.to_string());
+            }
+        }
+    }
+
+    // Fallback: legacy active_thread_id (no channel distinction)
+    conn.query_row(
+        "SELECT active_thread_id FROM kanban_cards WHERE id = ?1 AND active_thread_id IS NOT NULL",
+        [card_id],
+        |row| row.get(0),
+    )
+    .ok()
+}
+
+/// Set the thread_id for a specific channel in channel_thread_map.
+/// Also updates active_thread_id for backward compatibility.
+fn set_thread_for_channel(
+    conn: &rusqlite::Connection,
+    card_id: &str,
+    channel_id: u64,
+    thread_id: &str,
+) {
+    let existing: Option<String> = conn
+        .query_row(
+            "SELECT channel_thread_map FROM kanban_cards WHERE id = ?1",
+            [card_id],
+            |row| row.get(0),
+        )
+        .ok()
+        .flatten();
+
+    let mut map: serde_json::Map<String, serde_json::Value> = existing
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+
+    map.insert(
+        channel_id.to_string(),
+        serde_json::Value::String(thread_id.to_string()),
+    );
+
+    let json_str = serde_json::to_string(&map).unwrap_or_default();
+    conn.execute(
+        "UPDATE kanban_cards SET channel_thread_map = ?1, active_thread_id = ?2 WHERE id = ?3",
+        rusqlite::params![json_str, thread_id, card_id],
+    )
+    .ok();
+}
+
+/// Clear thread mapping for a specific channel.
+fn clear_thread_for_channel(conn: &rusqlite::Connection, card_id: &str, channel_id: u64) {
+    let existing: Option<String> = conn
+        .query_row(
+            "SELECT channel_thread_map FROM kanban_cards WHERE id = ?1",
+            [card_id],
+            |row| row.get(0),
+        )
+        .ok()
+        .flatten();
+
+    if let Some(json_str) = existing {
+        if let Ok(mut map) =
+            serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&json_str)
+        {
+            map.remove(&channel_id.to_string());
+            let new_json = serde_json::to_string(&map).unwrap_or_default();
+            conn.execute(
+                "UPDATE kanban_cards SET channel_thread_map = ?1 WHERE id = ?2",
+                rusqlite::params![new_json, card_id],
+            )
+            .ok();
+        }
+    }
+}
+
+/// Clear ALL thread mappings (card done).
+fn clear_all_threads(conn: &rusqlite::Connection, card_id: &str) {
+    conn.execute(
+        "UPDATE kanban_cards SET channel_thread_map = NULL, active_thread_id = NULL WHERE id = ?1",
+        [card_id],
+    )
+    .ok();
+}
+
 /// Send a dispatch notification to the target agent's Discord channel.
 /// Message format: `DISPATCH:<dispatch_id> - <title>\n<issue_url>`
 /// The `DISPATCH:<uuid>` prefix is required for the dcserver to link the
@@ -488,18 +595,13 @@ pub(super) async fn send_dispatch_to_discord(
         .as_deref()
         .unwrap_or("implementation");
 
-    // Try to reuse existing thread for this card
+    // Try to reuse existing thread for this card (channel-specific)
     let existing_thread_id: Option<String> = {
         let conn = match db.lock() {
             Ok(c) => c,
             Err(_) => return,
         };
-        conn.query_row(
-            "SELECT active_thread_id FROM kanban_cards WHERE id = ?1 AND active_thread_id IS NOT NULL",
-            [card_id],
-            |row| row.get::<_, String>(0),
-        )
-        .ok()
+        get_thread_for_channel(&conn, card_id, channel_id_num)
     };
 
     if let Some(ref existing_tid) = existing_thread_id {
@@ -544,18 +646,14 @@ pub(super) async fn send_dispatch_to_discord(
             if let Ok(thread_body) = tr.json::<serde_json::Value>().await {
                 let thread_id = thread_body.get("id").and_then(|v| v.as_str()).unwrap_or("");
                 if !thread_id.is_empty() {
-                    // Save thread_id to the dedicated column and card's active_thread_id
+                    // Save thread_id to dispatch and card's channel-thread map
                     if let Ok(conn) = db.lock() {
                         conn.execute(
                             "UPDATE task_dispatches SET thread_id = ?1 WHERE id = ?2",
                             rusqlite::params![thread_id, dispatch_id],
                         )
                         .ok();
-                        conn.execute(
-                            "UPDATE kanban_cards SET active_thread_id = ?1 WHERE id = ?2",
-                            rusqlite::params![thread_id, card_id],
-                        )
-                        .ok();
+                        set_thread_for_channel(&conn, card_id, channel_id_num, thread_id);
                     }
                     // Send dispatch message into the thread
                     let thread_msg_url = format!(
@@ -649,7 +747,7 @@ async fn try_reuse_thread(
     client: &reqwest::Client,
     token: &str,
     thread_id: &str,
-    _expected_parent: u64,
+    expected_parent: u64,
     dispatch_type: &str,
     message: &str,
     dispatch_id: &str,
@@ -667,24 +765,28 @@ async fn try_reuse_thread(
 
     if !resp.status().is_success() {
         tracing::info!("[dispatch] Thread {thread_id} no longer accessible, will create new");
-        // Clear stale active_thread_id
+        // Clear stale thread for this channel
         if let Ok(conn) = db.lock() {
-            conn.execute(
-                "UPDATE kanban_cards SET active_thread_id = NULL WHERE id = ?1",
-                [card_id],
-            )
-            .ok();
+            clear_thread_for_channel(&conn, card_id, expected_parent);
         }
         return None;
     }
 
     let body: serde_json::Value = resp.json().await.ok()?;
 
-    // Note: We intentionally do NOT check parent_id here.
-    // The thread may have been created under a different channel (e.g. primary vs alt),
-    // but Discord allows sending messages to any thread by ID regardless of parent.
-    // This enables cross-channel thread reuse for the same-issue lifecycle
-    // (implementation on primary → review on alt → review-decision on primary).
+    // Check parent_id — only reuse threads from the same channel.
+    // Each channel independently manages its own thread per card.
+    let parent_id = body
+        .get("parent_id")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0);
+    if parent_id != expected_parent {
+        tracing::info!(
+            "[dispatch] Thread {thread_id} belongs to channel {parent_id}, expected {expected_parent}, skipping reuse"
+        );
+        return None;
+    }
 
     // Check if thread is locked — locked threads cannot be reused
     let metadata = body.get("thread_metadata");
@@ -694,13 +796,9 @@ async fn try_reuse_thread(
         .unwrap_or(false);
     if is_locked {
         tracing::info!("[dispatch] Thread {thread_id} is locked, will create new");
-        // Clear stale active_thread_id so next dispatch creates fresh
+        // Clear stale thread for this channel
         if let Ok(conn) = db.lock() {
-            conn.execute(
-                "UPDATE kanban_cards SET active_thread_id = NULL WHERE id = ?1",
-                [card_id],
-            )
-            .ok();
+            clear_thread_for_channel(&conn, card_id, expected_parent);
         }
         return Some(false);
     }
@@ -822,23 +920,20 @@ pub(super) async fn send_review_result_to_primary(
     };
     let client = reqwest::Client::new();
 
-    // Look up active_thread_id for this card to send to existing thread
+    // Look up thread for primary channel (review results go to primary)
     let active_thread_id: Option<String> = {
         let conn = match db.lock() {
             Ok(c) => c,
             Err(_) => return,
         };
-        conn.query_row(
-            "SELECT active_thread_id FROM kanban_cards WHERE id = ?1 AND active_thread_id IS NOT NULL",
-            [card_id],
-            |row| row.get::<_, String>(0),
-        )
-        .ok()
+        if let Ok(ch_num) = channel_id.parse::<u64>() {
+            get_thread_for_channel(&conn, card_id, ch_num)
+        } else {
+            None
+        }
     };
 
-    // Determine target: existing thread (if valid) or main channel.
-    // Note: We do NOT check parent_id — the thread may have been created under
-    // a different channel (primary vs alt) but is still valid for the same-issue lifecycle.
+    // Determine target: existing thread from primary channel (if valid) or main channel.
     let target_channel = if let Some(ref tid) = active_thread_id {
         let info_url = format!("https://discord.com/api/v10/channels/{}", tid);
         let valid = match client
@@ -1184,13 +1279,9 @@ pub(super) async fn handle_completed_dispatch_followups(db: &crate::db::Db, disp
                 tracing::info!("[dispatch] Archived thread {tid} for completed dispatch {dispatch_id} (card done)");
             }
         }
-        // Clear active_thread_id when card is done
+        // Clear all thread mappings when card is done
         if let Ok(conn) = db.lock() {
-            conn.execute(
-                "UPDATE kanban_cards SET active_thread_id = NULL WHERE id = ?1",
-                [&card_id],
-            )
-            .ok();
+            clear_all_threads(&conn, &card_id);
         }
     }
 
@@ -1348,7 +1439,7 @@ pub async fn link_dispatch_thread(
         }
     };
 
-    // Look up card_id from the dispatch, then set active_thread_id
+    // Look up card_id from the dispatch, then set channel-thread mapping
     let card_id: Option<String> = conn
         .query_row(
             "SELECT kanban_card_id FROM task_dispatches WHERE id = ?1",
@@ -1364,11 +1455,25 @@ pub async fn link_dispatch_thread(
                 rusqlite::params![body.thread_id, body.dispatch_id],
             )
             .ok();
-            conn.execute(
-                "UPDATE kanban_cards SET active_thread_id = ?1 WHERE id = ?2",
-                rusqlite::params![body.thread_id, cid],
-            )
-            .ok();
+            if let Some(ref ch_id) = body.channel_id {
+                if let Ok(ch_num) = ch_id.parse::<u64>() {
+                    set_thread_for_channel(&conn, &cid, ch_num, &body.thread_id);
+                } else {
+                    // Fallback: legacy active_thread_id
+                    conn.execute(
+                        "UPDATE kanban_cards SET active_thread_id = ?1 WHERE id = ?2",
+                        rusqlite::params![body.thread_id, cid],
+                    )
+                    .ok();
+                }
+            } else {
+                // No channel_id provided — legacy path
+                conn.execute(
+                    "UPDATE kanban_cards SET active_thread_id = ?1 WHERE id = ?2",
+                    rusqlite::params![body.thread_id, cid],
+                )
+                .ok();
+            }
             (StatusCode::OK, Json(json!({"ok": true, "card_id": cid})))
         }
         None => (
@@ -1404,28 +1509,43 @@ pub async fn get_card_thread(
         }
     };
 
-    let result: Option<(String, Option<String>, Option<String>, Option<String>)> = conn
+    let result: Option<(String, Option<String>, Option<String>, Option<String>, Option<String>)> = conn
         .query_row(
             "SELECT kc.id, kc.active_thread_id, td.dispatch_type, \
-                    (SELECT a.discord_channel_alt FROM agents a WHERE a.id = td.to_agent_id) \
+                    (SELECT a.discord_channel_alt FROM agents a WHERE a.id = td.to_agent_id), \
+                    (SELECT a.discord_channel_id FROM agents a WHERE a.id = td.to_agent_id) \
              FROM task_dispatches td \
              JOIN kanban_cards kc ON kc.id = td.kanban_card_id \
              WHERE td.id = ?1",
             [dispatch_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
         )
         .ok();
 
     match result {
-        Some((card_id, thread_id, dispatch_type, alt_channel)) => (
-            StatusCode::OK,
-            Json(json!({
-                "card_id": card_id,
-                "active_thread_id": thread_id,
-                "dispatch_type": dispatch_type,
-                "discord_channel_alt": alt_channel,
-            })),
-        ),
+        Some((card_id, _legacy_thread_id, dispatch_type, alt_channel, primary_channel)) => {
+            // Determine target channel for this dispatch type
+            let use_alt = matches!(dispatch_type.as_deref(), Some("review"));
+            let target_channel = if use_alt {
+                alt_channel.as_deref()
+            } else {
+                primary_channel.as_deref()
+            };
+            // Look up channel-specific thread
+            let thread_id = target_channel
+                .and_then(|ch| ch.parse::<u64>().ok())
+                .and_then(|ch_num| get_thread_for_channel(&conn, &card_id, ch_num));
+
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "card_id": card_id,
+                    "active_thread_id": thread_id,
+                    "dispatch_type": dispatch_type,
+                    "discord_channel_alt": alt_channel,
+                })),
+            )
+        }
         None => (
             StatusCode::NOT_FOUND,
             Json(json!({"error": "dispatch not found"})),
