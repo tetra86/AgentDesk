@@ -45,12 +45,19 @@ pub fn capture_process_dump(pid: u32, output_path: &str) -> Result<(), String> {
                 Ok(())
             }
             Err(_) => {
-                // Fallback: try gcore if available
+                // Fallback: try gcore if available.
+                // Note: gcore writes to `<prefix>.<pid>`, so we strip the extension
+                // from output_path and let gcore append the PID suffix, then rename
+                // to the caller's expected path.
+                let gcore_prefix = output_path.trim_end_matches(".txt");
                 let status = Command::new("gcore")
-                    .args(["-o", output_path, &pid.to_string()])
+                    .args(["-o", gcore_prefix, &pid.to_string()])
                     .status()
                     .map_err(|e| format!("Neither /proc stack nor gcore available: {}", e))?;
                 if status.success() {
+                    // gcore writes to <prefix>.<pid> — rename to expected path
+                    let actual = format!("{}.{}", gcore_prefix, pid);
+                    let _ = std::fs::rename(&actual, output_path);
                     Ok(())
                 } else {
                     Err("gcore failed".to_string())

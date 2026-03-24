@@ -78,31 +78,16 @@ pub fn resolve_binary_with_login_shell(name: &str) -> Option<String> {
     None
 }
 
-/// Async version of `resolve_binary` for use in async contexts.
-pub async fn async_resolve_binary(name: &str) -> Option<String> {
-    #[cfg(unix)]
-    let output = tokio::process::Command::new("which")
-        .arg(name)
-        .output()
-        .await;
-    #[cfg(windows)]
-    let output = tokio::process::Command::new("where.exe")
-        .arg(name)
-        .output()
-        .await;
-
-    output
+/// Async version of `resolve_binary_with_login_shell`.
+///
+/// Runs the full resolution chain (which/where → login shell → known paths)
+/// on a blocking thread so it can be used from async contexts.
+pub async fn async_resolve_binary_with_login_shell(name: &str) -> Option<String> {
+    let name = name.to_string();
+    tokio::task::spawn_blocking(move || resolve_binary_with_login_shell(&name))
+        .await
         .ok()
-        .filter(|o| o.status.success())
-        .and_then(|o| {
-            let path = String::from_utf8_lossy(&o.stdout)
-                .lines()
-                .next()
-                .unwrap_or("")
-                .trim()
-                .to_string();
-            if path.is_empty() { None } else { Some(path) }
-        })
+        .flatten()
 }
 
 #[cfg(test)]

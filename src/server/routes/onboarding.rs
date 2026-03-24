@@ -666,8 +666,9 @@ pub async fn check_provider(
         }
     };
 
-    // Check if installed (platform-aware binary resolution)
-    let installed = crate::services::platform::binary_resolver::async_resolve_binary(cmd)
+    // Check if installed — uses the same full resolution chain as runtime
+    // (which/where → login shell fallback) so health check agrees with actual launch.
+    let installed = crate::services::platform::async_resolve_binary_with_login_shell(cmd)
         .await
         .is_some();
 

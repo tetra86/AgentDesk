@@ -588,10 +588,14 @@ pub fn spawn_watchdog(port: u16) {
                             pid,
                             chrono::Local::now().format("%Y%m%d-%H%M%S")
                         );
-                        let _ = crate::services::platform::capture_process_dump(pid, &dump_path);
-                        eprintln!(
-                            "  [{ts}] 🩺 watchdog: dump saved to {dump_path} — forcing exit"
-                        );
+                        match crate::services::platform::capture_process_dump(pid, &dump_path) {
+                            Ok(()) => eprintln!(
+                                "  [{ts}] 🩺 watchdog: dump saved to {dump_path} — forcing exit"
+                            ),
+                            Err(e) => eprintln!(
+                                "  [{ts}] 🩺 watchdog: dump capture failed ({e}) — forcing exit without diagnostics"
+                            ),
+                        }
                         std::process::exit(1);
                     }
                 }
