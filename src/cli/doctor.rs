@@ -4,6 +4,7 @@ use std::process::Command;
 
 use super::dcserver;
 use crate::config;
+use serde_json::Value;
 
 struct Check {
     name: &'static str,
@@ -28,23 +29,76 @@ impl Check {
     }
 }
 
+fn discord_bot_check_from_health(base: &str, body: &Value) -> Check {
+    if let Some(providers) = body.get("providers").and_then(Value::as_array) {
+        let total = providers.len();
+        let connected: Vec<String> = providers
+            .iter()
+            .filter(|provider| provider.get("connected").and_then(Value::as_bool) == Some(true))
+            .filter_map(|provider| provider.get("name").and_then(Value::as_str))
+            .map(str::to_string)
+            .collect();
+        let disconnected: Vec<String> = providers
+            .iter()
+            .filter(|provider| provider.get("connected").and_then(Value::as_bool) != Some(true))
+            .filter_map(|provider| provider.get("name").and_then(Value::as_str))
+            .map(str::to_string)
+            .collect();
+        let overall = body
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        if total > 0 && connected.len() == total && overall == "healthy" {
+            return Check::ok(
+                "Discord Bot",
+                format!(
+                    "{}/{} connected — {}",
+                    connected.len(),
+                    total,
+                    connected.join(", ")
+                ),
+            );
+        }
+        if total == 0 {
+            return Check::fail(
+                "Discord Bot",
+                format!("no providers registered in unified health payload — {base}"),
+            );
+        }
+        return Check::fail(
+            "Discord Bot",
+            format!(
+                "overall={overall}, connected={}/{}, offline={}",
+                connected.len(),
+                total,
+                if disconnected.is_empty() {
+                    "-".to_string()
+                } else {
+                    disconnected.join(", ")
+                }
+            ),
+        );
+    }
+
+    let ok = body.get("ok").and_then(Value::as_bool).unwrap_or(false);
+    let db = body.get("db").and_then(Value::as_bool).unwrap_or(false);
+    if ok && db {
+        Check::fail(
+            "Discord Bot",
+            format!("standalone health only — provider status unavailable at {base}"),
+        )
+    } else {
+        Check::fail(
+            "Discord Bot",
+            format!("server unhealthy or provider data missing: ok={ok} db={db}"),
+        )
+    }
+}
+
 fn check_discord_bot() -> Check {
     let base = super::client::api_base();
-    let url = format!("{base}/api/health");
-    match ureq::Agent::new().get(&url).call() {
-        Ok(resp) => {
-            if let Ok(body) = resp.into_json::<serde_json::Value>() {
-                let ok = body.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
-                let db = body.get("db").and_then(|v| v.as_bool()).unwrap_or(false);
-                if ok && db {
-                    Check::ok("Discord Bot", format!("healthy — {base}"))
-                } else {
-                    Check::fail("Discord Bot", format!("degraded: ok={ok} db={db}"))
-                }
-            } else {
-                Check::fail("Discord Bot", "invalid response body")
-            }
-        }
+    match super::client::get_json("/api/health") {
+        Ok(body) => discord_bot_check_from_health(&base, &body),
         Err(e) => Check::fail("Discord Bot", format!("unreachable ({e})")),
     }
 }
@@ -75,23 +129,31 @@ fn check_codex_cli() -> Check {
             let ver = String::from_utf8_lossy(&out.stdout).trim().to_string();
             Check::ok("codex CLI", ver)
         }
-        _ => Check::fail("codex CLI", "not found in PATH (optional)"),
+        _ => Check::ok("codex CLI", "not found in PATH (optional)"),
     }
 }
 
 fn check_server_running() -> Check {
     let base = super::client::api_base();
-    let url = format!("{base}/api/health");
-    match ureq::Agent::new().get(&url).call() {
-        Ok(resp) => {
-            if let Ok(body) = resp.into_json::<serde_json::Value>() {
-                let ver = body.get("version").and_then(|v| v.as_str()).unwrap_or("unknown");
-                Check::ok("Server", format!("running v{ver} on {base}"))
-            } else {
-                Check::fail("Server", format!("responded but invalid JSON — {base}"))
-            }
+    match super::client::get_json("/api/health") {
+        Ok(body) => {
+            let ver = body
+                .get("version")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let status = body
+                .get("status")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .or_else(|| {
+                    let ok = body.get("ok").and_then(Value::as_bool).unwrap_or(false);
+                    let db = body.get("db").and_then(Value::as_bool).unwrap_or(false);
+                    Some(if ok && db { "healthy" } else { "degraded" }.to_string())
+                })
+                .unwrap_or_else(|| "unknown".to_string());
+            Check::ok("Server", format!("{status} v{ver} on {base}"))
         }
-        Err(_) => Check::fail("Server", format!("not reachable — {base}")),
+        Err(e) => Check::fail("Server", format!("not reachable — {base} ({e})")),
     }
 }
 
@@ -117,18 +179,18 @@ fn check_db_integrity() -> Check {
         return Check::fail("DB File", format!("{} — not found", db_path.display()));
     }
     match rusqlite::Connection::open(&db_path) {
-        Ok(conn) => match conn.query_row("PRAGMA integrity_check", [], |row| {
-            row.get::<_, String>(0)
-        }) {
-            Ok(result) if result == "ok" => {
-                let size = std::fs::metadata(&db_path)
-                    .map(|m| format!("{:.1} MB", m.len() as f64 / 1_048_576.0))
-                    .unwrap_or_default();
-                Check::ok("DB Integrity", format!("ok — {size}"))
+        Ok(conn) => {
+            match conn.query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0)) {
+                Ok(result) if result == "ok" => {
+                    let size = std::fs::metadata(&db_path)
+                        .map(|m| format!("{:.1} MB", m.len() as f64 / 1_048_576.0))
+                        .unwrap_or_default();
+                    Check::ok("DB Integrity", format!("ok — {size}"))
+                }
+                Ok(result) => Check::fail("DB Integrity", format!("issues: {result}")),
+                Err(e) => Check::fail("DB Integrity", format!("check failed: {e}")),
             }
-            Ok(result) => Check::fail("DB Integrity", format!("issues: {result}")),
-            Err(e) => Check::fail("DB Integrity", format!("check failed: {e}")),
-        },
+        }
         Err(e) => Check::fail("DB File", format!("cannot open: {e}")),
     }
 }
@@ -152,7 +214,7 @@ fn check_disk_usage() -> Check {
     }
 }
 
-pub fn cmd_doctor() {
+pub fn cmd_doctor() -> Result<(), String> {
     println!("AgentDesk Doctor v{}\n", env!("CARGO_PKG_VERSION"));
 
     let checks = vec![
@@ -180,5 +242,50 @@ pub fn cmd_doctor() {
         }
     }
 
-    println!("\n  {pass_count} passed, {fail_count} failed out of {} checks", checks.len());
+    println!(
+        "\n  {pass_count} passed, {fail_count} failed out of {} checks",
+        checks.len()
+    );
+
+    if fail_count > 0 {
+        Err(format!("{fail_count} diagnostic check(s) failed"))
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::discord_bot_check_from_health;
+    use serde_json::json;
+
+    #[test]
+    fn unified_health_requires_connected_providers() {
+        let check = discord_bot_check_from_health(
+            "http://127.0.0.1:8791",
+            &json!({
+                "status": "healthy",
+                "providers": [
+                    {"name": "claude", "connected": true},
+                    {"name": "codex", "connected": true}
+                ]
+            }),
+        );
+        assert!(check.pass);
+        assert!(check.detail.contains("2/2 connected"));
+    }
+
+    #[test]
+    fn standalone_health_does_not_count_as_discord_health() {
+        let check = discord_bot_check_from_health(
+            "http://127.0.0.1:8791",
+            &json!({
+                "ok": true,
+                "db": true,
+                "version": "0.1.0"
+            }),
+        );
+        assert!(!check.pass);
+        assert!(check.detail.contains("standalone health only"));
+    }
 }

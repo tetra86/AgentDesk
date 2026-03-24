@@ -91,6 +91,16 @@ enum ConfigAction {
     },
 }
 
+fn exit_for_cli(result: std::result::Result<(), String>) -> Result<()> {
+    match result {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
 
@@ -360,39 +370,34 @@ fn main() -> Result<()> {
     match parsed {
         Ok(cli) => match cli.command {
             Some(Commands::Status) => {
-                cli::client::cmd_status();
-                return Ok(());
+                return exit_for_cli(cli::client::cmd_status());
             }
             Some(Commands::Cards { status }) => {
-                cli::client::cmd_cards(status.as_deref());
-                return Ok(());
+                return exit_for_cli(cli::client::cmd_cards(status.as_deref()));
             }
             Some(Commands::Dispatch { action }) => {
-                match action {
+                return exit_for_cli(match action {
                     DispatchAction::List => cli::client::cmd_dispatch_list(),
                     DispatchAction::Retry { card_id } => cli::client::cmd_dispatch_retry(&card_id),
-                    DispatchAction::Redispatch { card_id } => cli::client::cmd_dispatch_redispatch(&card_id),
-                }
-                return Ok(());
+                    DispatchAction::Redispatch { card_id } => {
+                        cli::client::cmd_dispatch_redispatch(&card_id)
+                    }
+                });
             }
             Some(Commands::Agents) => {
-                cli::client::cmd_agents();
-                return Ok(());
+                return exit_for_cli(cli::client::cmd_agents());
             }
             Some(Commands::Config { action }) => {
-                match action {
+                return exit_for_cli(match action {
                     ConfigAction::Get => cli::client::cmd_config_get(),
                     ConfigAction::Set { json } => cli::client::cmd_config_set(&json),
-                }
-                return Ok(());
+                });
             }
             Some(Commands::Api { method, path, body }) => {
-                cli::client::cmd_api(&method, &path, body.as_deref());
-                return Ok(());
+                return exit_for_cli(cli::client::cmd_api(&method, &path, body.as_deref()));
             }
             Some(Commands::Doctor) => {
-                cli::doctor::cmd_doctor();
-                return Ok(());
+                return exit_for_cli(cli::doctor::cmd_doctor());
             }
             None => {
                 // No subcommand — fall through to server start
@@ -435,8 +440,13 @@ fn main() -> Result<()> {
             config.server.port
         );
 
-        tokio::try_join!(server::run(config.clone(), db.clone(), engine.clone(), None),)
-            .expect("Server error");
+        tokio::try_join!(server::run(
+            config.clone(),
+            db.clone(),
+            engine.clone(),
+            None
+        ),)
+        .expect("Server error");
     });
 
     Ok(())
