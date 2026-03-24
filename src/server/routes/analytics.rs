@@ -546,10 +546,11 @@ pub async fn machine_status(
             arr.iter()
                 .filter_map(|m| {
                     let name = m.get("name")?.as_str()?.to_string();
-                    let host = m
-                        .get("host")
-                        .and_then(|h| h.as_str())
-                        .unwrap_or_else(|| m.get("name").and_then(|n| n.as_str()).unwrap_or("localhost"));
+                    let host = m.get("host").and_then(|h| h.as_str()).unwrap_or_else(|| {
+                        m.get("name")
+                            .and_then(|n| n.as_str())
+                            .unwrap_or("localhost")
+                    });
                     Some((name, format!("{}.local", host)))
                 })
                 .collect()

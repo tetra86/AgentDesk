@@ -180,10 +180,7 @@ async fn archive_meeting_thread(thread_channel_id: ChannelId) {
         None => return,
     };
 
-    let url = format!(
-        "https://discord.com/api/v10/channels/{}",
-        thread_channel_id
-    );
+    let url = format!("https://discord.com/api/v10/channels/{}", thread_channel_id);
     let client = reqwest::Client::new();
     let _ = client
         .patch(&url)
@@ -498,7 +495,9 @@ pub(super) async fn start_meeting(
             .await;
 
         let consensus =
-            match run_meeting_round(http, channel_id, msg_channel, &meeting_id, round, shared).await? {
+            match run_meeting_round(http, channel_id, msg_channel, &meeting_id, round, shared)
+                .await?
+            {
                 Some(consensus) => consensus,
                 None => {
                     cleanup_meeting_if_current(shared, channel_id, &meeting_id).await;

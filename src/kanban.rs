@@ -540,7 +540,9 @@ fn notify_pmd_violation(
         .ok();
 
     let Some(km_channel) = km_channel else {
-        tracing::debug!("[kanban] No kanban_manager_channel_id configured, skipping violation alert");
+        tracing::debug!(
+            "[kanban] No kanban_manager_channel_id configured, skipping violation alert"
+        );
         return;
     };
     let Some(channel_num) = km_channel.parse::<u64>().ok() else {
@@ -675,9 +677,15 @@ mod tests {
         seed_dispatch(&db, "card-completed", "completed");
 
         let result = transition_status(&db, &engine, "card-completed", "in_progress");
-        assert!(result.is_err(), "completed dispatch should NOT authorize transition");
+        assert!(
+            result.is_err(),
+            "completed dispatch should NOT authorize transition"
+        );
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("active dispatch"), "error should mention active dispatch");
+        assert!(
+            err.contains("active dispatch"),
+            "error should mention active dispatch"
+        );
     }
 
     #[test]
@@ -688,7 +696,10 @@ mod tests {
         seed_dispatch(&db, "card-pending", "pending");
 
         let result = transition_status(&db, &engine, "card-pending", "in_progress");
-        assert!(result.is_ok(), "pending dispatch should authorize transition");
+        assert!(
+            result.is_ok(),
+            "pending dispatch should authorize transition"
+        );
     }
 
     #[test]
@@ -699,7 +710,10 @@ mod tests {
         seed_dispatch(&db, "card-dispatched", "dispatched");
 
         let result = transition_status(&db, &engine, "card-dispatched", "in_progress");
-        assert!(result.is_ok(), "dispatched status should authorize transition");
+        assert!(
+            result.is_ok(),
+            "dispatched status should authorize transition"
+        );
     }
 
     #[test]
@@ -720,7 +734,10 @@ mod tests {
         seed_card(&db, "card-free", "backlog");
 
         let result = transition_status(&db, &engine, "card-free", "ready");
-        assert!(result.is_ok(), "backlog → ready should work without dispatch");
+        assert!(
+            result.is_ok(),
+            "backlog → ready should work without dispatch"
+        );
     }
 
     #[test]
@@ -730,7 +747,8 @@ mod tests {
         seed_card(&db, "card-force", "requested");
         // No dispatch, but force=true
 
-        let result = transition_status_with_opts(&db, &engine, "card-force", "in_progress", "pmd", true);
+        let result =
+            transition_status_with_opts(&db, &engine, "card-force", "in_progress", "pmd", true);
         assert!(result.is_ok(), "force=true should bypass dispatch check");
     }
 }

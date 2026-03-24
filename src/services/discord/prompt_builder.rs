@@ -67,7 +67,11 @@ pub(super) fn build_system_prompt(
         discord_token_hash(token),
         disabled_notice,
         // ReviewLite: omit skills to save tokens — reviewer only submits verdict
-        if profile == DispatchProfile::ReviewLite { "" } else { skills_notice }
+        if profile == DispatchProfile::ReviewLite {
+            ""
+        } else {
+            skills_notice
+        }
     );
 
     if let Some(binding) = role_binding {
@@ -266,14 +270,28 @@ mod tests {
     #[test]
     fn test_review_lite_omits_skills() {
         let with_skills = build_system_prompt(
-            "ctx", "/tmp", ChannelId::new(1), "tok", "",
+            "ctx",
+            "/tmp",
+            ChannelId::new(1),
+            "tok",
+            "",
             "\n\nAvailable skills:\n  - /commit: Commit changes",
-            None, false, DispatchProfile::Full, None,
+            None,
+            false,
+            DispatchProfile::Full,
+            None,
         );
         let without_skills = build_system_prompt(
-            "ctx", "/tmp", ChannelId::new(1), "tok", "",
+            "ctx",
+            "/tmp",
+            ChannelId::new(1),
+            "tok",
+            "",
             "\n\nAvailable skills:\n  - /commit: Commit changes",
-            None, false, DispatchProfile::ReviewLite, Some("review"),
+            None,
+            false,
+            DispatchProfile::ReviewLite,
+            Some("review"),
         );
         assert!(with_skills.contains("Available skills"));
         assert!(!without_skills.contains("Available skills"));
@@ -291,12 +309,28 @@ mod tests {
             model: None,
         };
         let review_prompt = build_system_prompt(
-            "ctx", "/tmp", ChannelId::new(1), "tok", "", "",
-            Some(&binding), false, DispatchProfile::ReviewLite, Some("review"),
+            "ctx",
+            "/tmp",
+            ChannelId::new(1),
+            "tok",
+            "",
+            "",
+            Some(&binding),
+            false,
+            DispatchProfile::ReviewLite,
+            Some("review"),
         );
         let decision_prompt = build_system_prompt(
-            "ctx", "/tmp", ChannelId::new(1), "tok", "", "",
-            Some(&binding), false, DispatchProfile::ReviewLite, Some("review-decision"),
+            "ctx",
+            "/tmp",
+            ChannelId::new(1),
+            "tok",
+            "",
+            "",
+            Some(&binding),
+            false,
+            DispatchProfile::ReviewLite,
+            Some("review-decision"),
         );
         // review should NOT contain decision API
         assert!(!review_prompt.contains("/api/review-decision"));

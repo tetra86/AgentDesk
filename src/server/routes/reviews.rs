@@ -154,7 +154,12 @@ pub async fn trigger_rework(
 
     drop(conn);
     match crate::kanban::transition_status_with_opts(
-        &state.db, &state.engine, &card_id, "in_progress", "trigger-rework", true,
+        &state.db,
+        &state.engine,
+        &card_id,
+        "in_progress",
+        "trigger-rework",
+        true,
     ) {
         Ok(_) => (StatusCode::OK, Json(json!({"ok": true}))),
         Err(e) => (

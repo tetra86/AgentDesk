@@ -270,10 +270,7 @@ pub async fn submit_verdict(
             Some("completed") => "dispatch already completed",
             _ => "dispatch not found",
         };
-        return (
-            StatusCode::CONFLICT,
-            Json(json!({"error": msg})),
-        );
+        return (StatusCode::CONFLICT, Json(json!({"error": msg})));
     }
 
     // Find associated card
@@ -782,7 +779,12 @@ mod tests {
         .await;
 
         assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert!(body.0["error"].as_str().unwrap().contains("review-decision"));
+        assert!(
+            body.0["error"]
+                .as_str()
+                .unwrap()
+                .contains("review-decision")
+        );
     }
 
     #[tokio::test]
@@ -842,8 +844,14 @@ mod tests {
             .unwrap();
 
         assert_eq!(card_status, "done", "card should be done after dismiss");
-        assert_eq!(review_status, None, "review_status should be cleared after dismiss");
-        assert_eq!(dispatch_status, "cancelled", "pending review-decision dispatch should be cancelled");
+        assert_eq!(
+            review_status, None,
+            "review_status should be cleared after dismiss"
+        );
+        assert_eq!(
+            dispatch_status, "cancelled",
+            "pending review-decision dispatch should be cancelled"
+        );
     }
 
     /// Regression test: cancelled dispatch must not be promoted to completed via verdict API.
@@ -887,7 +895,11 @@ mod tests {
         )
         .await;
 
-        assert_eq!(status, StatusCode::CONFLICT, "cancelled dispatch should not accept verdict");
+        assert_eq!(
+            status,
+            StatusCode::CONFLICT,
+            "cancelled dispatch should not accept verdict"
+        );
         assert!(body.0["error"].as_str().unwrap().contains("cancelled"));
 
         let conn = db.lock().unwrap();
@@ -898,11 +910,19 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(dispatch_status, "cancelled", "dispatch must remain cancelled");
+        assert_eq!(
+            dispatch_status, "cancelled",
+            "dispatch must remain cancelled"
+        );
     }
 
     /// Seed a review dispatch with provider tracking in context (counter-model review).
-    fn seed_counter_model_review(db: &Db, dispatch_id: &str, from_provider: &str, target_provider: &str) {
+    fn seed_counter_model_review(
+        db: &Db,
+        dispatch_id: &str,
+        from_provider: &str,
+        target_provider: &str,
+    ) {
         let conn = db.lock().unwrap();
         conn.execute(
             "INSERT OR IGNORE INTO agents (id, name, discord_channel_id, discord_channel_alt) VALUES ('agent-cm', 'Agent CM', 'ch-cc', 'ch-cdx')",
@@ -911,7 +931,8 @@ mod tests {
         let context = serde_json::json!({
             "from_provider": from_provider,
             "target_provider": target_provider,
-        }).to_string();
+        })
+        .to_string();
         conn.execute(
             "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, latest_dispatch_id, review_status, created_at, updated_at)
              VALUES ('card-cm', 'Counter Model Test', 'review', 'agent-cm', ?1, 'reviewing', datetime('now'), datetime('now'))",
@@ -1008,7 +1029,12 @@ mod tests {
         .await;
 
         assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert!(body.0["error"].as_str().unwrap().contains("provider field is required"));
+        assert!(
+            body.0["error"]
+                .as_str()
+                .unwrap()
+                .contains("provider field is required")
+        );
     }
 
     #[tokio::test]
@@ -1124,7 +1150,12 @@ mod tests {
         .await;
 
         assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert!(body.0["error"].as_str().unwrap().contains("unknown provider"));
+        assert!(
+            body.0["error"]
+                .as_str()
+                .unwrap()
+                .contains("unknown provider")
+        );
     }
 
     #[tokio::test]

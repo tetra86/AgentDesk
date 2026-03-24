@@ -204,37 +204,62 @@ pub fn load() -> Result<Config> {
     Ok(config)
 }
 
+fn resolve_graceful_config_path(
+    explicit: Option<std::path::PathBuf>,
+    runtime_root: Option<std::path::PathBuf>,
+    cwd: Option<std::path::PathBuf>,
+    home_dir: Option<std::path::PathBuf>,
+) -> std::path::PathBuf {
+    if let Some(path) = explicit {
+        return path;
+    }
+    if let Some(root) = runtime_root {
+        let path = root.join("agentdesk.yaml");
+        if path.exists() {
+            return path;
+        }
+    }
+    if let Some(dir) = cwd {
+        let path = dir.join("agentdesk.yaml");
+        if path.exists() {
+            return path;
+        }
+    }
+    if let Some(home) = home_dir {
+        let path = home.join(".adk").join("release").join("agentdesk.yaml");
+        if path.exists() {
+            return path;
+        }
+    }
+    std::path::PathBuf::from("agentdesk.yaml")
+}
+
 /// Load config gracefully — returns Config::default() if the file doesn't exist
 /// or fails to parse, instead of panicking.
-/// Searches: $AGENTDESK_CONFIG → $AGENTDESK_ROOT_DIR/agentdesk.yaml → ~/.adk/release/agentdesk.yaml → CWD/agentdesk.yaml
+/// Searches: $AGENTDESK_CONFIG → $AGENTDESK_ROOT_DIR/agentdesk.yaml → CWD/agentdesk.yaml → ~/.adk/release/agentdesk.yaml
 pub fn load_graceful() -> Config {
-    let path = std::env::var("AGENTDESK_CONFIG").unwrap_or_else(|_| {
-        // Try runtime root paths before falling back to CWD
-        if let Ok(root) = std::env::var("AGENTDESK_ROOT_DIR") {
-            let p = std::path::PathBuf::from(root.trim()).join("agentdesk.yaml");
-            if p.exists() {
-                return p.to_string_lossy().into_owned();
-            }
-        }
-        if let Some(home) = dirs::home_dir() {
-            let p = home.join(".adk").join("release").join("agentdesk.yaml");
-            if p.exists() {
-                return p.to_string_lossy().into_owned();
-            }
-        }
-        "agentdesk.yaml".into()
-    });
+    let path = resolve_graceful_config_path(
+        std::env::var("AGENTDESK_CONFIG")
+            .ok()
+            .map(std::path::PathBuf::from),
+        std::env::var("AGENTDESK_ROOT_DIR")
+            .ok()
+            .map(|root| std::path::PathBuf::from(root.trim())),
+        std::env::current_dir().ok(),
+        dirs::home_dir(),
+    );
+    let path_display = path.display().to_string();
 
     let config = match std::fs::read_to_string(&path) {
         Ok(contents) => match serde_yaml::from_str::<Config>(&contents) {
             Ok(cfg) => cfg,
             Err(e) => {
-                eprintln!("  ⚠ Failed to parse {path}: {e} — using defaults");
+                eprintln!("  ⚠ Failed to parse {path_display}: {e} — using defaults");
                 Config::default()
             }
         },
         Err(_) => {
-            eprintln!("  ⚠ {path} not found — using defaults");
+            eprintln!("  ⚠ {path_display} not found — using defaults");
             Config::default()
         }
     };
@@ -243,6 +268,72 @@ pub fn load_graceful() -> Config {
     let _ = std::fs::create_dir_all(&config.data.dir);
 
     config
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_graceful_config_path;
+    use std::path::PathBuf;
+
+    fn make_temp_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "agentdesk-config-test-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn resolve_graceful_config_path_prefers_runtime_root_before_cwd() {
+        let root = make_temp_dir("root-first");
+        let cwd = make_temp_dir("cwd-second");
+        let home = make_temp_dir("home-third");
+        std::fs::write(root.join("agentdesk.yaml"), "server:\n  port: 9001\n").unwrap();
+        std::fs::write(cwd.join("agentdesk.yaml"), "server:\n  port: 9002\n").unwrap();
+        std::fs::create_dir_all(home.join(".adk").join("release")).unwrap();
+        std::fs::write(
+            home.join(".adk").join("release").join("agentdesk.yaml"),
+            "server:\n  port: 9003\n",
+        )
+        .unwrap();
+
+        let resolved = resolve_graceful_config_path(
+            None,
+            Some(root.clone()),
+            Some(cwd.clone()),
+            Some(home.clone()),
+        );
+        assert_eq!(resolved, root.join("agentdesk.yaml"));
+
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(cwd);
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn resolve_graceful_config_path_prefers_cwd_before_release_home() {
+        let cwd = make_temp_dir("cwd-before-release");
+        let home = make_temp_dir("release-fallback");
+        std::fs::write(cwd.join("agentdesk.yaml"), "server:\n  port: 9101\n").unwrap();
+        std::fs::create_dir_all(home.join(".adk").join("release")).unwrap();
+        std::fs::write(
+            home.join(".adk").join("release").join("agentdesk.yaml"),
+            "server:\n  port: 9102\n",
+        )
+        .unwrap();
+
+        let resolved =
+            resolve_graceful_config_path(None, None, Some(cwd.clone()), Some(home.clone()));
+        assert_eq!(resolved, cwd.join("agentdesk.yaml"));
+
+        let _ = std::fs::remove_dir_all(cwd);
+        let _ = std::fs::remove_dir_all(home);
+    }
 }
 
 /// Compatibility shim: RCC's `config::Settings` is referenced by discord code

@@ -958,7 +958,6 @@ pub(super) async fn restore_tmux_watchers(http: &Arc<serenity::Http>, shared: &A
                         born_generation: super::runtime_store::load_generation(),
                     });
 
-
             // Restore current_path from saved settings so message handler accepts messages
             if session.current_path.is_none() {
                 if let Some(path) = last_path {
@@ -1183,8 +1182,7 @@ pub(super) async fn reap_dead_tmux_sessions(shared: &Arc<SharedData>) {
 
     for session_name in output.lines() {
         let session_name = session_name.trim();
-        let Some((session_provider, _)) =
-            parse_provider_and_channel_from_tmux_name(session_name)
+        let Some((session_provider, _)) = parse_provider_and_channel_from_tmux_name(session_name)
         else {
             continue;
         };
@@ -1224,9 +1222,8 @@ pub(super) async fn reap_dead_tmux_sessions(shared: &Arc<SharedData>) {
         }
 
         // Dead session with no watcher — report idle to DB and kill
-        let tmux_name = provider.build_tmux_session_name(
-            channel_name.as_deref().unwrap_or("unknown"),
-        );
+        let tmux_name =
+            provider.build_tmux_session_name(channel_name.as_deref().unwrap_or("unknown"));
         let hostname = std::process::Command::new("hostname")
             .arg("-s")
             .output()
@@ -1242,8 +1239,7 @@ pub(super) async fn reap_dead_tmux_sessions(shared: &Arc<SharedData>) {
             .and_then(|n| {
                 let pos = n.rfind("-t")?;
                 let suffix = &n[pos + 2..];
-                (suffix.len() >= 15 && suffix.chars().all(|c| c.is_ascii_digit()))
-                    .then_some(())
+                (suffix.len() >= 15 && suffix.chars().all(|c| c.is_ascii_digit())).then_some(())
             })
             .is_some();
 

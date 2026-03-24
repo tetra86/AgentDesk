@@ -150,7 +150,10 @@ fn normalize_host(host: &str) -> Option<String> {
 }
 
 fn heartbeat_is_recent(last_heartbeat: Option<&str>, now: DateTime<Utc>) -> bool {
-    let Some(raw) = last_heartbeat.map(str::trim).filter(|value| !value.is_empty()) else {
+    let Some(raw) = last_heartbeat
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
         return false;
     };
     let parsed = DateTime::parse_from_rfc3339(raw)
@@ -185,7 +188,11 @@ mod tests {
             Some("mac-mini:AgentDesk-claude-ad"),
             Some("working"),
             Some("dispatch-1"),
-            Some(&(now - Duration::seconds(5)).format("%Y-%m-%d %H:%M:%S").to_string()),
+            Some(
+                &(now - Duration::seconds(5))
+                    .format("%Y-%m-%d %H:%M:%S")
+                    .to_string(),
+            ),
             now,
             &mut probe,
         );

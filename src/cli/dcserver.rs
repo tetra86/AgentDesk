@@ -766,7 +766,9 @@ pub fn handle_restart_dcserver(
             }
             Err(e) => {
                 eprintln!("❌ Windows service restart failed: {e}");
-                eprintln!("   Hint: check with 'nssm status {WINDOWS_SERVICE_NAME}' or 'sc query {WINDOWS_SERVICE_NAME}'");
+                eprintln!(
+                    "   Hint: check with 'nssm status {WINDOWS_SERVICE_NAME}' or 'sc query {WINDOWS_SERVICE_NAME}'"
+                );
                 write_restart_report(
                     "failed",
                     format!(
@@ -1027,7 +1029,10 @@ pub fn handle_dcserver(token: Option<String>) {
                         let http_config = ad_config.clone();
                         let registry_for_http = health_registry.clone();
                         tokio::spawn(async move {
-                            if let Err(e) = server::run(http_config, ad_db, engine, Some(registry_for_http)).await {
+                            if let Err(e) =
+                                server::run(http_config, ad_db, engine, Some(registry_for_http))
+                                    .await
+                            {
                                 eprintln!("  ⚠ HTTP server error: {e}");
                             }
                         });

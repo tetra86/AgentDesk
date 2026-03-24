@@ -85,12 +85,7 @@ const CONFIG_KEYS: &[(&str, &str, &str, &str)] = &[
         "PM 판단 게이트",
         "PM Decision Gate",
     ),
-    (
-        "server_port",
-        "system",
-        "서버 포트",
-        "Server Port",
-    ),
+    ("server_port", "system", "서버 포트", "Server Port"),
 ];
 
 /// GET /api/settings/config
@@ -166,7 +161,10 @@ pub async fn patch_config_entries(
         updated += 1;
     }
     if !rejected.is_empty() {
-        tracing::warn!("patch_config_entries: rejected unknown keys: {:?}", rejected);
+        tracing::warn!(
+            "patch_config_entries: rejected unknown keys: {:?}",
+            rejected
+        );
     }
     (
         StatusCode::OK,

@@ -38,7 +38,11 @@ fn build_cron_jobs(state: &AppState, agent_filter: Option<&str>) -> Vec<serde_js
         })
         .unwrap_or_else(|| "unknown".to_string());
 
-    let next_tick_ms = if last_tick_ms == 0 { 0 } else { last_tick_ms + 60000 };
+    let next_tick_ms = if last_tick_ms == 0 {
+        0
+    } else {
+        last_tick_ms + 60000
+    };
 
     policies
         .iter()

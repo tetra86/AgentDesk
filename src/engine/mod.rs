@@ -142,7 +142,10 @@ impl PolicyEngine {
         {
             let ts = chrono::Local::now().format("%H:%M:%S");
             let names: Vec<&str> = hook_fns.iter().map(|(n, _)| n.as_str()).collect();
-            println!("  [{ts}] 🔥 fire_hook({hook}) → {names:?} ({} policies)", hook_fns.len());
+            println!(
+                "  [{ts}] 🔥 fire_hook({hook}) → {names:?} ({} policies)",
+                hook_fns.len()
+            );
         }
 
         // Execute each hook function in the QuickJS context

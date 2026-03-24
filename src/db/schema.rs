@@ -44,7 +44,8 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     let _ = conn.execute_batch("ALTER TABLE agents ADD COLUMN description TEXT;");
     let _ = conn.execute_batch("ALTER TABLE agents ADD COLUMN system_prompt TEXT;");
     let _ = conn.execute_batch("ALTER TABLE task_dispatches ADD COLUMN thread_id TEXT;");
-    let _ = conn.execute_batch("ALTER TABLE task_dispatches ADD COLUMN retry_count INTEGER DEFAULT 0;");
+    let _ =
+        conn.execute_batch("ALTER TABLE task_dispatches ADD COLUMN retry_count INTEGER DEFAULT 0;");
     let _ = conn.execute_batch("ALTER TABLE meetings ADD COLUMN thread_id TEXT;");
     let _ = conn.execute_batch("ALTER TABLE sessions ADD COLUMN thread_channel_id TEXT;");
 
@@ -205,9 +206,7 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         )
         .unwrap_or(0);
     if cleaned > 0 {
-        tracing::info!(
-            "Cleaned {cleaned} done cards with stale review_status (fix #80)"
-        );
+        tracing::info!("Cleaned {cleaned} done cards with stale review_status (fix #80)");
     }
     // Cancel stale pending review/review-decision dispatches for done cards
     let cancelled = conn
@@ -220,9 +219,7 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         )
         .unwrap_or(0);
     if cancelled > 0 {
-        tracing::info!(
-            "Cancelled {cancelled} stale review dispatches for done cards (fix #80)"
-        );
+        tracing::info!("Cancelled {cancelled} stale review dispatches for done cards (fix #80)");
     }
 
     // Rate limit cache table (provider → cached rate-limit JSON)

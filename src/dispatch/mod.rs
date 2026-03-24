@@ -50,7 +50,12 @@ pub fn create_dispatch(
                     if let Ok((ch, alt)) = conn.query_row(
                         "SELECT discord_channel_id, discord_channel_alt FROM agents WHERE id = ?1",
                         [to_agent_id],
-                        |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?)),
+                        |row| {
+                            Ok((
+                                row.get::<_, Option<String>>(0)?,
+                                row.get::<_, Option<String>>(1)?,
+                            ))
+                        },
                     ) {
                         if !obj.contains_key("from_provider") {
                             if let Some(fp) = ch.as_deref().and_then(provider_from_channel_suffix) {
@@ -58,7 +63,8 @@ pub fn create_dispatch(
                             }
                         }
                         if !obj.contains_key("target_provider") {
-                            if let Some(tp) = alt.as_deref().and_then(provider_from_channel_suffix) {
+                            if let Some(tp) = alt.as_deref().and_then(provider_from_channel_suffix)
+                            {
                                 obj.insert("target_provider".to_string(), json!(tp));
                             }
                         }
@@ -165,7 +171,9 @@ pub fn complete_dispatch(
             .unwrap_or(false);
         if exists {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            println!("  [{ts}] ⏭ complete_dispatch: {dispatch_id} already completed/cancelled, skipping hooks");
+            println!(
+                "  [{ts}] ⏭ complete_dispatch: {dispatch_id} already completed/cancelled, skipping hooks"
+            );
             let dispatch = query_dispatch_row(&conn, dispatch_id)?;
             drop(conn);
             return Ok(dispatch);
@@ -424,7 +432,10 @@ mod tests {
         // Should return Ok (dispatch found) but status should remain cancelled
         assert!(result.is_ok());
         let returned = result.unwrap();
-        assert_eq!(returned["status"], "cancelled", "cancelled dispatch must not be re-completed");
+        assert_eq!(
+            returned["status"], "cancelled",
+            "cancelled dispatch must not be re-completed"
+        );
     }
 
     #[test]
@@ -460,6 +471,9 @@ mod tests {
             "Reopen work",
             &json!({}),
         );
-        assert!(result.is_ok(), "implementation dispatch should be allowed for done card");
+        assert!(
+            result.is_ok(),
+            "implementation dispatch should be allowed for done card"
+        );
     }
 }

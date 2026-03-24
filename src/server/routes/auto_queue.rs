@@ -211,7 +211,10 @@ pub async fn generate(
         // Provide context: how many cards are in backlog vs other statuses
         // Uses the same repo + agent_id filters as the main ready query
         let count_with_filters = |status_val: &str| -> i64 {
-            let mut sql = format!("SELECT COUNT(*) FROM kanban_cards WHERE status = '{}'", status_val);
+            let mut sql = format!(
+                "SELECT COUNT(*) FROM kanban_cards WHERE status = '{}'",
+                status_val
+            );
             let mut count_params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
             if let Some(ref repo) = body.repo {
                 count_params.push(Box::new(repo.clone()));
@@ -221,8 +224,10 @@ pub async fn generate(
                 count_params.push(Box::new(agent_id.clone()));
                 sql.push_str(&format!(" AND assigned_agent_id = ?{}", count_params.len()));
             }
-            let refs: Vec<&dyn rusqlite::types::ToSql> = count_params.iter().map(|p| p.as_ref()).collect();
-            conn.query_row(&sql, refs.as_slice(), |row| row.get(0)).unwrap_or(0)
+            let refs: Vec<&dyn rusqlite::types::ToSql> =
+                count_params.iter().map(|p| p.as_ref()).collect();
+            conn.query_row(&sql, refs.as_slice(), |row| row.get(0))
+                .unwrap_or(0)
         };
         let backlog_count: i64 = count_with_filters("backlog");
         let in_progress_count: i64 = count_with_filters("in_progress");
@@ -552,21 +557,27 @@ pub async fn activate(
     // Stale empty run cleanup: after generate()/enqueue() fixes, normal paths never
     // leave an active run with 0 entries.  Any such run is legacy corruption — complete
     // it immediately instead of auto-populating with unrelated ready cards (#85).
-    let entry_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM auto_queue_entries WHERE run_id = ?1",
-        [&run_id],
-        |row| row.get(0),
-    ).unwrap_or(0);
+    let entry_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM auto_queue_entries WHERE run_id = ?1",
+            [&run_id],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
 
     if entry_count == 0 {
         conn.execute(
             "UPDATE auto_queue_runs SET status = 'completed', completed_at = datetime('now') WHERE id = ?1",
             [&run_id],
         ).ok();
-        tracing::info!("[auto-queue] Completed stale empty run {run_id} — no entries, skipping fallback populate (#85)");
+        tracing::info!(
+            "[auto-queue] Completed stale empty run {run_id} — no entries, skipping fallback populate (#85)"
+        );
         return (
             StatusCode::OK,
-            Json(json!({ "dispatched": [], "count": 0, "message": "Stale empty run completed — no entries to dispatch" })),
+            Json(
+                json!({ "dispatched": [], "count": 0, "message": "Stale empty run completed — no entries to dispatch" }),
+            ),
         );
     }
 
@@ -621,7 +632,9 @@ pub async fn activate(
 
         let conn_reacquired = state.db.lock().unwrap();
         if dispatch_result.is_err() {
-            tracing::error!("[auto-queue] create_dispatch failed for entry {entry_id}, leaving as pending for retry");
+            tracing::error!(
+                "[auto-queue] create_dispatch failed for entry {entry_id}, leaving as pending for retry"
+            );
             drop(conn_reacquired);
             conn = state.db.lock().unwrap();
             continue;
@@ -1189,7 +1202,9 @@ pub async fn submit_order(
 
     // Only activate if at least one card was enqueued; otherwise leave as pending
     // to prevent the activate() fallback from filling the run with unintended cards
-    let rationale = body.rationale.as_deref()
+    let rationale = body
+        .rationale
+        .as_deref()
         .or(body.reasoning.as_deref())
         .unwrap_or("PMD 분석 완료");
     if created > 0 {
@@ -1204,7 +1219,10 @@ pub async fn submit_order(
         );
         conn.execute(
             "UPDATE auto_queue_runs SET status = 'completed', ai_rationale = ?1 WHERE id = ?2",
-            rusqlite::params![format!("{rationale} (no ready cards — auto-completed)"), run_id],
+            rusqlite::params![
+                format!("{rationale} (no ready cards — auto-completed)"),
+                run_id
+            ],
         )
         .ok();
     }

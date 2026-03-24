@@ -154,7 +154,10 @@ pub(super) async fn delete_adk_session(session_key: &str, api_port: u16) {
     {
         Ok(resp) if !resp.status().is_success() => {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            eprintln!("  [{ts}] ⚠ ADK session DELETE failed: HTTP {}", resp.status());
+            eprintln!(
+                "  [{ts}] ⚠ ADK session DELETE failed: HTTP {}",
+                resp.status()
+            );
         }
         Err(e) => {
             let ts = chrono::Local::now().format("%H:%M:%S");
