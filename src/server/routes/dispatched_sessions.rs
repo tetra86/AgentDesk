@@ -94,6 +94,11 @@ pub struct HookSessionBody {
     pub dispatch_id: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct DeleteSessionQuery {
+    pub session_key: String,
+}
+
 // ── Handlers ──────────────────────────────────────────────────
 
 /// GET /api/dispatched-sessions
@@ -206,6 +211,10 @@ pub async fn list_dispatched_sessions(
                     row.last_heartbeat.as_deref(),
                 );
                 if !include_all && !effective.is_working && effective.active_dispatch_id.is_none() {
+                    return None;
+                }
+                // Hide idle/disconnected thread sessions in default view
+                if !include_all && row.thread_channel_id.is_some() && !effective.is_working {
                     return None;
                 }
                 Some(json!({
@@ -453,13 +462,56 @@ pub async fn cleanup_sessions(
         }
     };
 
-    match conn.execute("DELETE FROM sessions WHERE status = 'disconnected'", []) {
+    // Delete disconnected sessions + stale idle thread sessions (1h+)
+    let disconnected = conn
+        .execute("DELETE FROM sessions WHERE status = 'disconnected'", [])
+        .unwrap_or(0);
+    let stale_threads = gc_stale_thread_sessions_db(&conn);
+
+    (
+        StatusCode::OK,
+        Json(json!({"ok": true, "deleted": disconnected, "gc_threads": stale_threads})),
+    )
+}
+
+/// DELETE /api/hook/session — delete a session by session_key
+pub async fn delete_session(
+    State(state): State<AppState>,
+    Query(params): Query<DeleteSessionQuery>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let conn = match state.db.lock() {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{e}")})),
+            );
+        }
+    };
+
+    match conn.execute(
+        "DELETE FROM sessions WHERE session_key = ?1",
+        [&params.session_key],
+    ) {
         Ok(n) => (StatusCode::OK, Json(json!({"ok": true, "deleted": n}))),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": format!("{e}")})),
         ),
     }
+}
+
+/// GC stale thread sessions from DB: idle/disconnected + older than 1 hour.
+/// Thread sessions are identified by having a non-NULL thread_channel_id.
+pub fn gc_stale_thread_sessions_db(conn: &rusqlite::Connection) -> usize {
+    conn.execute(
+        "DELETE FROM sessions
+         WHERE thread_channel_id IS NOT NULL
+           AND status IN ('idle', 'disconnected')
+           AND last_heartbeat < datetime('now', '-1 hour')",
+        [],
+    )
+    .unwrap_or(0)
 }
 
 /// PATCH /api/dispatched-sessions/:id

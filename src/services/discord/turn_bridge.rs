@@ -1112,12 +1112,46 @@ pub(super) fn spawn_turn_bridge(
             {
                 record_tmux_exit_reason(name, "dispatch turn completed — killing thread session");
                 let sess = name.clone();
-                let _ = tokio::task::spawn_blocking(move || {
-                    let _ = std::process::Command::new("tmux")
+                let kill_result = tokio::task::spawn_blocking(move || {
+                    std::process::Command::new("tmux")
                         .args(["kill-session", "-t", &sess])
-                        .output();
+                        .output()
                 })
                 .await;
+                match &kill_result {
+                    Ok(Ok(o)) if !o.status.success() => {
+                        let ts = chrono::Local::now().format("%H:%M:%S");
+                        eprintln!(
+                            "  [{ts}] ⚠ tmux kill-session failed for {}: {}",
+                            name,
+                            String::from_utf8_lossy(&o.stderr)
+                        );
+                    }
+                    Ok(Err(e)) => {
+                        let ts = chrono::Local::now().format("%H:%M:%S");
+                        eprintln!("  [{ts}] ⚠ tmux kill-session error for {name}: {e}");
+                    }
+                    Err(e) => {
+                        let ts = chrono::Local::now().format("%H:%M:%S");
+                        eprintln!("  [{ts}] ⚠ tmux kill-session spawn error for {name}: {e}");
+                    }
+                    _ => {}
+                }
+
+                // Also delete the DB session row for this thread session
+                if let Some(session_key) = super::adk_session::build_adk_session_key(
+                    &shared_owned,
+                    channel_id,
+                    &provider,
+                )
+                .await
+                {
+                    super::adk_session::delete_adk_session(
+                        &session_key,
+                        shared_owned.api_port,
+                    )
+                    .await;
+                }
             }
         }
 

@@ -256,7 +256,11 @@ pub fn api_router(
             "/dispatched-sessions/{id}",
             patch(dispatched_sessions::update_dispatched_session),
         )
-        .route("/hook/session", post(dispatched_sessions::hook_session))
+        .route(
+            "/hook/session",
+            post(dispatched_sessions::hook_session)
+                .delete(dispatched_sessions::delete_session),
+        )
         // Messages
         .route(
             "/messages",

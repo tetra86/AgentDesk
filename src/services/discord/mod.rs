@@ -1518,6 +1518,20 @@ pub async fn run_bot(
                     });
                 }
 
+                // Background: periodic GC for stale thread sessions in DB
+                // (idle/disconnected thread sessions older than 1 hour)
+                {
+                    let api_port = shared_clone.api_port;
+                    tokio::spawn(async move {
+                        // Run every 10 minutes, initial delay 2 minutes
+                        tokio::time::sleep(tokio::time::Duration::from_secs(120)).await;
+                        loop {
+                            gc_stale_thread_sessions_via_api(api_port).await;
+                            tokio::time::sleep(tokio::time::Duration::from_secs(600)).await;
+                        }
+                    });
+                }
+
                 Ok(Data {
                     shared: shared_clone,
                     token: token_owned,
@@ -1996,6 +2010,30 @@ async fn add_reaction(
 }
 
 // ─── Event handler ───────────────────────────────────────────────────────────
+
+/// Periodic GC: delete stale idle/disconnected thread sessions from DB via cleanup API.
+async fn gc_stale_thread_sessions_via_api(api_port: u16) {
+    let url = format!("http://127.0.0.1:{api_port}/api/dispatched-sessions/cleanup");
+    match reqwest::Client::new().delete(&url).send().await {
+        Ok(resp) if resp.status().is_success() => {
+            if let Ok(body) = resp.json::<serde_json::Value>().await {
+                let gc = body.get("gc_threads").and_then(|v| v.as_u64()).unwrap_or(0);
+                if gc > 0 {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    println!("  [{ts}] 🧹 GC: removed {gc} stale thread session(s) from DB");
+                }
+            }
+        }
+        Ok(resp) => {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            eprintln!("  [{ts}] ⚠ Thread session GC failed: HTTP {}", resp.status());
+        }
+        Err(e) => {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            eprintln!("  [{ts}] ⚠ Thread session GC error: {e}");
+        }
+    }
+}
 
 /// Periodically clean up idle sessions and their associated data.
 /// Called from handle_event; uses a static Mutex to track the last cleanup time.

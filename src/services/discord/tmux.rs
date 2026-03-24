@@ -1236,29 +1236,60 @@ pub(super) async fn reap_dead_tmux_sessions(shared: &Arc<SharedData>) {
             .unwrap_or_else(|| "unknown".to_string());
         let session_key = format!("{}:{}", hostname, tmux_name);
 
-        super::adk_session::post_adk_session_status(
-            Some(&session_key),
-            channel_name.as_deref(),
-            None,
-            "idle",
-            &provider,
-            None,
-            None,
-            None,
-            None,
-            api_port,
-        )
-        .await;
+        // Check if this is a thread session (channel name contains -t{15+digit})
+        let is_thread = channel_name
+            .as_deref()
+            .and_then(|n| {
+                let pos = n.rfind("-t")?;
+                let suffix = &n[pos + 2..];
+                (suffix.len() >= 15 && suffix.chars().all(|c| c.is_ascii_digit()))
+                    .then_some(())
+            })
+            .is_some();
+
+        if is_thread {
+            // Thread sessions: delete from DB entirely (they are one-shot)
+            super::adk_session::delete_adk_session(&session_key, api_port).await;
+        } else {
+            // Fixed-channel sessions: just mark idle
+            super::adk_session::post_adk_session_status(
+                Some(&session_key),
+                channel_name.as_deref(),
+                None,
+                "idle",
+                &provider,
+                None,
+                None,
+                None,
+                None,
+                api_port,
+            )
+            .await;
+        }
 
         // Kill the dead tmux session
         let sess = session_name.to_string();
-        let _ = tokio::task::spawn_blocking(move || {
+        let kill_result = tokio::task::spawn_blocking(move || {
             record_tmux_exit_reason(&sess, "reaper: dead session with no watcher");
-            let _ = std::process::Command::new("tmux")
+            std::process::Command::new("tmux")
                 .args(["kill-session", "-t", &sess])
-                .output();
+                .output()
         })
         .await;
+        match &kill_result {
+            Ok(Ok(o)) if !o.status.success() => {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                eprintln!(
+                    "  [{ts}] ⚠ reaper: tmux kill-session failed for {session_name}: {}",
+                    String::from_utf8_lossy(&o.stderr)
+                );
+            }
+            Ok(Err(e)) => {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                eprintln!("  [{ts}] ⚠ reaper: tmux kill-session error for {session_name}: {e}");
+            }
+            _ => {}
+        }
 
         reaped += 1;
     }

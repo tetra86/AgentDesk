@@ -142,6 +142,28 @@ pub(super) async fn post_adk_session_status(
     }
 }
 
+/// Delete a session row from the DB by session_key.
+/// Used to clean up thread sessions after dispatch completion.
+pub(super) async fn delete_adk_session(session_key: &str, api_port: u16) {
+    let url = format!("http://127.0.0.1:{api_port}/api/hook/session");
+    match reqwest::Client::new()
+        .delete(&url)
+        .query(&[("session_key", session_key)])
+        .send()
+        .await
+    {
+        Ok(resp) if !resp.status().is_success() => {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            eprintln!("  [{ts}] ⚠ ADK session DELETE failed: HTTP {}", resp.status());
+        }
+        Err(e) => {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            eprintln!("  [{ts}] ⚠ ADK session DELETE error: {e}");
+        }
+        _ => {}
+    }
+}
+
 fn normalize_user_task_summary(input: &str) -> Option<String> {
     let first_line = input
         .lines()
