@@ -42,19 +42,14 @@ interface RawRateLimitData {
   providers: RawProvider[];
 }
 
-/** Friendly label for GitHub API rate-limit bucket names */
+/** Friendly label for rate-limit bucket names across providers */
 const BUCKET_LABELS: Record<string, string> = {
-  core: "Core",
-  search: "Search",
-  graphql: "GraphQL",
-  code_search: "CodeSearch",
-  code_scanning_upload: "Scan",
-  actions_runner_registration: "Actions",
-  scim: "SCIM",
+  requests: "Req",
+  tokens: "Tok",
 };
 
-/** Only show these buckets for GitHub to avoid clutter; other providers show all */
-const GITHUB_VISIBLE_BUCKETS = new Set(["core", "search", "graphql", "code_search"]);
+/** Providers to exclude from UI display */
+const HIDDEN_PROVIDERS = new Set(["github"]);
 
 function transformRawData(
   raw: RawRateLimitData,
@@ -62,17 +57,13 @@ function transformRawData(
   dangerPct: number,
 ): RateLimitData {
   return {
-    providers: raw.providers.map((rp) => ({
-      provider: rp.provider.charAt(0).toUpperCase() + rp.provider.slice(1),
-      fetched_at: rp.fetched_at,
-      stale: rp.stale,
-      buckets: rp.buckets
-        .filter((b) => {
-          // GitHub: show only key buckets; other providers: show all
-          if (rp.provider.toLowerCase() === "github") return GITHUB_VISIBLE_BUCKETS.has(b.name);
-          return true;
-        })
-        .map((b) => {
+    providers: raw.providers
+      .filter((rp) => !HIDDEN_PROVIDERS.has(rp.provider.toLowerCase()))
+      .map((rp) => ({
+        provider: rp.provider.charAt(0).toUpperCase() + rp.provider.slice(1),
+        fetched_at: rp.fetched_at,
+        stale: rp.stale,
+        buckets: rp.buckets.map((b) => {
           const utilization = b.limit > 0 ? Math.round((b.used / b.limit) * 100) : 0;
           const level: "normal" | "warning" | "danger" =
             utilization >= dangerPct ? "danger" : utilization >= warningPct ? "warning" : "normal";
@@ -86,7 +77,7 @@ function transformRawData(
             level,
           };
         }),
-    })),
+      })),
   };
 }
 
