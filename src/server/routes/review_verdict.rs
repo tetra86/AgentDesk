@@ -4,6 +4,7 @@ use serde_json::json;
 
 use super::AppState;
 use crate::engine::hooks::Hook;
+use crate::services::provider::ProviderKind;
 
 /// Write a review-passed marker file for the reviewed commit.
 /// `promote-release.sh` checks this before allowing release promotion.
@@ -136,21 +137,10 @@ pub async fn submit_verdict(
         .get("target_provider")
         .and_then(|v| v.as_str());
 
-    if let (Some(from_p), Some(_target_p)) = (from_provider, target_provider) {
+    if let (Some(from_p), Some(target_p)) = (from_provider, target_provider) {
         // This is a counter-model review dispatch with provider tracking.
-        // Require provider field to prevent bypass of self-review check.
-        match body.provider {
-            Some(ref submitter) if submitter == from_p => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({
-                        "error": format!(
-                            "self-review rejected: submitting provider '{}' matches implementing provider",
-                            submitter
-                        )
-                    })),
-                );
-            }
+        // Require provider field and normalize via ProviderKind.
+        match &body.provider {
             None => {
                 return (
                     StatusCode::BAD_REQUEST,
@@ -159,7 +149,51 @@ pub async fn submit_verdict(
                     })),
                 );
             }
-            _ => {} // cross-provider → allowed
+            Some(raw_submitter) => {
+                let submitter = ProviderKind::from_str(raw_submitter);
+                let from_kind = ProviderKind::from_str(from_p);
+                let target_kind = ProviderKind::from_str(target_p);
+
+                match submitter {
+                    None => {
+                        // Unknown/unsupported provider string
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({
+                                "error": format!(
+                                    "unknown provider '{}' — expected 'claude' or 'codex'",
+                                    raw_submitter
+                                )
+                            })),
+                        );
+                    }
+                    Some(ref s) if Some(s) == from_kind.as_ref() => {
+                        // Same provider as implementer → self-review blocked
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({
+                                "error": format!(
+                                    "self-review rejected: submitting provider '{}' matches implementing provider",
+                                    s.as_str()
+                                )
+                            })),
+                        );
+                    }
+                    Some(ref s) if target_kind.is_some() && Some(s) != target_kind.as_ref() => {
+                        // Known provider but doesn't match expected reviewer
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({
+                                "error": format!(
+                                    "provider mismatch: expected '{}' but got '{}'",
+                                    target_p, s.as_str()
+                                )
+                            })),
+                        );
+                    }
+                    _ => {} // Normalized cross-provider match → allowed
+                }
+            }
         }
     }
 
@@ -1004,6 +1038,122 @@ mod tests {
 
         assert_eq!(status, StatusCode::OK);
         assert!(body.0.get("ok").and_then(|v| v.as_bool()).unwrap_or(false));
+    }
+
+    #[tokio::test]
+    async fn casing_variant_self_review_rejected() {
+        // "Claude" (capitalized) submitting for from=claude → should normalize and reject
+        let db = test_db();
+        seed_counter_model_review(&db, "dispatch-case-self", "claude", "codex");
+        let state = AppState {
+            db: db.clone(),
+            engine: test_engine(&db),
+            health_registry: None,
+        };
+
+        let (status, body) = submit_verdict(
+            State(state),
+            Json(SubmitVerdictBody {
+                dispatch_id: "dispatch-case-self".to_string(),
+                overall: "pass".to_string(),
+                items: None,
+                notes: None,
+                feedback: None,
+                commit: None,
+                provider: Some("Claude".to_string()),
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body.0["error"].as_str().unwrap().contains("self-review"));
+    }
+
+    #[tokio::test]
+    async fn casing_variant_cross_provider_allowed() {
+        // "Codex" (capitalized) submitting for from=claude, target=codex → normalize and allow
+        let db = test_db();
+        seed_counter_model_review(&db, "dispatch-case-cross", "claude", "codex");
+        let state = AppState {
+            db: db.clone(),
+            engine: test_engine(&db),
+            health_registry: None,
+        };
+
+        let (status, body) = submit_verdict(
+            State(state),
+            Json(SubmitVerdictBody {
+                dispatch_id: "dispatch-case-cross".to_string(),
+                overall: "pass".to_string(),
+                items: None,
+                notes: None,
+                feedback: None,
+                commit: None,
+                provider: Some("Codex".to_string()),
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.0.get("ok").and_then(|v| v.as_bool()).unwrap_or(false));
+    }
+
+    #[tokio::test]
+    async fn unknown_provider_string_rejected() {
+        // "gemini" or random string → reject as unknown provider
+        let db = test_db();
+        seed_counter_model_review(&db, "dispatch-unknown-prov", "claude", "codex");
+        let state = AppState {
+            db: db.clone(),
+            engine: test_engine(&db),
+            health_registry: None,
+        };
+
+        let (status, body) = submit_verdict(
+            State(state),
+            Json(SubmitVerdictBody {
+                dispatch_id: "dispatch-unknown-prov".to_string(),
+                overall: "pass".to_string(),
+                items: None,
+                notes: None,
+                feedback: None,
+                commit: None,
+                provider: Some("gemini".to_string()),
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body.0["error"].as_str().unwrap().contains("unknown provider"));
+    }
+
+    #[tokio::test]
+    async fn provider_mismatch_rejected() {
+        // from=codex, target=claude, submitter=codex → self-review blocked
+        let db = test_db();
+        seed_counter_model_review(&db, "dispatch-mismatch", "codex", "claude");
+        let state = AppState {
+            db: db.clone(),
+            engine: test_engine(&db),
+            health_registry: None,
+        };
+
+        let (status, body) = submit_verdict(
+            State(state),
+            Json(SubmitVerdictBody {
+                dispatch_id: "dispatch-mismatch".to_string(),
+                overall: "pass".to_string(),
+                items: None,
+                notes: None,
+                feedback: None,
+                commit: None,
+                provider: Some("codex".to_string()),
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body.0["error"].as_str().unwrap().contains("self-review"));
     }
 
     #[tokio::test]
