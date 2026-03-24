@@ -167,7 +167,7 @@ var timeouts = {
     );
     for (var k = 0; k < staleReviews.length; k++) {
       agentdesk.kanban.setStatus(staleReviews[k].card_id, "pending_decision");
-      agentdesk.db.execute("UPDATE kanban_cards SET review_status = NULL WHERE id = ?", [staleReviews[k].card_id]);
+      agentdesk.db.execute("UPDATE kanban_cards SET review_status = NULL, suggestion_pending_at = NULL WHERE id = ?", [staleReviews[k].card_id]);
       agentdesk.log.warn("[timeout] Stale review → pending_decision: card " + staleReviews[k].card_id);
     }
 
@@ -179,7 +179,7 @@ var timeouts = {
     );
     for (var d = 0; d < stuckDod.length; d++) {
       agentdesk.kanban.setStatus(stuckDod[d].id, "pending_decision");
-      agentdesk.db.execute("UPDATE kanban_cards SET review_status = NULL WHERE id = ?", [stuckDod[d].id]);
+      agentdesk.db.execute("UPDATE kanban_cards SET review_status = NULL, suggestion_pending_at = NULL WHERE id = ?", [stuckDod[d].id]);
       agentdesk.log.warn("[timeout] DoD await timeout → pending_decision: card " + stuckDod[d].id);
     }
 
@@ -189,7 +189,7 @@ var timeouts = {
     var staleSuggestions = agentdesk.db.query(
       "SELECT id, assigned_agent_id, title FROM kanban_cards " +
       "WHERE review_status = 'suggestion_pending' " +
-      "AND updated_at < datetime('now', '-15 minutes')"
+      "AND COALESCE(suggestion_pending_at, updated_at) < datetime('now', '-15 minutes')"
     );
     for (var s = 0; s < staleSuggestions.length; s++) {
       var sc = staleSuggestions[s];
@@ -205,7 +205,7 @@ var timeouts = {
           // Dispatch succeeded — now transition to in_progress + rework_pending
           agentdesk.kanban.setStatus(sc.id, "in_progress");
           agentdesk.db.execute(
-            "UPDATE kanban_cards SET review_status = 'rework_pending', updated_at = datetime('now') WHERE id = ?",
+            "UPDATE kanban_cards SET review_status = 'rework_pending', suggestion_pending_at = NULL, updated_at = datetime('now') WHERE id = ?",
             [sc.id]
           );
           agentdesk.log.warn("[timeout] Auto-accepted suggestions for card " + sc.id + " — rework dispatch created");

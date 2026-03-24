@@ -90,18 +90,19 @@ pub fn create_dispatch(
         )
         .map_err(|e| anyhow::anyhow!("Card not found: {e}"))?;
 
-    // Guard: prevent review-type dispatches for done cards — these would create stale
-    // dispatches that re-trigger review loops after dismiss (#80).
-    let is_review_type = dispatch_type == "review"
-        || dispatch_type == "review-decision"
-        || dispatch_type == "rework";
-    if is_review_type && old_status == "done" {
+    // Guard: prevent ALL dispatches for done cards — done is terminal.
+    // No dispatch type should reopen a completed card.
+    if old_status == "done" {
         return Err(anyhow::anyhow!(
-            "Cannot create {} dispatch for done card {}",
+            "Cannot create {} dispatch for done card {} — cannot revert terminal card",
             dispatch_type,
             kanban_card_id
         ));
     }
+
+    let is_review_type = dispatch_type == "review"
+        || dispatch_type == "review-decision"
+        || dispatch_type == "rework";
 
     // Insert dispatch
     conn.execute(
@@ -454,7 +455,7 @@ mod tests {
             );
         }
 
-        // Non-review dispatch for done card should still work
+        // All dispatch types for done cards should be rejected
         let result = create_dispatch(
             &db,
             &engine,
@@ -465,8 +466,8 @@ mod tests {
             &json!({}),
         );
         assert!(
-            result.is_ok(),
-            "implementation dispatch should be allowed for done card"
+            result.is_err(),
+            "implementation dispatch should be rejected for done card"
         );
     }
 }

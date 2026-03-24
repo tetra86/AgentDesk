@@ -69,7 +69,7 @@ var reviewAutomation = {
         [card.id]
       );
       agentdesk.db.execute(
-        "UPDATE kanban_cards SET review_status = NULL WHERE id = ?",
+        "UPDATE kanban_cards SET review_status = NULL, suggestion_pending_at = NULL WHERE id = ?",
         [card.id]
       );
       agentdesk.log.info("[review] Review disabled, card " + card.id + " → pending_decision");
@@ -106,7 +106,7 @@ var reviewAutomation = {
         [card.id]
       );
       agentdesk.db.execute(
-        "UPDATE kanban_cards SET review_status = NULL WHERE id = ?",
+        "UPDATE kanban_cards SET review_status = NULL, suggestion_pending_at = NULL WHERE id = ?",
         [card.id]
       );
       agentdesk.log.info("[review] Counter-model disabled, card " + card.id + " → pending_decision");
@@ -129,7 +129,7 @@ var reviewAutomation = {
         [card.id]
       );
       agentdesk.db.execute(
-        "UPDATE kanban_cards SET review_status = NULL WHERE id = ?",
+        "UPDATE kanban_cards SET review_status = NULL, suggestion_pending_at = NULL WHERE id = ?",
         [card.id]
       );
       agentdesk.log.info("[review] No counter channel for " + card.assigned_agent_id + " → pending_decision");
@@ -242,7 +242,7 @@ function processVerdict(cardId, verdict, result) {
 
   if (verdict === "pass" || verdict === "accept" || verdict === "approved") {
     agentdesk.db.execute(
-      "UPDATE kanban_cards SET review_status = NULL, updated_at = datetime('now') WHERE id = ?",
+      "UPDATE kanban_cards SET review_status = NULL, suggestion_pending_at = NULL, updated_at = datetime('now') WHERE id = ?",
       [cardId]
     );
 
@@ -304,7 +304,7 @@ function processVerdict(cardId, verdict, result) {
     // Set review_status to suggestion_pending — agent must decide: accept/dispute/dismiss
     // AND status != 'done' guards against race with concurrent dismiss clearing review_status
     agentdesk.db.execute(
-      "UPDATE kanban_cards SET review_status = 'suggestion_pending', updated_at = datetime('now') WHERE id = ? AND status != 'done'",
+      "UPDATE kanban_cards SET review_status = 'suggestion_pending', suggestion_pending_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status != 'done'",
       [cardId]
     );
     agentdesk.log.info("[review] Card " + cardId + " needs review decision → suggestion_pending");

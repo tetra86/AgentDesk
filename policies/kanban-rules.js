@@ -259,7 +259,7 @@ var rules = {
         // Gate failed → pending_decision
         agentdesk.kanban.setStatus(card.id, "pending_decision");
         agentdesk.db.execute(
-          "UPDATE kanban_cards SET review_status = NULL WHERE id = ?",
+          "UPDATE kanban_cards SET review_status = NULL, suggestion_pending_at = NULL WHERE id = ?",
           [card.id]
         );
         agentdesk.log.warn("[pm-gate] Card " + card.id + " → pending_decision: " + reasons.join("; "));

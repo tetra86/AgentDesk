@@ -483,20 +483,23 @@ pub(crate) async fn send_dispatch_to_discord(
     card_id: &str,
     dispatch_id: &str,
 ) {
-    // Guard: skip if already notified (prevents duplicate Discord messages)
+    // Guard: atomic reservation — exactly one caller wins the INSERT
     {
         let conn = match db.lock() {
             Ok(c) => c,
             Err(_) => return,
         };
-        let already_notified: bool = conn
-            .query_row(
-                "SELECT COUNT(*) > 0 FROM kv_meta WHERE key = ?1",
-                [&format!("dispatch_notified:{dispatch_id}")],
-                |row| row.get(0),
+        let inserted = conn
+            .execute(
+                "INSERT OR IGNORE INTO kv_meta (key, value) VALUES (?1, ?2)",
+                rusqlite::params![
+                    format!("dispatch_notified:{dispatch_id}"),
+                    dispatch_id
+                ],
             )
-            .unwrap_or(false);
-        if already_notified {
+            .unwrap_or(0);
+        if inserted == 0 {
+            // Already reserved by another caller — skip
             return;
         }
     }
@@ -711,7 +714,7 @@ pub(crate) async fn send_dispatch_to_discord(
                         .map(|r| r.status().is_success())
                         .unwrap_or(false);
                     if thread_msg_ok {
-                        // Persist thread_id and mark as notified only on success
+                        // Persist thread_id on success (notified marker already set atomically)
                         if let Ok(conn) = db.lock() {
                             conn.execute(
                                 "UPDATE task_dispatches SET thread_id = ?1 WHERE id = ?2",
@@ -719,21 +722,21 @@ pub(crate) async fn send_dispatch_to_discord(
                             )
                             .ok();
                             set_thread_for_channel(&conn, card_id, channel_id_num, thread_id);
-                            conn.execute(
-                                "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-                                rusqlite::params![
-                                    format!("dispatch_notified:{}", dispatch_id),
-                                    dispatch_id
-                                ],
-                            )
-                            .ok();
                         }
                         tracing::info!(
                             "[dispatch] Created thread {thread_id} and sent dispatch {dispatch_id} to {agent_id}"
                         );
                     } else {
+                        // Rollback atomic reservation so retry can succeed
+                        if let Ok(conn) = db.lock() {
+                            conn.execute(
+                                "DELETE FROM kv_meta WHERE key = ?1",
+                                [&format!("dispatch_notified:{dispatch_id}")],
+                            )
+                            .ok();
+                        }
                         tracing::warn!(
-                            "[dispatch] Thread message POST failed for dispatch {dispatch_id}, skipping notified marker and thread_id save"
+                            "[dispatch] Thread message POST failed for dispatch {dispatch_id}, rolled back notified marker"
                         );
                     }
                 }
@@ -757,17 +760,7 @@ pub(crate) async fn send_dispatch_to_discord(
                 .await
             {
                 Ok(r) if r.status().is_success() => {
-                    // Mark as notified so timeouts.js [I-0] won't resend
-                    if let Ok(conn) = db.lock() {
-                        conn.execute(
-                            "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-                            rusqlite::params![
-                                format!("dispatch_notified:{}", dispatch_id),
-                                dispatch_id
-                            ],
-                        )
-                        .ok();
-                    }
+                    // notified marker already set atomically at function entry
                     tracing::info!(
                         "[dispatch] Sent fallback message to {agent_id} (channel {channel_id})"
                     );
@@ -775,14 +768,38 @@ pub(crate) async fn send_dispatch_to_discord(
                 Ok(r) => {
                     let st = r.status();
                     let body = r.text().await.unwrap_or_default();
+                    // Rollback atomic reservation so retry can succeed
+                    if let Ok(conn) = db.lock() {
+                        conn.execute(
+                            "DELETE FROM kv_meta WHERE key = ?1",
+                            [&format!("dispatch_notified:{dispatch_id}")],
+                        )
+                        .ok();
+                    }
                     tracing::warn!("[dispatch] Discord API error {st}: {body}");
                 }
                 Err(e) => {
+                    // Rollback atomic reservation so retry can succeed
+                    if let Ok(conn) = db.lock() {
+                        conn.execute(
+                            "DELETE FROM kv_meta WHERE key = ?1",
+                            [&format!("dispatch_notified:{dispatch_id}")],
+                        )
+                        .ok();
+                    }
                     tracing::warn!("[dispatch] Request failed: {e}");
                 }
             }
         }
         Err(e) => {
+            // Rollback atomic reservation so retry can succeed
+            if let Ok(conn) = db.lock() {
+                conn.execute(
+                    "DELETE FROM kv_meta WHERE key = ?1",
+                    [&format!("dispatch_notified:{dispatch_id}")],
+                )
+                .ok();
+            }
             tracing::warn!("[dispatch] Thread creation request failed: {e}");
         }
     }

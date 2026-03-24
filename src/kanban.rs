@@ -82,6 +82,36 @@ pub fn transition_status_with_opts(
         });
     }
 
+    // Terminal guard: done cards cannot revert to any other status
+    if old_status == "done" && new_status != "done" {
+        log_audit(
+            &conn,
+            card_id,
+            &old_status,
+            new_status,
+            source,
+            "BLOCKED: cannot revert terminal card",
+        );
+        tracing::warn!(
+            "[kanban] Blocked transition done → {} for card {} (cannot revert terminal card, source: {})",
+            new_status,
+            card_id,
+            source
+        );
+        notify_pmd_violation(
+            &conn,
+            card_id,
+            &old_status,
+            new_status,
+            source,
+            "cannot revert terminal card",
+        );
+        return Err(anyhow::anyhow!(
+            "cannot revert terminal card: done → {} is not allowed",
+            new_status
+        ));
+    }
+
     // ── C: Dispatch validation ──
     // Free transitions: backlog ↔ ready (no dispatch needed)
     let free_transition = matches!(
@@ -172,7 +202,7 @@ pub fn transition_status_with_opts(
     let extra = match new_status {
         "in_progress" => ", started_at = COALESCE(started_at, datetime('now'))",
         "requested" => ", requested_at = datetime('now')",
-        "done" => ", completed_at = datetime('now'), review_status = NULL",
+        "done" => ", completed_at = datetime('now'), review_status = NULL, suggestion_pending_at = NULL",
         _ => "",
     };
     let sql = format!(
