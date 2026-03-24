@@ -671,6 +671,14 @@ fn register_kanban_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
                 return format!(r#"{{"ok":true,"changed":false,"status":"{}"}}"#, new_status);
             }
 
+            // Guard: prevent reverting terminal (done) cards back to active states
+            if old_status == "done" && new_status != "done" {
+                return format!(
+                    r#"{{"error":"cannot revert terminal card from done to {}"}}"#,
+                    new_status
+                );
+            }
+
             // Update status
             let extra = match new_status.as_str() {
                 "in_progress" => ", started_at = COALESCE(started_at, datetime('now'))",
@@ -803,23 +811,29 @@ fn register_exec_ops<'js>(ctx: &Ctx<'js>) -> JsResult<()> {
     let session_obj = rquickjs::Object::new(ctx.clone())?;
     session_obj.set(
         "sendCommand",
-        rquickjs::Function::new(ctx.clone(), |session_key: String, command: String| -> String {
-            let result = std::process::Command::new("tmux")
-                .args(["send-keys", "-t", &session_key, &command, "Enter"])
-                .output();
-            match result {
-                Ok(out) if out.status.success() => {
-                    format!(r#"{{"ok":true,"session":"{}","command":"{}"}}"#, session_key, command)
+        rquickjs::Function::new(
+            ctx.clone(),
+            |session_key: String, command: String| -> String {
+                let result = std::process::Command::new("tmux")
+                    .args(["send-keys", "-t", &session_key, &command, "Enter"])
+                    .output();
+                match result {
+                    Ok(out) if out.status.success() => {
+                        format!(
+                            r#"{{"ok":true,"session":"{}","command":"{}"}}"#,
+                            session_key, command
+                        )
+                    }
+                    Ok(out) => {
+                        let stderr = String::from_utf8_lossy(&out.stderr);
+                        format!(r#"{{"ok":false,"error":"tmux: {}"}}"#, stderr.trim())
+                    }
+                    Err(e) => {
+                        format!(r#"{{"ok":false,"error":"{}"}}"#, e)
+                    }
                 }
-                Ok(out) => {
-                    let stderr = String::from_utf8_lossy(&out.stderr);
-                    format!(r#"{{"ok":false,"error":"tmux: {}"}}"#, stderr.trim())
-                }
-                Err(e) => {
-                    format!(r#"{{"ok":false,"error":"{}"}}"#, e)
-                }
-            }
-        }),
+            },
+        ),
     )?;
 
     // agentdesk.session.kill(sessionKey) — force-kill a tmux session (for deadlock recovery)

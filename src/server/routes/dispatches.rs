@@ -376,7 +376,8 @@ fn get_thread_for_channel(
         .flatten();
 
     if let Some(ref json_str) = map_json {
-        if let Ok(map) = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(json_str)
+        if let Ok(map) =
+            serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(json_str)
         {
             let key = channel_id.to_string();
             if let Some(tid) = map.get(&key).and_then(|v| v.as_str()) {
@@ -579,8 +580,14 @@ pub(super) async fn send_dispatch_to_discord(
             .and_then(|s| serde_json::from_str(s).ok())
             .unwrap_or(serde_json::json!({}));
         (
-            ctx_val.get("reviewed_commit").and_then(|v| v.as_str()).map(|s| s.to_string()),
-            ctx_val.get("target_provider").and_then(|v| v.as_str()).map(|s| s.to_string()),
+            ctx_val
+                .get("reviewed_commit")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            ctx_val
+                .get("target_provider")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
         )
     } else {
         (None, None)
@@ -609,9 +616,7 @@ pub(super) async fn send_dispatch_to_discord(
 
     // ── Thread reuse: check if card already has an active thread ──
     let client = reqwest::Client::new();
-    let dispatch_type_label = dispatch_type
-        .as_deref()
-        .unwrap_or("implementation");
+    let dispatch_type_label = dispatch_type.as_deref().unwrap_or("implementation");
 
     // Try to reuse existing thread for this card (channel-specific)
     let existing_thread_id: Option<String> = {
@@ -625,8 +630,15 @@ pub(super) async fn send_dispatch_to_discord(
     if let Some(ref existing_tid) = existing_thread_id {
         // Try to unarchive and reuse the existing thread
         if let Some(reused) = try_reuse_thread(
-            &client, &token, existing_tid, channel_id_num,
-            dispatch_type_label, &message, dispatch_id, card_id, db,
+            &client,
+            &token,
+            existing_tid,
+            channel_id_num,
+            dispatch_type_label,
+            &message,
+            dispatch_id,
+            card_id,
+            db,
         )
         .await
         {
@@ -838,7 +850,9 @@ async fn try_reuse_thread(
                 tracing::info!("[dispatch] Unarchived thread {thread_id} for reuse");
             }
             _ => {
-                tracing::warn!("[dispatch] Failed to unarchive thread {thread_id}, will create new");
+                tracing::warn!(
+                    "[dispatch] Failed to unarchive thread {thread_id}, will create new"
+                );
                 return None;
             }
         }
@@ -877,21 +891,14 @@ async fn try_reuse_thread(
             .ok();
             conn.execute(
                 "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-                rusqlite::params![
-                    format!("dispatch_notified:{}", dispatch_id),
-                    dispatch_id
-                ],
+                rusqlite::params![format!("dispatch_notified:{}", dispatch_id), dispatch_id],
             )
             .ok();
         }
-        tracing::info!(
-            "[dispatch] Reused thread {thread_id} for dispatch {dispatch_id}"
-        );
+        tracing::info!("[dispatch] Reused thread {thread_id} for dispatch {dispatch_id}");
         Some(true)
     } else {
-        tracing::warn!(
-            "[dispatch] Failed to send message to reused thread {thread_id}"
-        );
+        tracing::warn!("[dispatch] Failed to send message to reused thread {thread_id}");
         None
     }
 }
@@ -984,7 +991,10 @@ pub(super) async fn send_review_result_to_primary(
             {
                 Ok(r) if r.status().is_success() => true,
                 Ok(r) => {
-                    tracing::warn!("[review] Failed to unarchive thread {tid}: HTTP {}", r.status());
+                    tracing::warn!(
+                        "[review] Failed to unarchive thread {tid}: HTTP {}",
+                        r.status()
+                    );
                     false
                 }
                 Err(e) => {
@@ -1124,10 +1134,7 @@ pub(super) async fn send_review_result_to_primary(
                 // Mark as notified so timeouts.js [I-0] won't resend
                 conn.execute(
                     "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?1, ?2)",
-                    rusqlite::params![
-                        format!("dispatch_notified:{}", dispatch_id),
-                        dispatch_id
-                    ],
+                    rusqlite::params![format!("dispatch_notified:{}", dispatch_id), dispatch_id],
                 )
                 .ok();
             }
@@ -1285,7 +1292,9 @@ pub(super) async fn handle_completed_dispatch_followups(db: &crate::db::Db, disp
                     .json(&serde_json::json!({"archived": true}))
                     .send()
                     .await;
-                tracing::info!("[dispatch] Archived thread {tid} for completed dispatch {dispatch_id} (card done)");
+                tracing::info!(
+                    "[dispatch] Archived thread {tid} for completed dispatch {dispatch_id} (card done)"
+                );
             }
         }
         // Clear all thread mappings when card is done
@@ -1313,7 +1322,11 @@ pub(super) async fn handle_completed_dispatch_followups(db: &crate::db::Db, disp
         // already handles all review completion notifications. Without this guard,
         // JS policy state transitions (e.g. improve → rework) can change
         // latest_dispatch_id and trigger a duplicate notification here.
-        if new_dispatch_id != dispatch_id && !agent_id.is_empty() && dispatch_type != "review" && dispatch_type != "review-decision" {
+        if new_dispatch_id != dispatch_id
+            && !agent_id.is_empty()
+            && dispatch_type != "review"
+            && dispatch_type != "review-decision"
+        {
             send_dispatch_to_discord(db, &agent_id, &title, &card_id, &new_dispatch_id).await;
         }
     }
@@ -1522,7 +1535,13 @@ pub async fn get_card_thread(
         }
     };
 
-    let result: Option<(String, Option<String>, Option<String>, Option<String>, Option<String>)> = conn
+    let result: Option<(
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    )> = conn
         .query_row(
             "SELECT kc.id, kc.active_thread_id, td.dispatch_type, \
                     (SELECT a.discord_channel_alt FROM agents a WHERE a.id = td.to_agent_id), \
@@ -1531,7 +1550,15 @@ pub async fn get_card_thread(
              JOIN kanban_cards kc ON kc.id = td.kanban_card_id \
              WHERE td.id = ?1",
             [dispatch_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
         )
         .ok();
 
@@ -1963,7 +1990,10 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(count, 2, "should have exactly 2 dispatches (review + review-decision), not more");
+        assert_eq!(
+            count, 2,
+            "should have exactly 2 dispatches (review + review-decision), not more"
+        );
 
         let (dt, ds): (String, String) = conn
             .query_row(
