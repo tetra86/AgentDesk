@@ -292,6 +292,7 @@ pub async fn handle_send<'a>(registry: &HealthRegistry, body: &str) -> (&'a str,
         "auto-queue",
         "pipeline",
         "system",
+        "timeouts",
     ];
     if !INTERNAL_SOURCES.contains(&source) && !super::settings::is_known_agent(source) {
         return (
