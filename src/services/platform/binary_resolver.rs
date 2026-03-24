@@ -1,0 +1,133 @@
+//! Platform-aware binary resolution.
+//!
+//! Replaces direct `which`/`where` and `bash -lc "which X"` calls with a
+//! unified API that works across macOS, Linux, and Windows.
+
+use std::process::Command;
+
+/// Resolve a binary by name using the platform's standard lookup mechanism.
+///
+/// - **Unix**: `which <name>`
+/// - **Windows**: `where.exe <name>`
+///
+/// Returns `None` if the binary is not found on PATH.
+pub fn resolve_binary(name: &str) -> Option<String> {
+    #[cfg(unix)]
+    let output = Command::new("which").arg(name).output();
+    #[cfg(windows)]
+    let output = Command::new("where.exe").arg(name).output();
+
+    output
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| {
+            let path = String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if path.is_empty() { None } else { Some(path) }
+        })
+}
+
+/// Resolve a binary using a login shell to pick up the user's full PATH.
+///
+/// Useful for non-interactive contexts (e.g., launchd services, SSH sessions)
+/// where `~/.profile` / `~/.zshrc` are not sourced.
+///
+/// - **Unix**: Tries `zsh -lc "which <name>"`, then `bash -lc "which <name>"`
+/// - **Windows**: Falls back to `resolve_binary` (login shell not applicable)
+pub fn resolve_binary_with_login_shell(name: &str) -> Option<String> {
+    // Fast path: try standard PATH first
+    if let Some(path) = resolve_binary(name) {
+        return Some(path);
+    }
+
+    #[cfg(unix)]
+    {
+        let which_cmd = format!("which {}", name);
+        for shell in &["zsh", "bash"] {
+            if let Ok(output) = Command::new(shell).args(["-lc", &which_cmd]).output() {
+                if output.status.success() {
+                    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    if !path.is_empty() {
+                        return Some(path);
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        // On Windows, try PowerShell Get-Command as fallback
+        if let Ok(output) = Command::new("powershell")
+            .args(["-NoProfile", "-Command", &format!("(Get-Command {} -ErrorAction SilentlyContinue).Source", name)])
+            .output()
+        {
+            if output.status.success() {
+                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !path.is_empty() {
+                    return Some(path);
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Async version of `resolve_binary` for use in async contexts.
+pub async fn async_resolve_binary(name: &str) -> Option<String> {
+    #[cfg(unix)]
+    let output = tokio::process::Command::new("which")
+        .arg(name)
+        .output()
+        .await;
+    #[cfg(windows)]
+    let output = tokio::process::Command::new("where.exe")
+        .arg(name)
+        .output()
+        .await;
+
+    output
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| {
+            let path = String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if path.is_empty() { None } else { Some(path) }
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_binary_finds_known_tool() {
+        // `ls` exists on all Unix, `cmd.exe` on Windows
+        #[cfg(unix)]
+        assert!(resolve_binary("ls").is_some());
+        #[cfg(windows)]
+        assert!(resolve_binary("cmd.exe").is_some());
+    }
+
+    #[test]
+    fn resolve_binary_returns_none_for_missing() {
+        assert!(resolve_binary("__nonexistent_binary_12345__").is_none());
+    }
+
+    #[test]
+    fn resolve_with_login_shell_finds_known_tool() {
+        #[cfg(unix)]
+        assert!(resolve_binary_with_login_shell("ls").is_some());
+        #[cfg(windows)]
+        assert!(resolve_binary_with_login_shell("cmd.exe").is_some());
+    }
+}

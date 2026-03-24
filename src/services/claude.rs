@@ -22,29 +22,11 @@ use crate::utils::format::safe_prefix;
 static CLAUDE_PATH: OnceLock<Option<String>> = OnceLock::new();
 
 /// Resolve the path to the claude binary.
-/// First tries `which claude`, then falls back to `bash -lc "which claude"`
-/// (for non-interactive SSH sessions where ~/.profile isn't loaded).
+/// Uses platform::resolve_binary_with_login_shell, then falls back to known paths.
 fn resolve_claude_path() -> Option<String> {
-    // Try direct `which claude` first
-    if let Ok(output) = Command::new("which").arg("claude").output() {
-        if output.status.success() {
-            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !path.is_empty() {
-                return Some(path);
-            }
-        }
-    }
-
-    // Fallback: use login shell to resolve PATH
-    for shell in &["zsh", "bash"] {
-        if let Ok(output) = Command::new(shell).args(["-lc", "which claude"]).output() {
-            if output.status.success() {
-                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !path.is_empty() {
-                    return Some(path);
-                }
-            }
-        }
+    // Try platform-aware binary resolution (which/where + login shell fallback)
+    if let Some(path) = crate::services::platform::resolve_binary_with_login_shell("claude") {
+        return Some(path);
     }
 
     // Fallback: check known installation paths

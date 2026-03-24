@@ -193,8 +193,7 @@ pub(in crate::services::discord) async fn cmd_shell(
     let working_dir_clone = working_dir.clone();
 
     let result = tokio::task::spawn_blocking(move || {
-        let child = std::process::Command::new("bash")
-            .args(["-c", &cmd_owned])
+        let child = crate::services::platform::shell::shell_command_builder(&cmd_owned)
             .current_dir(&working_dir_clone)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())

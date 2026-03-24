@@ -625,7 +625,9 @@ pub(super) async fn handle_text_message(
             let mut workspace = settings::resolve_workspace(channel_id, ch_name.as_deref());
             // Fallback: if this is a thread, try resolving workspace from parent channel
             if workspace.is_none() {
-                if let Some((parent_id, parent_name)) = super::resolve_thread_parent(ctx, channel_id).await {
+                if let Some((parent_id, parent_name)) =
+                    super::resolve_thread_parent(ctx, channel_id).await
+                {
                     // Use parent name from Discord API first, fall back to session map
                     let parent_ch_name = parent_name.or_else(|| {
                         let data = shared.core.try_lock().ok()?;
@@ -636,7 +638,10 @@ pub(super) async fn handle_text_message(
                     workspace = settings::resolve_workspace(parent_id, parent_ch_name.as_deref());
                     if workspace.is_some() {
                         let ts = chrono::Local::now().format("%H:%M:%S");
-                        println!("  [{ts}] 🧵 Thread auto-start: resolved workspace from parent channel {}", parent_id);
+                        println!(
+                            "  [{ts}] 🧵 Thread auto-start: resolved workspace from parent channel {}",
+                            parent_id
+                        );
                     }
                 }
             }
@@ -698,7 +703,7 @@ pub(super) async fn handle_text_message(
                                     channel_id: Some(channel_id.get()),
                                     last_active: tokio::time::Instant::now(),
                                     worktree: None,
-            
+
                                     born_generation: super::runtime_store::load_generation(),
                                 });
                         session.current_path = Some(eff_path.clone());
@@ -759,9 +764,7 @@ pub(super) async fn handle_text_message(
     let channel_id = if let Some(ref did) = dispatch_id_for_thread {
         // Fetch dispatch metadata for thread reuse and cross-channel role override
         let dispatch_info = lookup_dispatch_info(shared.api_port, did).await;
-        dispatch_type_str = dispatch_info
-            .as_ref()
-            .and_then(|i| i.dispatch_type.clone());
+        dispatch_type_str = dispatch_info.as_ref().and_then(|i| i.dispatch_type.clone());
         let is_review_dispatch = dispatch_type_str
             .as_deref()
             .map(|t| t == "review")
@@ -797,7 +800,11 @@ pub(super) async fn handle_text_message(
                 .and_then(|i| i.active_thread_id.clone());
             let reuse_tid = existing_thread.as_ref().and_then(|t| {
                 let id = t.parse::<u64>().unwrap_or(0);
-                if id != 0 { Some(ChannelId::new(id)) } else { None }
+                if id != 0 {
+                    Some(ChannelId::new(id))
+                } else {
+                    None
+                }
             });
 
             let reused = if let Some(tid) = reuse_tid {
@@ -866,8 +873,13 @@ pub(super) async fn handle_text_message(
                         super::bootstrap_thread_session(shared, thread.id, &current_path, ctx)
                             .await;
                         shared.dispatch_thread_parents.insert(channel_id, thread.id);
-                        link_dispatch_thread(shared.api_port, did, thread.id.get(), channel_id.get())
-                            .await;
+                        link_dispatch_thread(
+                            shared.api_port,
+                            did,
+                            thread.id.get(),
+                            channel_id.get(),
+                        )
+                        .await;
                         thread.id
                     }
                     Err(e) => {
@@ -1585,8 +1597,7 @@ async fn handle_shell_command_raw(
     let working_dir_clone = working_dir.clone();
 
     let result = tokio::task::spawn_blocking(move || {
-        let child = std::process::Command::new("bash")
-            .args(["-c", &cmd_owned])
+        let child = crate::services::platform::shell::shell_command_builder(&cmd_owned)
             .current_dir(&working_dir_clone)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
@@ -2410,8 +2421,7 @@ Any other message is sent to {p}.
             let working_dir_clone = working_dir.clone();
 
             let result = tokio::task::spawn_blocking(move || {
-                let child = std::process::Command::new("bash")
-                    .args(["-c", &cmd_owned])
+                let child = crate::services::platform::shell::shell_command_builder(&cmd_owned)
                     .current_dir(&working_dir_clone)
                     .stdin(std::process::Stdio::null())
                     .stdout(std::process::Stdio::piped())
@@ -2695,9 +2705,7 @@ async fn verify_thread_accessible(
                             poise::serenity_prelude::builder::EditThread::new().archived(false);
                         if let Err(e) = thread_id.edit_thread(&ctx.http, edit).await {
                             let ts = chrono::Local::now().format("%H:%M:%S");
-                            println!(
-                                "  [{ts}] ⚠️ Failed to unarchive thread {thread_id}: {e}"
-                            );
+                            println!("  [{ts}] ⚠️ Failed to unarchive thread {thread_id}: {e}");
                             return false;
                         }
                     }
@@ -2712,12 +2720,7 @@ async fn verify_thread_accessible(
 }
 
 /// Link a newly created dispatch thread to the card's active_thread_id via internal API.
-async fn link_dispatch_thread(
-    api_port: u16,
-    dispatch_id: &str,
-    thread_id: u64,
-    channel_id: u64,
-) {
+async fn link_dispatch_thread(api_port: u16, dispatch_id: &str, thread_id: u64, channel_id: u64) {
     let url = format!(
         "http://127.0.0.1:{}/api/internal/link-dispatch-thread",
         api_port
@@ -2785,9 +2788,15 @@ mod tests {
         });
 
         // mid:* should survive bot cleanup
-        assert!(map.contains_key("mid:123"), "mid:* entry must survive bot cleanup");
+        assert!(
+            map.contains_key("mid:123"),
+            "mid:* entry must survive bot cleanup"
+        );
         // dispatch:* older than 30s should be removed
-        assert!(!map.contains_key("dispatch:abc"), "expired dispatch:* should be removed");
+        assert!(
+            !map.contains_key("dispatch:abc"),
+            "expired dispatch:* should be removed"
+        );
         // fresh msg:* should survive
         assert!(map.contains_key("msg:456"), "fresh msg:* should survive");
 
@@ -2802,7 +2811,10 @@ mod tests {
         });
 
         // mid:* at 40s should still survive (within 60s)
-        assert!(map.contains_key("mid:123"), "mid:* within TTL must survive universal cleanup");
+        assert!(
+            map.contains_key("mid:123"),
+            "mid:* within TTL must survive universal cleanup"
+        );
 
         // Now simulate mid:* at 65s ago (outside 60s TTL)
         let old_mid_time = now - Duration::from_secs(65);
@@ -2814,7 +2826,10 @@ mod tests {
                 true
             }
         });
-        assert!(!map.contains_key("mid:old"), "expired mid:* must be cleaned by universal cleanup");
+        assert!(
+            !map.contains_key("mid:old"),
+            "expired mid:* must be cleaned by universal cleanup"
+        );
     }
 
     /// Thread-preference dedup: once a message is processed as thread context,
@@ -2834,8 +2849,7 @@ mod tests {
         let (ts, was_thread) = *entry;
         drop(entry);
         // is_thread_context=true, was_thread=false → should allow
-        let allow = now.duration_since(ts) < msg_dedup_ttl
-            && !was_thread; // this is the "allow" condition for thread promotion
+        let allow = now.duration_since(ts) < msg_dedup_ttl && !was_thread; // this is the "allow" condition for thread promotion
         assert!(allow, "thread should be allowed when previous was parent");
 
         // Case 2: First seen as thread context, then thread arrives again → block
@@ -2844,8 +2858,7 @@ mod tests {
         let (ts2, was_thread2) = *entry;
         drop(entry);
         // is_thread_context=true, was_thread=true → should block
-        let allow2 = now.duration_since(ts2) < msg_dedup_ttl
-            && !was_thread2;
+        let allow2 = now.duration_since(ts2) < msg_dedup_ttl && !was_thread2;
         assert!(!allow2, "duplicate thread context must be blocked");
 
         // Case 3: First seen as thread context, then parent arrives → block

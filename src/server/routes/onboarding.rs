@@ -662,16 +662,14 @@ pub async fn check_provider(
             return (
                 StatusCode::BAD_REQUEST,
                 Json(json!({"error": "provider must be 'claude' or 'codex'"})),
-            )
+            );
         }
     };
 
-    // Check if installed
-    let which = tokio::process::Command::new("which")
-        .arg(cmd)
-        .output()
-        .await;
-    let installed = which.map(|o| o.status.success()).unwrap_or(false);
+    // Check if installed (platform-aware binary resolution)
+    let installed = crate::services::platform::binary_resolver::async_resolve_binary(cmd)
+        .await
+        .is_some();
 
     if !installed {
         return (
@@ -731,7 +729,11 @@ pub async fn generate_prompt(
     Json(body): Json<GeneratePromptBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     let provider = body.provider.as_deref().unwrap_or("claude");
-    let cmd = if provider == "codex" { "codex" } else { "claude" };
+    let cmd = if provider == "codex" {
+        "codex"
+    } else {
+        "claude"
+    };
 
     let instruction = format!(
         "다음 AI 에이전트의 시스템 프롬프트를 한국어로 작성해줘.\n\

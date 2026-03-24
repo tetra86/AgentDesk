@@ -24,25 +24,7 @@ static CODEX_PATH: OnceLock<Option<String>> = OnceLock::new();
 const TMUX_PROMPT_B64_PREFIX: &str = "__AGENTDESK_B64__:";
 
 fn resolve_codex_path() -> Option<String> {
-    if let Ok(output) = Command::new("which").arg("codex").output() {
-        if output.status.success() {
-            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !path.is_empty() {
-                return Some(path);
-            }
-        }
-    }
-
-    if let Ok(output) = Command::new("bash").args(["-lc", "which codex"]).output() {
-        if output.status.success() {
-            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !path.is_empty() {
-                return Some(path);
-            }
-        }
-    }
-
-    None
+    crate::services::platform::resolve_binary_with_login_shell("codex")
 }
 
 fn get_codex_path() -> Option<&'static str> {
