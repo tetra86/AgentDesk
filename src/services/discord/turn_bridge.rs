@@ -156,10 +156,9 @@ async fn fetch_dispatch_snapshot(api_port: u16, dispatch_id: &str) -> Option<Dis
 
 fn extract_review_decision(full_response: &str) -> Option<&'static str> {
     // Match explicit patterns like "DECISION: accept" or "결정: dismiss"
-    let explicit = regex::Regex::new(
-        r"(?im)^\s*(?:decision|결정)\s*:\s*\**\s*(accept|dispute|dismiss)\b",
-    )
-    .ok()?;
+    let explicit =
+        regex::Regex::new(r"(?im)^\s*(?:decision|결정)\s*:\s*\**\s*(accept|dispute|dismiss)\b")
+            .ok()?;
     if let Some(caps) = explicit.captures(full_response) {
         let decision = caps.get(1)?.as_str().to_ascii_lowercase();
         return match decision.as_str() {
@@ -171,8 +170,7 @@ fn extract_review_decision(full_response: &str) -> Option<&'static str> {
     }
     // Fallback: scan for standalone keywords in the last ~500 bytes (char-boundary safe)
     let tail = safe_suffix(full_response, 500);
-    let keyword_re =
-        regex::Regex::new(r"(?im)\b(accept|dispute|dismiss)\b").ok()?;
+    let keyword_re = regex::Regex::new(r"(?im)\b(accept|dispute|dismiss)\b").ok()?;
     let mut found: Option<&'static str> = None;
     for caps in keyword_re.captures_iter(tail) {
         let kw = caps.get(1)?.as_str().to_ascii_lowercase();
@@ -293,7 +291,11 @@ async fn guard_review_dispatch_completion(
         "review" => {
             if let Some(verdict) = extract_explicit_review_verdict(full_response) {
                 match submit_review_verdict_fallback(
-                    api_port, dispatch_id, verdict, full_response, provider,
+                    api_port,
+                    dispatch_id,
+                    verdict,
+                    full_response,
+                    provider,
                 )
                 .await
                 {
@@ -314,7 +316,10 @@ async fn guard_review_dispatch_completion(
             if let Some(decision) = extract_review_decision(full_response) {
                 if let Some(card_id) = snapshot.kanban_card_id.as_deref() {
                     match submit_review_decision_fallback(
-                        api_port, card_id, decision, full_response,
+                        api_port,
+                        card_id,
+                        decision,
+                        full_response,
                     )
                     .await
                     {
@@ -1118,39 +1123,45 @@ pub(super) fn spawn_turn_bridge(
                         .output()
                 })
                 .await;
-                match &kill_result {
-                    Ok(Ok(o)) if !o.status.success() => {
-                        let ts = chrono::Local::now().format("%H:%M:%S");
-                        eprintln!(
-                            "  [{ts}] ⚠ tmux kill-session failed for {}: {}",
-                            name,
-                            String::from_utf8_lossy(&o.stderr)
-                        );
+                let kill_ok = matches!(&kill_result, Ok(Ok(o)) if o.status.success());
+                if !kill_ok {
+                    match &kill_result {
+                        Ok(Ok(o)) => {
+                            let ts = chrono::Local::now().format("%H:%M:%S");
+                            eprintln!(
+                                "  [{ts}] ⚠ tmux kill-session failed for {}: {}",
+                                name,
+                                String::from_utf8_lossy(&o.stderr)
+                            );
+                        }
+                        Ok(Err(e)) => {
+                            let ts = chrono::Local::now().format("%H:%M:%S");
+                            eprintln!("  [{ts}] ⚠ tmux kill-session error for {name}: {e}");
+                        }
+                        Err(e) => {
+                            let ts = chrono::Local::now().format("%H:%M:%S");
+                            eprintln!("  [{ts}] ⚠ tmux kill-session spawn error for {name}: {e}");
+                        }
+                        _ => {}
                     }
-                    Ok(Err(e)) => {
-                        let ts = chrono::Local::now().format("%H:%M:%S");
-                        eprintln!("  [{ts}] ⚠ tmux kill-session error for {name}: {e}");
-                    }
-                    Err(e) => {
-                        let ts = chrono::Local::now().format("%H:%M:%S");
-                        eprintln!("  [{ts}] ⚠ tmux kill-session spawn error for {name}: {e}");
-                    }
-                    _ => {}
                 }
 
-                // Also delete the DB session row for this thread session
-                if let Some(session_key) = super::adk_session::build_adk_session_key(
-                    &shared_owned,
-                    channel_id,
-                    &provider,
-                )
-                .await
-                {
-                    super::adk_session::delete_adk_session(
-                        &session_key,
-                        shared_owned.api_port,
+                // Only delete the DB session row if tmux kill succeeded.
+                // If kill failed, leave the row so the periodic reaper can retry.
+                if kill_ok {
+                    if let Some(session_key) = super::adk_session::build_adk_session_key(
+                        &shared_owned,
+                        channel_id,
+                        &provider,
                     )
-                    .await;
+                    .await
+                    {
+                        super::adk_session::delete_adk_session(
+                            &session_key,
+                            shared_owned.api_port,
+                        )
+                        .await;
+                    }
                 }
             }
         }
@@ -1281,7 +1292,10 @@ pub(super) fn spawn_turn_bridge(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_verdict_payload, extract_explicit_review_verdict, extract_review_decision, resolve_done_response, should_resume_watcher_after_turn};
+    use super::{
+        build_verdict_payload, extract_explicit_review_verdict, extract_review_decision,
+        resolve_done_response, should_resume_watcher_after_turn,
+    };
 
     #[test]
     fn chained_batch_mid_turn_keeps_watcher_paused() {
@@ -1404,7 +1418,8 @@ mod tests {
     #[test]
     fn done_replaces_stale_pre_tool_text_with_result() {
         // Text → ToolUse → Done(result): intermediate text should be replaced
-        let res = resolve_done_response("이슈를 생성합니다.\n\n", "이슈 #90 생성 완료", true, false);
+        let res =
+            resolve_done_response("이슈를 생성합니다.\n\n", "이슈 #90 생성 완료", true, false);
         assert_eq!(res, Some("이슈 #90 생성 완료".to_string()));
     }
 
@@ -1435,7 +1450,12 @@ mod tests {
     #[test]
     fn done_keeps_full_response_when_no_tools_used() {
         // Pure text turn without tools — streaming text IS the final response
-        let res = resolve_done_response("여기 분석 결과입니다...", "여기 분석 결과입니다...", false, false);
+        let res = resolve_done_response(
+            "여기 분석 결과입니다...",
+            "여기 분석 결과입니다...",
+            false,
+            false,
+        );
         assert_eq!(res, None);
     }
 

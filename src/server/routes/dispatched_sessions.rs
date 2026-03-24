@@ -306,7 +306,11 @@ pub async fn hook_session(
             )
             .ok()
             .and_then(|(dtype, dstatus)| {
-                ((dtype == "implementation" || dtype == "rework" || dtype == "review" || dtype == "review-decision") && dstatus == "pending")
+                ((dtype == "implementation"
+                    || dtype == "rework"
+                    || dtype == "review"
+                    || dtype == "review-decision")
+                    && dstatus == "pending")
                     .then_some(did.clone())
             })
         })
@@ -448,7 +452,7 @@ pub async fn hook_session(
     }
 }
 
-/// DELETE /api/dispatched-sessions/cleanup
+/// DELETE /api/dispatched-sessions/cleanup — manual: delete disconnected sessions
 pub async fn cleanup_sessions(
     State(state): State<AppState>,
 ) -> (StatusCode, Json<serde_json::Value>) {
@@ -462,15 +466,33 @@ pub async fn cleanup_sessions(
         }
     };
 
-    // Delete disconnected sessions + stale idle thread sessions (1h+)
-    let disconnected = conn
-        .execute("DELETE FROM sessions WHERE status = 'disconnected'", [])
-        .unwrap_or(0);
-    let stale_threads = gc_stale_thread_sessions_db(&conn);
+    match conn.execute("DELETE FROM sessions WHERE status = 'disconnected'", []) {
+        Ok(n) => (StatusCode::OK, Json(json!({"ok": true, "deleted": n}))),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("{e}")})),
+        ),
+    }
+}
 
+/// DELETE /api/dispatched-sessions/gc-threads — periodic: delete stale thread sessions
+pub async fn gc_thread_sessions(
+    State(state): State<AppState>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let conn = match state.db.lock() {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{e}")})),
+            );
+        }
+    };
+
+    let deleted = gc_stale_thread_sessions_db(&conn);
     (
         StatusCode::OK,
-        Json(json!({"ok": true, "deleted": disconnected, "gc_threads": stale_threads})),
+        Json(json!({"ok": true, "gc_threads": deleted})),
     )
 }
 

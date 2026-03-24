@@ -2013,7 +2013,7 @@ async fn add_reaction(
 
 /// Periodic GC: delete stale idle/disconnected thread sessions from DB via cleanup API.
 async fn gc_stale_thread_sessions_via_api(api_port: u16) {
-    let url = format!("http://127.0.0.1:{api_port}/api/dispatched-sessions/cleanup");
+    let url = format!("http://127.0.0.1:{api_port}/api/dispatched-sessions/gc-threads");
     match reqwest::Client::new().delete(&url).send().await {
         Ok(resp) if resp.status().is_success() => {
             if let Ok(body) = resp.json::<serde_json::Value>().await {
@@ -2026,7 +2026,10 @@ async fn gc_stale_thread_sessions_via_api(api_port: u16) {
         }
         Ok(resp) => {
             let ts = chrono::Local::now().format("%H:%M:%S");
-            eprintln!("  [{ts}] ⚠ Thread session GC failed: HTTP {}", resp.status());
+            eprintln!(
+                "  [{ts}] ⚠ Thread session GC failed: HTTP {}",
+                resp.status()
+            );
         }
         Err(e) => {
             let ts = chrono::Local::now().format("%H:%M:%S");
@@ -2410,8 +2413,7 @@ async fn bootstrap_thread_session(
     parent_path: &str,
     serenity_ctx: &serenity::prelude::Context,
 ) {
-    let (_thread_title, cat_name) =
-        resolve_channel_category(serenity_ctx, thread_channel_id).await;
+    let (_thread_title, cat_name) = resolve_channel_category(serenity_ctx, thread_channel_id).await;
     // Build a short, stable channel_name: "{parent_channel}-t{thread_id}"
     let parent_info = resolve_thread_parent(serenity_ctx, thread_channel_id).await;
     let ch_name = if let Some((_parent_id, parent_name)) = parent_info {

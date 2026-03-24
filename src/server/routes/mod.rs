@@ -161,10 +161,7 @@ pub fn api_router(
             "/internal/link-dispatch-thread",
             post(dispatches::link_dispatch_thread),
         )
-        .route(
-            "/internal/card-thread",
-            get(dispatches::get_card_thread),
-        )
+        .route("/internal/card-thread", get(dispatches::get_card_thread))
         // Pipeline stages (legacy path)
         .route(
             "/pipeline-stages",
@@ -253,13 +250,16 @@ pub fn api_router(
             delete(dispatched_sessions::cleanup_sessions),
         )
         .route(
+            "/dispatched-sessions/gc-threads",
+            delete(dispatched_sessions::gc_thread_sessions),
+        )
+        .route(
             "/dispatched-sessions/{id}",
             patch(dispatched_sessions::update_dispatched_session),
         )
         .route(
             "/hook/session",
-            post(dispatched_sessions::hook_session)
-                .delete(dispatched_sessions::delete_session),
+            post(dispatched_sessions::hook_session).delete(dispatched_sessions::delete_session),
         )
         // Messages
         .route(
