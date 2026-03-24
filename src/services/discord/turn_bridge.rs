@@ -1247,7 +1247,7 @@ pub(super) fn spawn_turn_bridge(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_verdict_payload, extract_explicit_review_verdict, extract_review_decision, should_resume_watcher_after_turn};
+    use super::{build_verdict_payload, extract_explicit_review_verdict, extract_review_decision, resolve_done_response, should_resume_watcher_after_turn};
 
     #[test]
     fn chained_batch_mid_turn_keeps_watcher_paused() {
@@ -1366,8 +1366,6 @@ mod tests {
     }
 
     // ========== resolve_done_response tests ==========
-
-    use super::resolve_done_response;
 
     #[test]
     fn done_replaces_stale_pre_tool_text_with_result() {
