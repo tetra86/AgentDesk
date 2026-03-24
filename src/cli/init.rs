@@ -585,20 +585,25 @@ fn install_service(home: &Path, agentdesk_bin: &Path, _reconfigure: bool) {
     let service_name = "agentdesk-dcserver";
     let root_dir =
         dcserver::agentdesk_runtime_root().unwrap_or_else(|| home.join(".adk").join("release"));
+    let logs_dir = root_dir.join("logs");
+    fs::create_dir_all(&logs_dir).unwrap();
     let unit_content = format!(
         "[Unit]\n\
          Description=AgentDesk Discord Control Server\n\
          After=network.target\n\n\
          [Service]\n\
          Type=simple\n\
-         ExecStart={} --dcserver\n\
+         ExecStart={bin} --dcserver\n\
          Restart=on-failure\n\
          RestartSec=5\n\
-         Environment=AGENTDESK_ROOT_DIR={}\n\n\
+         Environment=AGENTDESK_ROOT_DIR={root}\n\
+         StandardOutput=append:{logs}/dcserver.stdout.log\n\
+         StandardError=append:{logs}/dcserver.stderr.log\n\n\
          [Install]\n\
          WantedBy=default.target\n",
-        agentdesk_bin.display(),
-        root_dir.display()
+        bin = agentdesk_bin.display(),
+        root = root_dir.display(),
+        logs = logs_dir.display()
     );
 
     let user_systemd = home.join(".config").join("systemd").join("user");
@@ -627,11 +632,27 @@ fn install_service(home: &Path, agentdesk_bin: &Path, _reconfigure: bool) {
 #[cfg(target_os = "windows")]
 fn install_service(_home: &Path, agentdesk_bin: &Path, _reconfigure: bool) {
     let service_name = "AgentDeskDcserver";
+    let root_dir =
+        dcserver::agentdesk_runtime_root().unwrap_or_else(|| {
+            let home = dirs::home_dir().unwrap();
+            home.join(".adk").join("release")
+        });
+    let logs_dir = root_dir.join("logs");
+    fs::create_dir_all(&logs_dir).unwrap();
+
     println!("  Windows 서비스 등록:");
     println!("  NSSM 사용 시:");
     println!(
         "    nssm install {service_name} \"{}\" --dcserver",
         agentdesk_bin.display()
+    );
+    println!(
+        "    nssm set {service_name} AppStdout \"{}\"",
+        logs_dir.join("dcserver.stdout.log").display()
+    );
+    println!(
+        "    nssm set {service_name} AppStderr \"{}\"",
+        logs_dir.join("dcserver.stderr.log").display()
     );
     println!("    nssm start {service_name}");
     println!("  sc.exe 사용 시:");
@@ -653,6 +674,15 @@ fn install_service(_home: &Path, agentdesk_bin: &Path, _reconfigure: bool) {
             .status();
         match status {
             Ok(s) if s.success() => {
+                // Configure NSSM log routing
+                let stdout_log = logs_dir.join("dcserver.stdout.log");
+                let stderr_log = logs_dir.join("dcserver.stderr.log");
+                let _ = std::process::Command::new("nssm")
+                    .args(["set", service_name, "AppStdout", &stdout_log.to_string_lossy()])
+                    .status();
+                let _ = std::process::Command::new("nssm")
+                    .args(["set", service_name, "AppStderr", &stderr_log.to_string_lossy()])
+                    .status();
                 let _ = std::process::Command::new("nssm")
                     .args(["start", service_name])
                     .status();

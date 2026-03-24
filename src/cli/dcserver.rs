@@ -712,6 +712,8 @@ pub fn handle_restart_dcserver(
     }
 
     // systemd restart path (Linux)
+    // When a service manager is detected, do NOT fall through to tmux —
+    // running a separate tmux process alongside the supervisor would cause conflicts.
     if is_systemd_service_enabled() || is_systemd_service_active() {
         println!("   systemd user service detected: {}", SYSTEMD_SERVICE_NAME);
         match restart_systemd_dcserver_and_verify(READY_TIMEOUT) {
@@ -727,10 +729,10 @@ pub fn handle_restart_dcserver(
                         SYSTEMD_SERVICE_NAME
                     ),
                 );
-                return;
             }
             Err(e) => {
-                eprintln!("⚠ systemd restart verification failed: {e}");
+                eprintln!("❌ systemd restart verification failed: {e}");
+                eprintln!("   Hint: check logs with 'journalctl --user -u {SYSTEMD_SERVICE_NAME}'");
                 write_restart_report(
                     "failed",
                     format!(
@@ -738,9 +740,9 @@ pub fn handle_restart_dcserver(
                         SYSTEMD_SERVICE_NAME, e
                     ),
                 );
-                // Fall through to tmux fallback
             }
         }
+        return;
     }
 
     // Windows service restart path
@@ -759,10 +761,10 @@ pub fn handle_restart_dcserver(
                         WINDOWS_SERVICE_NAME
                     ),
                 );
-                return;
             }
             Err(e) => {
-                eprintln!("⚠ Windows service restart failed: {e}");
+                eprintln!("❌ Windows service restart failed: {e}");
+                eprintln!("   Hint: check with 'nssm status {WINDOWS_SERVICE_NAME}' or 'sc query {WINDOWS_SERVICE_NAME}'");
                 write_restart_report(
                     "failed",
                     format!(
@@ -770,9 +772,9 @@ pub fn handle_restart_dcserver(
                         WINDOWS_SERVICE_NAME, e
                     ),
                 );
-                // Fall through to tmux fallback
             }
         }
+        return;
     }
 
     // NOTE: We intentionally do NOT kill AgentDesk-* work sessions here.
