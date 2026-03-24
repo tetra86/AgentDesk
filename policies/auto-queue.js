@@ -13,19 +13,15 @@ var autoQueue = {
 
     var agentId = cards[0].assigned_agent_id;
 
-    // Guard: skip if all queue entries for this card are already done
-    // (prevents duplicate dispatch when OnCardTerminal fires multiple times)
-    var pendingEntries = agentdesk.db.query(
-      "SELECT COUNT(*) as cnt FROM auto_queue_entries WHERE kanban_card_id = ? AND status != 'done'",
-      [payload.card_id]
-    );
-    if (pendingEntries.length > 0 && pendingEntries[0].cnt === 0) return;
-
-    // Mark queue entry as done
-    agentdesk.db.execute(
+    // Mark queue entry as done (dispatched → done)
+    var result = agentdesk.db.execute(
       "UPDATE auto_queue_entries SET status = 'done', completed_at = datetime('now') WHERE kanban_card_id = ? AND status = 'dispatched'",
       [payload.card_id]
     );
+
+    // Guard: if no entry was updated, this card had no dispatched queue entry
+    // (duplicate OnCardTerminal or card not from auto-queue) — skip next dispatch
+    if (result && result.changes === 0) return;
 
     // Check if agent has any active (non-terminal) cards
     var active = agentdesk.db.query(
