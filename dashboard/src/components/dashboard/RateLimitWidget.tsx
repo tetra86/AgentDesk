@@ -5,8 +5,6 @@ interface RateLimitBucket {
   id: string;
   label: string;
   utilization: number;
-  remaining: number | null;
-  limit: number | null;
   resets_at: string | null;
   level: "normal" | "warning" | "danger";
 }
@@ -42,14 +40,11 @@ interface RawRateLimitData {
   providers: RawProvider[];
 }
 
-/** Friendly label for rate-limit bucket names across providers */
-const BUCKET_LABELS: Record<string, string> = {
-  requests: "Req",
-  tokens: "Tok",
-};
-
 /** Providers to exclude from UI display */
 const HIDDEN_PROVIDERS = new Set(["github"]);
+
+/** Bucket IDs to exclude from UI display */
+const HIDDEN_BUCKETS = new Set(["7d Sonnet"]);
 
 function transformRawData(
   raw: RawRateLimitData,
@@ -63,20 +58,20 @@ function transformRawData(
         provider: rp.provider.charAt(0).toUpperCase() + rp.provider.slice(1),
         fetched_at: rp.fetched_at,
         stale: rp.stale,
-        buckets: rp.buckets.map((b) => {
-          const utilization = b.limit > 0 ? Math.round((b.used / b.limit) * 100) : 0;
-          const level: "normal" | "warning" | "danger" =
-            utilization >= dangerPct ? "danger" : utilization >= warningPct ? "warning" : "normal";
-          return {
-            id: b.name,
-            label: BUCKET_LABELS[b.name] ?? b.name,
-            utilization,
-            remaining: b.remaining ?? null,
-            limit: b.limit > 0 ? b.limit : null,
-            resets_at: b.reset > 0 ? new Date(b.reset * 1000).toISOString() : null,
-            level,
-          };
-        }),
+        buckets: rp.buckets
+          .filter((b) => !HIDDEN_BUCKETS.has(b.name))
+          .map((b) => {
+            const utilization = b.limit > 0 ? Math.round((b.used / b.limit) * 100) : 0;
+            const level: "normal" | "warning" | "danger" =
+              utilization >= dangerPct ? "danger" : utilization >= warningPct ? "warning" : "normal";
+            return {
+              id: b.name,
+              label: b.name,
+              utilization,
+              resets_at: b.reset > 0 ? new Date(b.reset * 1000).toISOString() : null,
+              level,
+            };
+          }),
       })),
   };
 }
@@ -107,48 +102,13 @@ const PROVIDER_PALETTES: Record<string, ProviderPalette> = {
     warning: { bar: "#f59e0b", text: "#fbbf24", glow: "rgba(245,158,11,0.4)" },
     danger: { bar: "#ef4444", text: "#fca5a5", glow: "rgba(239,68,68,0.5)" },
   },
-  OpenCode: {
-    accent: "#a855f7",
-    normal: { bar: "#a855f7", text: "#c084fc", glow: "rgba(168,85,247,0.3)" },
-    warning: { bar: "#f59e0b", text: "#fbbf24", glow: "rgba(245,158,11,0.4)" },
-    danger: { bar: "#ef4444", text: "#fca5a5", glow: "rgba(239,68,68,0.5)" },
-  },
-  Copilot: {
-    accent: "#10b981",
-    normal: { bar: "#10b981", text: "#6ee7b7", glow: "rgba(16,185,129,0.3)" },
-    warning: { bar: "#f59e0b", text: "#fbbf24", glow: "rgba(245,158,11,0.4)" },
-    danger: { bar: "#ef4444", text: "#fca5a5", glow: "rgba(239,68,68,0.5)" },
-  },
-  Antigravity: {
-    accent: "#f472b6",
-    normal: { bar: "#f472b6", text: "#f9a8d4", glow: "rgba(244,114,182,0.3)" },
-    warning: { bar: "#f59e0b", text: "#fbbf24", glow: "rgba(245,158,11,0.4)" },
-    danger: { bar: "#ef4444", text: "#fca5a5", glow: "rgba(239,68,68,0.5)" },
-  },
-  API: {
-    accent: "#94a3b8",
-    normal: { bar: "#94a3b8", text: "#cbd5e1", glow: "rgba(148,163,184,0.3)" },
-    warning: { bar: "#f59e0b", text: "#fbbf24", glow: "rgba(245,158,11,0.4)" },
-    danger: { bar: "#ef4444", text: "#fca5a5", glow: "rgba(239,68,68,0.5)" },
-  },
-  Github: {
-    accent: "#e6edf3",
-    normal: { bar: "#e6edf3", text: "#f0f6fc", glow: "rgba(230,237,243,0.3)" },
-    warning: { bar: "#f59e0b", text: "#fbbf24", glow: "rgba(245,158,11,0.4)" },
-    danger: { bar: "#ef4444", text: "#fca5a5", glow: "rgba(239,68,68,0.5)" },
-  },
 };
 
 const DEFAULT_PALETTE: ProviderPalette = PROVIDER_PALETTES.Codex;
 const PROVIDER_ICONS: Record<string, string> = {
-  Claude: "🤖",
-  Codex: "⚡",
-  Gemini: "🔮",
-  OpenCode: "🧩",
-  Copilot: "🛩️",
-  Antigravity: "🌀",
-  API: "🔌",
-  Github: "🐙",
+  Claude: "\u{1F916}",
+  Codex: "\u26A1",
+  Gemini: "\u{1F52E}",
 };
 
 function getColors(provider: string, level: string) {
@@ -217,10 +177,9 @@ export default function RateLimitWidget({ t }: RateLimitWidgetProps) {
 
   return (
     <div className="game-panel relative overflow-hidden px-3 py-2 sm:px-4 sm:py-2.5">
-      <div className="flex flex-col gap-1.5 sm:flex-row sm:flex-wrap sm:items-center sm:gap-x-6 sm:gap-y-1.5">
+      <div className="flex flex-col gap-1.5 sm:flex-row sm:items-center sm:gap-x-6">
         {data.providers.map((provider) => {
           const accent = getAccent(provider.provider);
-          const visibleBuckets = provider.buckets;
           return (
             <div key={provider.provider} className="flex items-center gap-0 min-w-0">
               {/* Fixed-width left: provider + stale */}
@@ -229,7 +188,7 @@ export default function RateLimitWidget({ t }: RateLimitWidgetProps) {
                   className="text-[10px] sm:text-xs font-bold uppercase tracking-wider"
                   style={{ color: accent }}
                 >
-                  {(PROVIDER_ICONS[provider.provider] ?? "•")}{" "}
+                  {(PROVIDER_ICONS[provider.provider] ?? "\u2022")}{" "}
                   {provider.provider}
                 </span>
                 {provider.stale ? (
@@ -237,13 +196,13 @@ export default function RateLimitWidget({ t }: RateLimitWidgetProps) {
                     className="rounded px-1 py-0.5 text-[8px] font-medium shrink-0"
                     style={{ color: "#fbbf24", background: "rgba(251,191,36,0.1)", border: "1px solid rgba(251,191,36,0.2)" }}
                   >
-                    {t({ ko: "지연", en: "STALE", ja: "遅延", zh: "延迟" })}
+                    {t({ ko: "\uC9C0\uC5F0", en: "STALE", ja: "\u9045\u5EF6", zh: "\u5EF6\u8FDF" })}
                   </span>
                 ) : null}
               </div>
               {/* Buckets grid — fixed 2 columns */}
               <div className="flex-1 grid grid-cols-2 gap-x-2 sm:gap-x-3">
-                {visibleBuckets.map((bucket) => {
+                {provider.buckets.map((bucket) => {
                   const colors = getColors(provider.provider, bucket.level);
                   const remaining = formatTimeRemaining(bucket.resets_at);
                   return (
@@ -282,14 +241,6 @@ export default function RateLimitWidget({ t }: RateLimitWidgetProps) {
                           }}
                         >
                           {bucket.utilization}%
-                          {bucket.remaining != null && bucket.limit != null && (
-                            <span
-                              className="text-[8px] sm:text-[9px] font-normal ml-0.5"
-                              style={{ color: "var(--th-text-muted)" }}
-                            >
-                              ({bucket.remaining}/{bucket.limit})
-                            </span>
-                          )}
                         </span>
                       </div>
                       {remaining && (
@@ -297,7 +248,7 @@ export default function RateLimitWidget({ t }: RateLimitWidgetProps) {
                           className="text-[7px] sm:text-[8px] ml-[24px] sm:ml-[26px]"
                           style={{ color: "var(--th-text-muted)", marginTop: -1 }}
                         >
-                          ↻ {remaining}
+                          \u21BB {remaining}
                         </span>
                       )}
                     </div>
