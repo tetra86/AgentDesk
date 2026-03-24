@@ -74,10 +74,10 @@ pub fn sync_github_issues_for_repo(
                 .collect();
 
             for (card_id, card_status) in &cards {
-                // Sync issue body → card description
+                // Sync issue body → card description (only if changed)
                 if let Some(ref body) = issue.body {
                     let _ = conn.execute(
-                        "UPDATE kanban_cards SET description = ?1, updated_at = datetime('now') WHERE id = ?2",
+                        "UPDATE kanban_cards SET description = ?1 WHERE id = ?2 AND (description IS NULL OR description != ?1)",
                         rusqlite::params![body, card_id],
                     );
                 }
@@ -106,7 +106,12 @@ pub fn sync_github_issues_for_repo(
     // Process closures via central state machine (outside conn lock)
     for (card_id, issue_number) in &cards_to_close {
         let _ = crate::kanban::transition_status_with_opts(
-            db, engine, card_id, "done", "github-sync", true,
+            db,
+            engine,
+            card_id,
+            "done",
+            "github-sync",
+            true,
         );
         result.closed_count += 1;
         tracing::info!(
@@ -212,7 +217,8 @@ mod tests {
             body: None,
         }];
 
-        let result = sync_github_issues_for_repo(&db, &test_engine(&db), "owner/repo", &issues).unwrap();
+        let result =
+            sync_github_issues_for_repo(&db, &test_engine(&db), "owner/repo", &issues).unwrap();
         assert_eq!(result.closed_count, 1);
         assert_eq!(result.inconsistency_count, 0);
 
@@ -249,7 +255,8 @@ mod tests {
             body: None,
         }];
 
-        let result = sync_github_issues_for_repo(&db, &test_engine(&db), "owner/repo", &issues).unwrap();
+        let result =
+            sync_github_issues_for_repo(&db, &test_engine(&db), "owner/repo", &issues).unwrap();
         assert_eq!(result.closed_count, 0);
         assert_eq!(result.inconsistency_count, 1);
     }
@@ -277,7 +284,8 @@ mod tests {
             body: None,
         }];
 
-        let result = sync_github_issues_for_repo(&db, &test_engine(&db), "owner/repo", &issues).unwrap();
+        let result =
+            sync_github_issues_for_repo(&db, &test_engine(&db), "owner/repo", &issues).unwrap();
         assert_eq!(result.closed_count, 0);
         assert_eq!(result.inconsistency_count, 0);
     }
