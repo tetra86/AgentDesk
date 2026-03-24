@@ -17,12 +17,86 @@ mod utils;
 pub(crate) use cli::agentdesk_runtime_root;
 
 use anyhow::Result;
+use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
+
+// ── Clap CLI definition ──────────────────────────────────────
+
+#[derive(Parser)]
+#[command(name = "agentdesk", version = env!("CARGO_PKG_VERSION"), about = "AI agent orchestration platform")]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Show server health, active sessions, and auto-queue status
+    Status,
+    /// List kanban cards
+    Cards {
+        /// Filter by status (e.g. ready, in_progress, done)
+        #[arg(long)]
+        status: Option<String>,
+    },
+    /// Dispatch operations
+    Dispatch {
+        #[command(subcommand)]
+        action: DispatchAction,
+    },
+    /// List agents and their status
+    Agents,
+    /// Runtime config get/set
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
+    /// Call any API endpoint (curl replacement)
+    Api {
+        /// HTTP method (GET, POST, PATCH, PUT, DELETE)
+        method: String,
+        /// API path (e.g. /api/health)
+        path: String,
+        /// Optional JSON body
+        body: Option<String>,
+    },
+    /// Environment diagnostics
+    Doctor,
+}
+
+#[derive(Subcommand)]
+enum DispatchAction {
+    /// List active dispatches
+    List,
+    /// Retry a dispatch for a card
+    Retry {
+        /// Kanban card ID
+        card_id: String,
+    },
+    /// Redispatch a card
+    Redispatch {
+        /// Kanban card ID
+        card_id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum ConfigAction {
+    /// Get current runtime config
+    Get,
+    /// Set runtime config (JSON string)
+    Set {
+        /// JSON value to set
+        json: String,
+    },
+}
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
 
-    // CLI subcommands that create their own tokio runtime — must run BEFORE #[tokio::main]
+    // ── Legacy flag pre-check ────────────────────────────────
+    // These flags use custom sub-argument parsing and must be handled
+    // before clap takes over. They create their own tokio runtime.
     for arg in &args[1..] {
         match arg.as_str() {
             "--dcserver" | "dcserver" => {
@@ -281,7 +355,61 @@ fn main() -> Result<()> {
         }
     }
 
-    // Default: start full AgentDesk server (needs tokio runtime)
+    // ── Clap subcommand parsing ──────────────────────────────
+    let parsed = Cli::try_parse();
+    match parsed {
+        Ok(cli) => match cli.command {
+            Some(Commands::Status) => {
+                cli::client::cmd_status();
+                return Ok(());
+            }
+            Some(Commands::Cards { status }) => {
+                cli::client::cmd_cards(status.as_deref());
+                return Ok(());
+            }
+            Some(Commands::Dispatch { action }) => {
+                match action {
+                    DispatchAction::List => cli::client::cmd_dispatch_list(),
+                    DispatchAction::Retry { card_id } => cli::client::cmd_dispatch_retry(&card_id),
+                    DispatchAction::Redispatch { card_id } => cli::client::cmd_dispatch_redispatch(&card_id),
+                }
+                return Ok(());
+            }
+            Some(Commands::Agents) => {
+                cli::client::cmd_agents();
+                return Ok(());
+            }
+            Some(Commands::Config { action }) => {
+                match action {
+                    ConfigAction::Get => cli::client::cmd_config_get(),
+                    ConfigAction::Set { json } => cli::client::cmd_config_set(&json),
+                }
+                return Ok(());
+            }
+            Some(Commands::Api { method, path, body }) => {
+                cli::client::cmd_api(&method, &path, body.as_deref());
+                return Ok(());
+            }
+            Some(Commands::Doctor) => {
+                cli::doctor::cmd_doctor();
+                return Ok(());
+            }
+            None => {
+                // No subcommand — fall through to server start
+            }
+        },
+        Err(e) => {
+            // If clap fails to parse (e.g. unknown flag), show help
+            // But only if there were actual args (not just the binary name)
+            if args.len() > 1 {
+                e.print().ok();
+                std::process::exit(1);
+            }
+            // No args — fall through to server start
+        }
+    }
+
+    // ── Default: start full AgentDesk server ─────────────────
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
         tracing_subscriber::fmt()

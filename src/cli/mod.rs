@@ -1,5 +1,7 @@
+pub(crate) mod client;
 pub(crate) mod dcserver;
 pub(crate) mod discord;
+pub(crate) mod doctor;
 pub(crate) mod init;
 pub(crate) mod utils;
 
