@@ -1313,7 +1313,7 @@ pub(super) async fn handle_completed_dispatch_followups(db: &crate::db::Db, disp
         // already handles all review completion notifications. Without this guard,
         // JS policy state transitions (e.g. improve → rework) can change
         // latest_dispatch_id and trigger a duplicate notification here.
-        if new_dispatch_id != dispatch_id && !agent_id.is_empty() && dispatch_type != "review" {
+        if new_dispatch_id != dispatch_id && !agent_id.is_empty() && dispatch_type != "review" && dispatch_type != "review-decision" {
             send_dispatch_to_discord(db, &agent_id, &title, &card_id, &new_dispatch_id).await;
         }
     }
