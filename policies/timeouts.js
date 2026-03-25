@@ -57,6 +57,31 @@ var timeouts = {
   priority: 100,
 
   onTick: function() {
+    // ─── [R] Reconciliation: DB fallback dispatches that need hook chain ──
+    var reconcileKeys = agentdesk.db.query(
+      "SELECT key, value FROM kv_meta WHERE key LIKE 'reconcile_dispatch:%'"
+    );
+    for (var r = 0; r < reconcileKeys.length; r++) {
+      var dispatchId = reconcileKeys[r].value;
+      var dispInfo = agentdesk.db.query(
+        "SELECT dispatch_type, status, kanban_card_id FROM task_dispatches WHERE id = ?",
+        [dispatchId]
+      );
+      if (dispInfo.length > 0) {
+        var di = dispInfo[0];
+        if (di.status === "completed" && di.kanban_card_id) {
+          // Run the transition that complete_dispatch would have done
+          var card = agentdesk.db.query("SELECT status FROM kanban_cards WHERE id = ?", [di.kanban_card_id]);
+          if (card.length > 0 && card[0].status === "in_progress") {
+            agentdesk.kanban.setStatus(di.kanban_card_id, "review");
+            agentdesk.log.info("[reconcile] DB-fallback completed dispatch " + dispatchId + " → card to review");
+          }
+        }
+        // failed dispatches: card stays as-is, just clean up marker
+      }
+      agentdesk.db.execute("DELETE FROM kv_meta WHERE key = ?", [reconcileKeys[r].key]);
+    }
+
     // ─── [A] Requested 타임아웃 (45분) ─────────────────────
     // retry_count < 10이면 pending_decision 대신 failed만 마크 → [J]가 30초 후 재시도
     var MAX_DISPATCH_RETRIES = 10;
