@@ -1374,9 +1374,9 @@ pub(super) async fn handle_text_message(
 
     // Auto-sync worktree before sending message to session
     {
-        let script = dirs::home_dir()
+        let script = super::runtime_store::agentdesk_root()
             .unwrap_or_default()
-            .join(".adk/scripts/worktree-autosync.sh");
+            .join("scripts/worktree-autosync.sh");
         if script.exists() {
             let ws = current_path.clone();
             let ts = chrono::Local::now().format("%H:%M:%S");

@@ -92,12 +92,7 @@ fn debug_log(msg: &str) {
 
 /// Write a debug message to a specific log file under $AGENTDESK_ROOT_DIR/debug/.
 pub fn debug_log_to(filename: &str, msg: &str) {
-    let debug_dir = std::env::var("AGENTDESK_ROOT_DIR")
-        .ok()
-        .map(|r| r.trim().to_string())
-        .filter(|r| !r.is_empty())
-        .map(|r| std::path::PathBuf::from(r).join("debug"))
-        .or_else(|| dirs::home_dir().map(|h| h.join(".adk").join("release").join("debug")));
+    let debug_dir = crate::cli::dcserver::agentdesk_runtime_root().map(|r| r.join("debug"));
     if let Some(debug_dir) = debug_dir {
         let _ = std::fs::create_dir_all(&debug_dir);
         let log_path = debug_dir.join(filename);
