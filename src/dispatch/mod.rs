@@ -105,12 +105,41 @@ pub fn create_dispatch_core(
         || dispatch_type == "review-decision"
         || dispatch_type == "rework";
 
-    // Insert dispatch
-    conn.execute(
+    // #116: Cancel any existing pending review-decision for this card before creating a new one.
+    // Enforces the invariant: at most 1 pending/dispatched review-decision per card.
+    if dispatch_type == "review-decision" {
+        let cancelled = conn.execute(
+            "UPDATE task_dispatches SET status = 'cancelled', result = '{\"reason\":\"superseded_by_new_review_decision\"}', updated_at = datetime('now') \
+             WHERE kanban_card_id = ?1 AND dispatch_type = 'review-decision' AND status IN ('pending', 'dispatched')",
+            [kanban_card_id],
+        ).unwrap_or(0);
+        if cancelled > 0 {
+            tracing::info!(
+                "[dispatch] Cancelled {} stale review-decision(s) for card {} before creating new one",
+                cancelled,
+                kanban_card_id
+            );
+        }
+    }
+
+    // Insert dispatch.
+    // #116: For review-decision, the partial unique index idx_single_active_review_decision
+    // prevents concurrent race conditions from creating duplicates at the DB level.
+    if let Err(e) = conn.execute(
         "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, created_at, updated_at)
          VALUES (?1, ?2, ?3, ?4, 'pending', ?5, ?6, datetime('now'), datetime('now'))",
         rusqlite::params![dispatch_id, kanban_card_id, to_agent_id, dispatch_type, title, context_str],
-    )?;
+    ) {
+        if dispatch_type == "review-decision"
+            && e.to_string().contains("UNIQUE constraint failed")
+        {
+            return Err(anyhow::anyhow!(
+                "review-decision already exists for card {} (concurrent race prevented by DB constraint)",
+                kanban_card_id
+            ));
+        }
+        return Err(e.into());
+    }
 
     // Update kanban card — rework/review dispatches keep current status
     if is_review_type {

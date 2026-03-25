@@ -1071,8 +1071,9 @@ pub(super) async fn send_review_result_to_primary(
         .map(|t| *t == target_channel)
         .unwrap_or(false);
 
-    // For pass verdict, just send a simple notification (no action needed)
-    if verdict == "pass" || verdict == "accept" || verdict == "approved" {
+    // For pass/approved verdict, just send a simple notification (no action needed).
+    // #116: accept is NOT a counter-model verdict — it's a review-decision action.
+    if verdict == "pass" || verdict == "approved" {
         let url_line = issue_url.map(|u| format!("\n{u}")).unwrap_or_default();
         let message = format!("✅ [리뷰 통과] {title} — done으로 이동{url_line}");
 

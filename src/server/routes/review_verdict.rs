@@ -63,7 +63,8 @@ pub async fn submit_verdict(
     State(state): State<AppState>,
     Json(body): Json<SubmitVerdictBody>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let valid_verdicts = ["pass", "improve", "reject", "rework", "accept", "approved"];
+    // #116: accept removed — it's a review-decision action, not a counter-model verdict.
+    let valid_verdicts = ["pass", "improve", "reject", "rework", "approved"];
     if !valid_verdicts.contains(&body.overall.as_str()) {
         return (
             StatusCode::BAD_REQUEST,
@@ -1623,5 +1624,96 @@ mod tests {
             entry_status, "done",
             "auto_queue_entry must be marked done by terminal hook"
         );
+    }
+
+    /// #116: accept is not a valid counter-model verdict — only pass/approved/improve/reject/rework.
+    #[tokio::test]
+    async fn accept_verdict_is_rejected_by_submit_verdict() {
+        let db = test_db();
+        seed_review_card(&db, "dispatch-accept-v");
+        let state = AppState {
+            db: db.clone(),
+            engine: test_engine(&db),
+            health_registry: None,
+        };
+
+        let (status, body) = submit_verdict(
+            State(state),
+            Json(SubmitVerdictBody {
+                dispatch_id: "dispatch-accept-v".to_string(),
+                overall: "accept".to_string(),
+                items: None,
+                notes: None,
+                feedback: None,
+                commit: None,
+                provider: None,
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST, "accept should be rejected as a verdict");
+        let err = body.0["error"].as_str().unwrap_or("");
+        assert!(err.contains("must be one of"), "error should list valid verdicts: {}", err);
+    }
+
+    /// #116: Creating a new review-decision cancels any existing pending ones for the same card.
+    #[tokio::test]
+    async fn new_review_decision_cancels_previous_pending() {
+        let db = test_db();
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) VALUES ('agent-1', 'Agent 1', '123', '456')",
+                [],
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, created_at, updated_at)
+                 VALUES ('card-dup', 'Dup Test', 'review', 'agent-1', datetime('now'), datetime('now'))",
+                [],
+            ).unwrap();
+            // First pending review-decision
+            conn.execute(
+                "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at)
+                 VALUES ('rd-old', 'card-dup', 'agent-1', 'review-decision', 'pending', 'Old RD', datetime('now'), datetime('now'))",
+                [],
+            ).unwrap();
+            conn.execute(
+                "UPDATE kanban_cards SET latest_dispatch_id = 'rd-old' WHERE id = 'card-dup'",
+                [],
+            ).unwrap();
+        }
+
+        // Creating a new review-decision should cancel the old one
+        let result = crate::dispatch::create_dispatch_core(
+            &db,
+            "card-dup",
+            "agent-1",
+            "review-decision",
+            "[New RD]",
+            &serde_json::json!({"verdict": "improve"}),
+        );
+        assert!(result.is_ok(), "new review-decision creation should succeed");
+
+        let conn = db.lock().unwrap();
+
+        // Old review-decision should be cancelled
+        let old_status: String = conn
+            .query_row(
+                "SELECT status FROM task_dispatches WHERE id = 'rd-old'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(old_status, "cancelled", "old review-decision must be cancelled");
+
+        // Only 1 pending review-decision should exist for this card
+        let pending_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM task_dispatches WHERE kanban_card_id = 'card-dup' AND dispatch_type = 'review-decision' AND status IN ('pending', 'dispatched')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(pending_count, 1, "exactly 1 pending review-decision per card");
     }
 }

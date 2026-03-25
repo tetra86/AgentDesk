@@ -241,7 +241,9 @@ function processVerdict(cardId, verdict, result) {
     return;
   }
 
-  if (verdict === "pass" || verdict === "accept" || verdict === "approved") {
+  // #116: accept is NOT a counter-model verdict — it's an agent's review-decision action
+  // (rework continuation). Only pass/approved route to done/next-stage.
+  if (verdict === "pass" || verdict === "approved") {
     agentdesk.db.execute(
       "UPDATE kanban_cards SET review_status = NULL, suggestion_pending_at = NULL, updated_at = datetime('now') WHERE id = ?",
       [cardId]

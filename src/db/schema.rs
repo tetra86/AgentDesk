@@ -235,6 +235,64 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         tracing::info!("Cancelled {cancelled} stale review dispatches for done cards (fix #80)");
     }
 
+    // #116: Cancel duplicate pending review-decisions on non-done cards.
+    // Keeps only the most recent (highest rowid) pending review-decision per card.
+    let dup_cancelled: usize = conn
+        .execute(
+            "UPDATE task_dispatches SET status = 'cancelled', \
+             result = '{\"reason\":\"startup_reconcile_duplicate\"}', updated_at = datetime('now') \
+             WHERE dispatch_type = 'review-decision' AND status IN ('pending', 'dispatched') \
+             AND rowid NOT IN ( \
+                 SELECT MAX(rowid) FROM task_dispatches \
+                 WHERE dispatch_type = 'review-decision' AND status IN ('pending', 'dispatched') \
+                 GROUP BY kanban_card_id \
+             )",
+            [],
+        )
+        .unwrap_or(0);
+    if dup_cancelled > 0 {
+        tracing::info!(
+            "Cancelled {dup_cancelled} duplicate pending review-decisions at startup (#116)"
+        );
+    }
+
+    // #116: Idempotent pointer fix — always re-point latest_dispatch_id for cards
+    // that have an active review-decision but latest_dispatch_id doesn't point to it.
+    // This covers both freshly-cancelled duplicates AND broken state left by prior builds.
+    let repointed: usize = conn
+        .execute(
+            "UPDATE kanban_cards SET latest_dispatch_id = ( \
+                 SELECT td.id FROM task_dispatches td \
+                 WHERE td.kanban_card_id = kanban_cards.id \
+                 AND td.dispatch_type = 'review-decision' \
+                 AND td.status IN ('pending', 'dispatched') \
+                 ORDER BY td.rowid DESC LIMIT 1 \
+             ) \
+             WHERE id IN ( \
+                 SELECT td2.kanban_card_id FROM task_dispatches td2 \
+                 JOIN kanban_cards kc ON kc.id = td2.kanban_card_id \
+                 WHERE td2.dispatch_type = 'review-decision' \
+                 AND td2.status IN ('pending', 'dispatched') \
+                 AND (kc.latest_dispatch_id IS NULL OR kc.latest_dispatch_id != td2.id) \
+             )",
+            [],
+        )
+        .unwrap_or(0);
+    if repointed > 0 {
+        tracing::info!(
+            "Re-pointed latest_dispatch_id on {repointed} card(s) to active review-decision (#116)"
+        );
+    }
+
+    // #116: Partial unique index — at most 1 active review-decision per card at DB level.
+    // This prevents race conditions where concurrent create_dispatch_core calls
+    // both see no pending review-decision and each insert one.
+    let _ = conn.execute_batch(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_single_active_review_decision \
+         ON task_dispatches (kanban_card_id) \
+         WHERE dispatch_type = 'review-decision' AND status IN ('pending', 'dispatched');",
+    );
+
     // Rate limit cache table (provider → cached rate-limit JSON)
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS rate_limit_cache (
