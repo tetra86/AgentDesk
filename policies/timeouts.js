@@ -44,6 +44,27 @@ function getPMDChannel() {
   return "channel:" + ch;
 }
 
+// Send deadlock alert via announce bot to deadlock-manager channel
+function sendDeadlockAlert(message) {
+  var ch = agentdesk.config.get("deadlock_manager_channel_id");
+  if (!ch) {
+    // Fallback to PMD channel if deadlock-manager not configured
+    sendNotifyAlert(getPMDChannel(), message);
+    return;
+  }
+  try {
+    var port = agentdesk.config.get("server_port") || 8791;
+    agentdesk.http.post("http://127.0.0.1:" + port + "/api/send", {
+      target: "channel:" + ch,
+      content: message,
+      bot: "announce",
+      source: "timeouts"
+    });
+  } catch (e) {
+    agentdesk.log.warn("[deadlock] Alert send failed: " + e);
+  }
+}
+
 var timeouts = {
   name: "timeouts",
   priority: 100,
@@ -550,9 +571,11 @@ var timeouts = {
         agentdesk.log.warn("[deadlock] Session " + sess.session_key +
           " — heartbeat stale " + DEADLOCK_MINUTES + "min. Extension " +
           (extensions + 1) + "/" + MAX_EXTENSIONS);
-        sendNotifyAlert(getPMDChannel(),
-          "⚠️ [Deadlock 의심] " + sess.agent_id + " 세션 — " +
-          DEADLOCK_MINUTES + "분 무응답 (연장 " + (extensions + 1) + "/" + MAX_EXTENSIONS + ")");
+        sendDeadlockAlert(
+          "⚠️ [Deadlock 의심] " + sess.agent_id + "\n" +
+          "session_key: " + sess.session_key + "\n" +
+          "tmux: " + (sess.session_key || "unknown") + "\n" +
+          "무응답: " + DEADLOCK_MINUTES + "분 (연장 " + (extensions + 1) + "/" + MAX_EXTENSIONS + ")");
       }
     }
 

@@ -66,6 +66,12 @@ const CONFIG_KEYS: &[(&str, &str, &str, &str)] = &[
         "칸반매니저 채널 ID",
         "Kanban Manager Channel ID",
     ),
+    (
+        "deadlock_manager_channel_id",
+        "pipeline",
+        "데드락 매니저 채널 ID",
+        "Deadlock Manager Channel ID",
+    ),
     ("review_enabled", "review", "리뷰 활성화", "Review Enabled"),
     (
         "counter_model_review_enabled",
