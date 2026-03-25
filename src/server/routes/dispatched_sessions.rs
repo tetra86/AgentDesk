@@ -1095,6 +1095,7 @@ mod tests {
                 tokens: None,
                 cwd: None,
                 dispatch_id: Some("dispatch-1".to_string()),
+                claude_session_id: None,
             }),
         )
         .await;

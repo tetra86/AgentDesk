@@ -4,7 +4,7 @@
 #
 # Steps:
 #   1. Build release binary (+ dashboard)
-#   2. Copy binary to ~/.agentdesk/bin/
+#   2. Copy binary to ~/.adk/release/bin/
 #   3. Install/update launchd plist (macOS) or systemd unit (Linux)
 #   4. Restart service
 #   5. Smoke test (health check)
@@ -17,7 +17,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-AD_HOME="${AGENTDESK_HOME:-$HOME/.agentdesk}"
+AD_HOME="${AGENTDESK_HOME:-$HOME/.adk/release}"
 BIN_DIR="$AD_HOME/bin"
 HEALTH_PORT="${AGENTDESK_SERVER_PORT:-8791}"
 LABEL="com.agentdesk"

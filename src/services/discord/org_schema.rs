@@ -346,7 +346,7 @@ mod tests {
     {
         let _guard = super::super::runtime_store::test_env_lock().lock().unwrap();
         let temp = TempDir::new().unwrap();
-        let root = temp.path().join(".agentdesk");
+        let root = temp.path().join(".adk");
         fs::create_dir_all(&root).unwrap();
         let prev = std::env::var_os("AGENTDESK_ROOT_DIR");
         unsafe { std::env::set_var("AGENTDESK_ROOT_DIR", &root) };
@@ -358,7 +358,7 @@ mod tests {
     }
 
     fn write_org_yaml(dir: &std::path::Path, content: &str) {
-        let settings_dir = dir.join(".agentdesk").join("config");
+        let settings_dir = dir.join(".adk").join("config");
         fs::create_dir_all(&settings_dir).unwrap();
         fs::write(settings_dir.join("org.yaml"), content).unwrap();
     }
@@ -557,7 +557,7 @@ channels:
                 temp_home.path(),
                 r#"
 version: 1
-prompts_root: "~/.agentdesk/prompts"
+prompts_root: "~/.adk/prompts"
 agents:
   my-agent:
     display_name: "Agent"

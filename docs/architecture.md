@@ -583,7 +583,7 @@ policies:
   hot_reload: true               # 파일 변경 시 자동 리로드
 
 data:
-  dir: "~/.agentdesk"           # DB, 로그, 캐시 저장소
+  dir: "~/.adk"                 # DB, 로그, 캐시 저장소
   db_name: "agentdesk.sqlite"
 
 kanban:

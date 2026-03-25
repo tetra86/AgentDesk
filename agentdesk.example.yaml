@@ -29,7 +29,7 @@ policies:
   hot_reload: true
 
 data:
-  dir: "~/.agentdesk"
+  dir: "~/.adk"
 
 kanban:
   timeout_requested_minutes: 45

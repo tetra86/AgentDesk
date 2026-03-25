@@ -26,7 +26,7 @@ mod tests {
     {
         let _guard = super::super::runtime_store::test_env_lock().lock().unwrap();
         let temp = tempfile::TempDir::new().unwrap();
-        let root = temp.path().join(".agentdesk");
+        let root = temp.path().join(".adk");
         let sam = root.join("shared_agent_memory");
         std::fs::create_dir_all(&sam).unwrap();
         let prev = std::env::var_os("AGENTDESK_ROOT_DIR");

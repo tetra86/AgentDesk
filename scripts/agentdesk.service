@@ -4,13 +4,13 @@ After=network.target
 
 [Service]
 Type=simple
-Environment=AGENTDESK_ROOT_DIR=%h/.agentdesk
-ExecStart=%h/.agentdesk/bin/agentdesk dcserver
-WorkingDirectory=%h/.agentdesk
+Environment=AGENTDESK_ROOT_DIR=%h/.adk/release
+ExecStart=%h/.adk/release/bin/agentdesk dcserver
+WorkingDirectory=%h/.adk/release
 Restart=on-failure
 RestartSec=5
-StandardOutput=append:%h/.agentdesk/logs/agentdesk.stdout.log
-StandardError=append:%h/.agentdesk/logs/agentdesk.stderr.log
+StandardOutput=append:%h/.adk/release/logs/agentdesk.stdout.log
+StandardError=append:%h/.adk/release/logs/agentdesk.stderr.log
 
 [Install]
 WantedBy=default.target

@@ -97,7 +97,7 @@ pub fn debug_log_to(filename: &str, msg: &str) {
         .map(|r| r.trim().to_string())
         .filter(|r| !r.is_empty())
         .map(|r| std::path::PathBuf::from(r).join("debug"))
-        .or_else(|| dirs::home_dir().map(|h| h.join(".agentdesk").join("debug")));
+        .or_else(|| dirs::home_dir().map(|h| h.join(".adk").join("release").join("debug")));
     if let Some(debug_dir) = debug_dir {
         let _ = std::fs::create_dir_all(&debug_dir);
         let log_path = debug_dir.join(filename);

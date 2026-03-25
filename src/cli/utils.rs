@@ -218,11 +218,11 @@ fn clean_agentdesk_tmp_files() -> usize {
 pub fn migrate_config_dir() {
     if let Some(home) = dirs::home_dir() {
         let old_dir = home.join(".cokacdir");
-        let new_dir = home.join(".agentdesk");
+        let new_dir = home.join(".adk");
         if old_dir.exists() && !new_dir.exists() {
             if let Err(e) = std::fs::rename(&old_dir, &new_dir) {
                 eprintln!(
-                    "Warning: failed to migrate ~/.cokacdir to ~/.agentdesk: {}",
+                    "Warning: failed to migrate ~/.cokacdir to ~/.adk: {}",
                     e
                 );
             }

@@ -1376,7 +1376,7 @@ pub(super) async fn handle_text_message(
     {
         let script = dirs::home_dir()
             .unwrap_or_default()
-            .join(".agentdesk/scripts/worktree-autosync.sh");
+            .join(".adk/scripts/worktree-autosync.sh");
         if script.exists() {
             let ws = current_path.clone();
             let ts = chrono::Local::now().format("%H:%M:%S");
