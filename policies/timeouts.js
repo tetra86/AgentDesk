@@ -773,6 +773,55 @@ var timeouts = {
         "🔄 [고아 디스패치 복구] " + orphanAgent + " — " + orphanTitle +
         "\n사유: pending 디스패치 5분 경과 + 활성 세션 없음 → review 전이");
     }
+
+    // ─── [L] 장시간 턴 감지 — inflight started_at 기반 ─────────
+    // heartbeat와 독립. 프로세스 살아있어도 턴이 15분 이상이면 알림.
+    var LONG_TURN_MINUTES = 15;
+    var inflightDirs = ["claude", "codex"];
+    for (var ld = 0; ld < inflightDirs.length; ld++) {
+      var provider = inflightDirs[ld];
+      try {
+        var lsResult = agentdesk.exec("ls", JSON.stringify(["-1",
+          agentdesk.config.get("runtime_root") || (agentdesk.exec("sh", JSON.stringify(["-c", "echo $HOME"])).trim() + "/.adk/release") + "/runtime/discord_inflight/" + provider + "/"]));
+        if (!lsResult) continue;
+        var files = lsResult.trim().split("\n").filter(function(f) { return f.endsWith(".json"); });
+        for (var lf = 0; lf < files.length; lf++) {
+          var channelId = files[lf].replace(".json", "");
+          var cooldownKey = "long_turn_alert:" + provider + ":" + channelId;
+          var lastAlert = agentdesk.db.query("SELECT value FROM kv_meta WHERE key = ?", [cooldownKey]);
+          if (lastAlert.length > 0) {
+            var lastMs = parseInt(lastAlert[0].value, 10);
+            if (Date.now() - lastMs < LONG_TURN_MINUTES * 60 * 1000) continue;
+          }
+          try {
+            var filePath = (agentdesk.config.get("runtime_root") || (agentdesk.exec("sh", JSON.stringify(["-c", "echo $HOME"])).trim() + "/.adk/release")) + "/runtime/discord_inflight/" + provider + "/" + files[lf];
+            var content = agentdesk.exec("cat", JSON.stringify([filePath]));
+            if (!content) continue;
+            var inflight = JSON.parse(content);
+            if (!inflight.started_at) continue;
+            var startedAt = new Date(inflight.started_at);
+            var elapsedMin = (Date.now() - startedAt.getTime()) / 60000;
+            if (elapsedMin >= LONG_TURN_MINUTES) {
+              var sessionKey = inflight.session_key || (provider + ":" + channelId);
+              var agentId = inflight.agent_id || "unknown";
+              var dispatchId = inflight.dispatch_id || "none";
+              sendDeadlockAlert(
+                "⚠️ [장시간 턴] " + agentId + "\n" +
+                "session: " + sessionKey + "\n" +
+                "경과: " + Math.round(elapsedMin) + "분\n" +
+                "dispatch: " + dispatchId + "\n" +
+                "provider: " + provider
+              );
+              agentdesk.db.execute(
+                "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?, ?)",
+                [cooldownKey, "" + Date.now()]
+              );
+              agentdesk.log.warn("[long-turn] " + sessionKey + " — " + Math.round(elapsedMin) + "min");
+            }
+          } catch(fe) {}
+        }
+      } catch(de) {}
+    }
   },
 
   // ─── [I] 컨텍스트 윈도우 자동 관리 ─────────────────────
