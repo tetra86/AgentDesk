@@ -869,10 +869,10 @@ fn register_kv_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;
     let kv_obj = Object::new(ctx.clone())?;
 
-    // kv.set(key, value, ttlSeconds?)
+    // __kvSetRaw(key, value, ttlSeconds) — Rust raw impl, always 3 args
     let db_set = db.clone();
     kv_obj.set(
-        "set",
+        "__setRaw",
         Function::new(
             ctx.clone(),
             move |key: String, value: String, ttl_seconds: i64| -> String {
@@ -902,21 +902,23 @@ fn register_kv_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
         )?,
     )?;
 
-    // kv.get(key) → value string or empty string (skips expired)
+    // __kvGetRaw(key) → JSON: {"found":true,"value":"..."} or {"found":false}
     let db_get = db.clone();
     kv_obj.set(
-        "get",
+        "__getRaw",
         Function::new(ctx.clone(), move |key: String| -> String {
             let conn = match db_get.separate_conn() {
                 Ok(c) => c,
-                Err(_) => return String::new(),
+                Err(_) => return r#"{"found":false}"#.to_string(),
             };
-            conn.query_row(
+            match conn.query_row(
                 "SELECT value FROM kv_meta WHERE key = ?1 AND (expires_at IS NULL OR expires_at > datetime('now'))",
                 [&key],
                 |row| row.get::<_, String>(0),
-            )
-            .unwrap_or_default()
+            ) {
+                Ok(v) => format!(r#"{{"found":true,"value":{}}}"#, serde_json::json!(v)),
+                Err(_) => r#"{"found":false}"#.to_string(),
+            }
         })?,
     )?;
 
@@ -937,6 +939,21 @@ fn register_kv_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
     )?;
 
     ad.set("kv", kv_obj)?;
+
+    // JS wrappers for optional TTL and null semantics
+    ctx.eval::<(), _>(r#"
+        (function() {
+            var raw = agentdesk.kv;
+            agentdesk.kv.set = function(key, value, ttlSeconds) {
+                return JSON.parse(raw.__setRaw(key, value, ttlSeconds || 0));
+            };
+            agentdesk.kv.get = function(key) {
+                var r = JSON.parse(raw.__getRaw(key));
+                return r.found ? r.value : null;
+            };
+        })();
+    "#)?;
+
     Ok(())
 }
 
