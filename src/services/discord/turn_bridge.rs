@@ -957,21 +957,49 @@ pub(super) fn spawn_turn_bridge(
                 }
 
                 if full_response.is_empty() {
-                    if rx_disconnected {
-                        full_response = "(No response — 프로세스가 응답 없이 종료됨)".to_string();
-                        let ts = chrono::Local::now().format("%H:%M:%S");
-                        eprintln!(
-                            "  [{ts}] ⚠ Empty response: rx disconnected before any text \
-                             (channel {}, output_path={:?}, last_offset={})",
-                            channel_id, inflight_state.output_path, inflight_state.last_offset
-                        );
-                    } else {
-                        full_response = "(No response)".to_string();
-                        let ts = chrono::Local::now().format("%H:%M:%S");
-                        eprintln!(
-                            "  [{ts}] ⚠ Empty response: done without text (channel {})",
-                            channel_id
-                        );
+                    // Check tmux output for resume failure ("No conversation found")
+                    // and clear the stale session_id so next turn starts fresh
+                    let mut resume_failed = false;
+                    if let Some(ref path) = inflight_state.output_path {
+                        if let Ok(content) = std::fs::read_to_string(path) {
+                            if content.contains("No conversation found") || content.contains("Error: No conversation") {
+                                resume_failed = true;
+                                let ts = chrono::Local::now().format("%H:%M:%S");
+                                eprintln!(
+                                    "  [{ts}] ⚠ Resume failed (stale session_id), clearing for fresh start (channel {})",
+                                    channel_id
+                                );
+                                // Clear in-memory session_id
+                                let mut data = shared_owned.core.lock().await;
+                                if let Some(session) = data.sessions.get_mut(&channel_id) {
+                                    session.session_id = None;
+                                }
+                                drop(data);
+                                // Clear DB session_id
+                                if let Some(ref key) = adk_session_key {
+                                    super::adk_session::save_claude_session_id(key, "", shared_owned.api_port).await;
+                                }
+                                full_response = "⚠️ 이전 대화 세션이 만료되어 새 세션으로 시작합니다. 메시지를 다시 보내주세요.".to_string();
+                            }
+                        }
+                    }
+                    if !resume_failed {
+                        if rx_disconnected {
+                            full_response = "(No response — 프로세스가 응답 없이 종료됨)".to_string();
+                            let ts = chrono::Local::now().format("%H:%M:%S");
+                            eprintln!(
+                                "  [{ts}] ⚠ Empty response: rx disconnected before any text \
+                                 (channel {}, output_path={:?}, last_offset={})",
+                                channel_id, inflight_state.output_path, inflight_state.last_offset
+                            );
+                        } else {
+                            full_response = "(No response)".to_string();
+                            let ts = chrono::Local::now().format("%H:%M:%S");
+                            eprintln!(
+                                "  [{ts}] ⚠ Empty response: done without text (channel {})",
+                                channel_id
+                            );
+                        }
                     }
                 }
             }
