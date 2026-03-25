@@ -350,22 +350,15 @@ pub fn fire_transition_hooks(db: &Db, engine: &PolicyEngine, card_id: &str, from
 /// cross-card misroute when multiple cards create dispatches concurrently.
 fn notify_new_dispatches_after_hooks(db: &Db, card_id: &str, pre_dispatch_id: Option<&str>) {
     // Query pending dispatches for THIS card that are newer than the pre-hook snapshot.
-    // This avoids the old 5-second global scan that could pick up dispatches from
-    // unrelated cards and route them through the wrong thread/issue context.
+    // Uses rowid comparison instead of timestamp — SQLite datetime('now') has only
+    // second-level resolution, so dispatches created in the same second would be missed
+    // by a timestamp comparison. Rowid is monotonically increasing and survives same-second inserts.
     let pending_dispatches: Vec<(String, String, String, String)> = db
         .lock()
         .ok()
         .map(|conn| {
-            let sql = if let Some(pre_id) = pre_dispatch_id {
-                // Find dispatches for this card created after the pre-hook dispatch
-                let pre_ts: Option<String> = conn
-                    .query_row(
-                        "SELECT created_at FROM task_dispatches WHERE id = ?1",
-                        [pre_id],
-                        |row| row.get(0),
-                    )
-                    .ok();
-                let ts = pre_ts.unwrap_or_else(|| "1970-01-01".to_string());
+            if let Some(pre_id) = pre_dispatch_id {
+                // Find dispatches for this card inserted after the pre-hook dispatch (by rowid)
                 let mut stmt = conn
                     .prepare(
                         "SELECT td.id, td.to_agent_id, td.kanban_card_id, kc.title \
@@ -373,12 +366,12 @@ fn notify_new_dispatches_after_hooks(db: &Db, card_id: &str, pre_dispatch_id: Op
                          JOIN kanban_cards kc ON td.kanban_card_id = kc.id \
                          WHERE td.kanban_card_id = ?1 \
                            AND td.status = 'pending' \
-                           AND td.created_at > ?2",
+                           AND td.rowid > (SELECT rowid FROM task_dispatches WHERE id = ?2)",
                     )
                     .ok();
                 stmt.as_mut()
                     .and_then(|s| {
-                        s.query_map(rusqlite::params![card_id, ts], |row| {
+                        s.query_map(rusqlite::params![card_id, pre_id], |row| {
                             Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
                         })
                         .ok()
@@ -416,8 +409,7 @@ fn notify_new_dispatches_after_hooks(db: &Db, card_id: &str, pre_dispatch_id: Op
                     })
                     .map(|rows| rows.filter_map(|r| r.ok()).collect())
                     .unwrap_or_default()
-            };
-            sql
+            }
         })
         .unwrap_or_default();
 
@@ -740,5 +732,135 @@ mod tests {
         let result =
             transition_status_with_opts(&db, &engine, "card-force", "in_progress", "pmd", true);
         assert!(result.is_ok(), "force=true should bypass dispatch check");
+    }
+
+    /// Regression: same-second dispatch creation must still be detected by rowid comparison.
+    /// Previously used `created_at >` which has only second-level resolution and missed
+    /// dispatches created in the same wall-clock second.
+    #[test]
+    fn notify_query_detects_same_second_dispatch_via_rowid() {
+        let db = test_db();
+        seed_card(&db, "card-notify", "in_progress");
+
+        // Insert pre-hook dispatch (simulates the dispatch that existed before hooks ran)
+        let pre_dispatch_id = "dispatch-pre";
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at) \
+                 VALUES (?1, 'card-notify', 'agent-1', 'implementation', 'dispatched', 'Pre', datetime('now'), datetime('now'))",
+                [pre_dispatch_id],
+            ).unwrap();
+        }
+
+        // Insert hook-created dispatch in the SAME second (same datetime('now'))
+        let new_dispatch_id = "dispatch-new";
+        {
+            let conn = db.lock().unwrap();
+            // Use the exact same timestamp to simulate same-second creation
+            let pre_ts: String = conn.query_row(
+                "SELECT created_at FROM task_dispatches WHERE id = ?1",
+                [pre_dispatch_id],
+                |row| row.get(0),
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at) \
+                 VALUES (?1, 'card-notify', 'agent-1', 'review', 'pending', 'New', ?2, ?2)",
+                rusqlite::params![new_dispatch_id, pre_ts],
+            ).unwrap();
+            conn.execute(
+                "UPDATE kanban_cards SET latest_dispatch_id = ?1 WHERE id = 'card-notify'",
+                [new_dispatch_id],
+            ).unwrap();
+        }
+
+        // Verify: the rowid-based query used by notify_new_dispatches_after_hooks
+        // finds the new dispatch even though created_at is identical
+        let found: Vec<String> = {
+            let conn = db.lock().unwrap();
+            let mut stmt = conn.prepare(
+                "SELECT td.id FROM task_dispatches td \
+                 JOIN kanban_cards kc ON td.kanban_card_id = kc.id \
+                 WHERE td.kanban_card_id = ?1 \
+                   AND td.status = 'pending' \
+                   AND td.rowid > (SELECT rowid FROM task_dispatches WHERE id = ?2)",
+            ).unwrap();
+            stmt.query_map(rusqlite::params!["card-notify", pre_dispatch_id], |row| row.get(0))
+                .unwrap()
+                .filter_map(|r| r.ok())
+                .collect()
+        };
+
+        assert_eq!(found.len(), 1, "must find exactly 1 new dispatch");
+        assert_eq!(found[0], new_dispatch_id);
+
+        // Counter-check: the old timestamp-based approach would fail here
+        let found_by_ts: i64 = {
+            let conn = db.lock().unwrap();
+            conn.query_row(
+                "SELECT COUNT(*) FROM task_dispatches td \
+                 WHERE td.kanban_card_id = 'card-notify' \
+                   AND td.status = 'pending' \
+                   AND td.created_at > (SELECT created_at FROM task_dispatches WHERE id = ?1)",
+                [pre_dispatch_id],
+                |row| row.get(0),
+            ).unwrap()
+        };
+        assert_eq!(
+            found_by_ts, 0,
+            "timestamp-based query misses same-second dispatch (proving rowid fix is necessary)"
+        );
+    }
+
+    /// Regression: dispatches from different cards must not leak into each other's
+    /// notification query — the card_id filter must be exact.
+    #[test]
+    fn notify_query_isolates_dispatches_by_card() {
+        let db = test_db();
+        seed_card(&db, "card-x", "in_progress");
+        seed_card(&db, "card-y", "in_progress");
+
+        // Pre-hook dispatch for card-x
+        let pre_id = "dispatch-x-pre";
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at) \
+                 VALUES (?1, 'card-x', 'agent-1', 'implementation', 'dispatched', 'X-Pre', datetime('now'), datetime('now'))",
+                [pre_id],
+            ).unwrap();
+        }
+
+        // New dispatch for card-y (different card, higher rowid)
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at) \
+                 VALUES ('dispatch-y-new', 'card-y', 'agent-1', 'implementation', 'pending', 'Y-New', datetime('now'), datetime('now'))",
+                [],
+            ).unwrap();
+        }
+
+        // Query for card-x should NOT find card-y's dispatch
+        let found: Vec<String> = {
+            let conn = db.lock().unwrap();
+            let mut stmt = conn.prepare(
+                "SELECT td.id FROM task_dispatches td \
+                 JOIN kanban_cards kc ON td.kanban_card_id = kc.id \
+                 WHERE td.kanban_card_id = ?1 \
+                   AND td.status = 'pending' \
+                   AND td.rowid > (SELECT rowid FROM task_dispatches WHERE id = ?2)",
+            ).unwrap();
+            stmt.query_map(rusqlite::params!["card-x", pre_id], |row| row.get(0))
+                .unwrap()
+                .filter_map(|r| r.ok())
+                .collect()
+        };
+
+        assert!(
+            found.is_empty(),
+            "card-x query must not find card-y's dispatch, but found: {:?}",
+            found
+        );
     }
 }
