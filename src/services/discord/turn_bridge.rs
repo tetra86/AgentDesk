@@ -930,8 +930,13 @@ pub(super) fn spawn_turn_bridge(
             // Tmux watcher is handling response delivery — this is normal.
             // Don't delete placeholder — update it so the user sees the turn is still active.
             // The tmux watcher will replace this content when output arrives.
-            let _ = channel_id.edit_message(&http, current_msg_id,
-                serenity::builder::EditMessage::new().content("⏳ 처리 중...")).await;
+            let _ = channel_id
+                .edit_message(
+                    &http,
+                    current_msg_id,
+                    serenity::builder::EditMessage::new().content("⏳ 처리 중..."),
+                )
+                .await;
             let ts = chrono::Local::now().format("%H:%M:%S");
             eprintln!(
                 "  [{ts}] ✓ tmux handoff complete, placeholder cleaned up, watcher handles response (channel {})",
@@ -962,22 +967,65 @@ pub(super) fn spawn_turn_bridge(
                     let mut resume_failed = false;
                     if let Some(ref path) = inflight_state.output_path {
                         if let Ok(content) = std::fs::read_to_string(path) {
-                            if content.contains("No conversation found") || content.contains("Error: No conversation") {
+                            if content.contains("No conversation found")
+                                || content.contains("Error: No conversation")
+                            {
                                 resume_failed = true;
                                 let ts = chrono::Local::now().format("%H:%M:%S");
                                 eprintln!(
                                     "  [{ts}] ⚠ Resume failed (stale session_id), clearing for fresh start (channel {})",
                                     channel_id
                                 );
-                                // Clear in-memory session_id
-                                let mut data = shared_owned.core.lock().await;
-                                if let Some(session) = data.sessions.get_mut(&channel_id) {
-                                    session.session_id = None;
-                                }
-                                drop(data);
-                                // Clear DB session_id
+                                // Clear stale session_id from ALL 3 storage locations:
+                                // 1. In-memory
+                                let stale_sid = {
+                                    let mut data = shared_owned.core.lock().await;
+                                    let old_sid = data
+                                        .sessions
+                                        .get(&channel_id)
+                                        .and_then(|s| s.session_id.clone());
+                                    if let Some(session) = data.sessions.get_mut(&channel_id) {
+                                        session.session_id = None;
+                                    }
+                                    old_sid
+                                };
+                                // 2. DB
                                 if let Some(ref key) = adk_session_key {
-                                    super::adk_session::save_claude_session_id(key, "", shared_owned.api_port).await;
+                                    super::adk_session::save_claude_session_id(
+                                        key,
+                                        "",
+                                        shared_owned.api_port,
+                                    )
+                                    .await;
+                                }
+                                // 3. Session file on disk (ai_sessions/{id}.json)
+                                if let Some(ref sid) = stale_sid {
+                                    if let Some(root) = crate::cli::agentdesk_runtime_root() {
+                                        let session_file =
+                                            root.join("ai_sessions").join(format!("{sid}.json"));
+                                        if session_file.exists() {
+                                            let _ = std::fs::remove_file(&session_file);
+                                            eprintln!(
+                                                "  [{ts}] 🗑 Removed stale session file: {}",
+                                                session_file.display()
+                                            );
+                                        }
+                                    }
+                                }
+                                // Also clear any other sessions in DB with same stale ID via API
+                                if let Some(ref sid) = stale_sid {
+                                    let port = shared_owned.api_port;
+                                    let sid_clone = sid.clone();
+                                    tokio::spawn(async move {
+                                        let url = format!(
+                                            "http://127.0.0.1:{port}/api/dispatched-sessions/clear-stale-session-id"
+                                        );
+                                        let _ = reqwest::Client::new()
+                                            .post(&url)
+                                            .json(&serde_json::json!({"claude_session_id": sid_clone}))
+                                            .send()
+                                            .await;
+                                    });
                                 }
                                 full_response = "⚠️ 이전 대화 세션이 만료되어 새 세션으로 시작합니다. 메시지를 다시 보내주세요.".to_string();
                             }
@@ -985,7 +1033,8 @@ pub(super) fn spawn_turn_bridge(
                     }
                     if !resume_failed {
                         if rx_disconnected {
-                            full_response = "(No response — 프로세스가 응답 없이 종료됨)".to_string();
+                            full_response =
+                                "(No response — 프로세스가 응답 없이 종료됨)".to_string();
                             let ts = chrono::Local::now().format("%H:%M:%S");
                             eprintln!(
                                 "  [{ts}] ⚠ Empty response: rx disconnected before any text \
@@ -1200,11 +1249,8 @@ pub(super) fn spawn_turn_bridge(
                     )
                     .await
                     {
-                        super::adk_session::delete_adk_session(
-                            &session_key,
-                            shared_owned.api_port,
-                        )
-                        .await;
+                        super::adk_session::delete_adk_session(&session_key, shared_owned.api_port)
+                            .await;
                     }
                 }
             }

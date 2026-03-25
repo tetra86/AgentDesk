@@ -265,6 +265,10 @@ pub fn api_router(
             "/dispatched-sessions/claude-session-id",
             get(dispatched_sessions::get_claude_session_id),
         )
+        .route(
+            "/dispatched-sessions/clear-stale-session-id",
+            post(dispatched_sessions::clear_stale_session_id),
+        )
         // Messages
         .route(
             "/messages",

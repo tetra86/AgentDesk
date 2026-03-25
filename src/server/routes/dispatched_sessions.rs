@@ -307,9 +307,7 @@ pub async fn hook_session(
             )
             .ok()
             .and_then(|(dtype, dstatus)| {
-                ((dtype == "implementation"
-                    || dtype == "rework"
-                    || dtype == "review")
+                ((dtype == "implementation" || dtype == "rework" || dtype == "review")
                     && dstatus == "pending")
                     .then_some(did.clone())
             })
@@ -566,15 +564,44 @@ pub async fn get_claude_session_id(
             StatusCode::OK,
             Json(json!({"claude_session_id": claude_session_id})),
         ),
-        Err(rusqlite::Error::QueryReturnedNoRows) => (
-            StatusCode::OK,
-            Json(json!({"claude_session_id": null})),
-        ),
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            (StatusCode::OK, Json(json!({"claude_session_id": null})))
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": format!("{e}")})),
         ),
     }
+}
+
+/// POST /api/dispatched-sessions/clear-stale-session-id
+/// Clears claude_session_id from ALL sessions that have the given stale ID.
+pub async fn clear_stale_session_id(
+    State(state): State<AppState>,
+    Json(body): Json<serde_json::Value>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let Some(sid) = body.get("claude_session_id").and_then(|v| v.as_str()) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "claude_session_id required"})),
+        );
+    };
+    let conn = match state.db.lock() {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{e}")})),
+            );
+        }
+    };
+    let changes = conn
+        .execute(
+            "UPDATE sessions SET claude_session_id = NULL WHERE claude_session_id = ?1",
+            [sid],
+        )
+        .unwrap_or(0);
+    (StatusCode::OK, Json(json!({"cleared": changes})))
 }
 
 /// GC stale thread sessions from DB: idle/disconnected + older than 1 hour.
@@ -906,7 +933,7 @@ mod tests {
             let conn = db.lock().unwrap();
             conn.execute(
                 "INSERT INTO kanban_cards (id, title, status, latest_dispatch_id, review_status, created_at, updated_at)
-                 VALUES (?1, 'Review Decision Card', 'suggestion_pending', ?2, 'reviewed', datetime('now'), datetime('now'))",
+                 VALUES (?1, 'Review Decision Card', 'review', ?2, 'suggestion_pending', datetime('now'), datetime('now'))",
                 rusqlite::params![card_id, dispatch_id],
             )
             .unwrap();
