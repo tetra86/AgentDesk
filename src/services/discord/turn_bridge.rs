@@ -75,7 +75,7 @@ pub(super) fn cancel_active_token(token: &Arc<CancelToken>, cleanup_tmux: bool, 
 }
 
 #[cfg(unix)]
-pub(super) fn tmux_runtime_paths(tmux_session_name: &str) -> (String, String) {
+pub(crate) fn tmux_runtime_paths(tmux_session_name: &str) -> (String, String) {
     use crate::services::tmux_common::session_temp_path;
     (
         session_temp_path(tmux_session_name, "jsonl"),
@@ -84,7 +84,7 @@ pub(super) fn tmux_runtime_paths(tmux_session_name: &str) -> (String, String) {
 }
 
 #[cfg(not(unix))]
-pub(super) fn tmux_runtime_paths(tmux_session_name: &str) -> (String, String) {
+pub(crate) fn tmux_runtime_paths(tmux_session_name: &str) -> (String, String) {
     let tmp = std::env::temp_dir();
     (
         tmp.join(format!("agentdesk-{}.jsonl", tmux_session_name))
