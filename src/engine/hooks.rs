@@ -38,6 +38,11 @@ impl Hook {
             Hook::OnTick,
         ]
     }
+
+    /// Parse a hook name string back into a Hook variant.
+    pub fn from_str(s: &str) -> Option<Hook> {
+        Hook::all().iter().find(|h| h.js_name() == s).copied()
+    }
 }
 
 impl fmt::Display for Hook {

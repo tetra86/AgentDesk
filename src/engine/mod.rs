@@ -37,9 +37,8 @@ impl Drop for PolicyEngineInner {
 #[derive(Clone)]
 pub struct PolicyEngine {
     inner: Arc<Mutex<PolicyEngineInner>>,
-    /// Hooks that were skipped by try_fire_hook (engine was busy).
-    /// Drained and re-executed when the engine lock is next acquired.
-    deferred_hooks: Arc<Mutex<Vec<(Hook, serde_json::Value)>>>,
+    /// DB handle for persistent deferred hooks queue (#125).
+    db: crate::db::Db,
 }
 
 /// Summary of a loaded policy (for the /api/policies endpoint).
@@ -111,7 +110,7 @@ impl PolicyEngine {
                 policies: store,
                 _watcher: watcher,
             })),
-            deferred_hooks: Arc::new(Mutex::new(Vec::new())),
+            db: db.clone(),
         })
     }
 
@@ -123,9 +122,14 @@ impl PolicyEngine {
         let inner = match self.inner.try_lock() {
             Ok(guard) => guard,
             Err(std::sync::TryLockError::WouldBlock) => {
-                tracing::info!("try_fire_hook({hook}): engine busy, deferring");
-                if let Ok(mut deferred) = self.deferred_hooks.lock() {
-                    deferred.push((hook, payload));
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                println!("  [{ts}] ⏸ try_fire_hook({hook}): engine busy, deferring to DB");
+                // Persist to deferred_hooks table (#125)
+                if let Ok(conn) = self.db.separate_conn() {
+                    let _ = conn.execute(
+                        "INSERT INTO deferred_hooks (hook_name, payload) VALUES (?1, ?2)",
+                        rusqlite::params![hook.to_string(), payload.to_string()],
+                    );
                 }
                 return Ok(());
             }
@@ -135,17 +139,125 @@ impl PolicyEngine {
         };
         // Execute the requested hook
         Self::fire_hook_with_guard(&inner, hook, payload)?;
-        // Drain and execute any deferred hooks
-        let deferred: Vec<(Hook, serde_json::Value)> = self
-            .deferred_hooks
-            .lock()
-            .map(|mut d| d.drain(..).collect())
-            .unwrap_or_default();
-        for (h, p) in deferred {
-            tracing::info!("fire_hook(deferred {h})");
-            let _ = Self::fire_hook_with_guard(&inner, h, p);
+        // Drain deferred hooks from DB while holding inner guard
+        // (fire_hook_with_guard doesn't need separate lock)
+        loop {
+            let rows: Vec<(i64, String, String)> = {
+                let conn = match self.db.separate_conn() {
+                    Ok(c) => c,
+                    Err(_) => break,
+                };
+                let mut stmt = match conn.prepare(
+                    "SELECT id, hook_name, payload FROM deferred_hooks \
+                     WHERE status = 'pending' ORDER BY id ASC LIMIT 50",
+                ) {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+                    .ok()
+                    .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                    .unwrap_or_default()
+            };
+            if rows.is_empty() {
+                break;
+            }
+            for (id, hook_name, payload_str) in &rows {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                println!("  [{ts}] 🔄 fire_hook(deferred {hook_name}, id={id})");
+                if let Some(h) = Hook::from_str(hook_name) {
+                    let p: serde_json::Value =
+                        serde_json::from_str(payload_str).unwrap_or(serde_json::json!({}));
+                    let _ = Self::fire_hook_with_guard(&inner, h, p);
+                }
+            }
+            // Delete processed
+            if let Ok(conn) = self.db.separate_conn() {
+                for (id, _, _) in &rows {
+                    let _ = conn.execute("DELETE FROM deferred_hooks WHERE id = ?1", [id]);
+                }
+            }
         }
         Ok(())
+    }
+
+    /// Drain any deferred hooks that survived a restart (#125).
+    /// Called once at server startup before any workers are spawned.
+    /// At-least-once: marks rows as 'processing' before firing, deletes only after success.
+    /// If the process crashes mid-replay, undeleted rows will be retried on next startup.
+    pub fn drain_startup_hooks(&self) {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        println!("  [{ts}] 🔄 [startup] draining deferred hooks from DB");
+
+        loop {
+            // Read a batch and mark as 'processing' so nested drain in try_fire_hook
+            // won't re-read them, but they survive a crash.
+            let hooks: Vec<(i64, String, String)> = {
+                let conn = match self.db.separate_conn() {
+                    Ok(c) => c,
+                    Err(_) => return,
+                };
+                let mut stmt = match conn.prepare(
+                    "SELECT id, hook_name, payload FROM deferred_hooks \
+                     WHERE status = 'pending' ORDER BY id ASC LIMIT 50",
+                ) {
+                    Ok(s) => s,
+                    Err(_) => return,
+                };
+                let rows: Vec<(i64, String, String)> = stmt
+                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+                    .ok()
+                    .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                    .unwrap_or_default();
+                if rows.is_empty() {
+                    return;
+                }
+                // Mark as processing — survives crash, invisible to nested drain
+                for (id, _, _) in &rows {
+                    let _ = conn.execute(
+                        "UPDATE deferred_hooks SET status = 'processing' WHERE id = ?1",
+                        [id],
+                    );
+                }
+                rows
+            };
+
+            // Fire each hook, delete only after successful execution
+            for (id, hook_name, payload_str) in &hooks {
+                if let Some(hook) = Hook::from_str(hook_name) {
+                    let payload: serde_json::Value =
+                        serde_json::from_str(payload_str).unwrap_or(serde_json::json!({}));
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    println!("  [{ts}] 🔄 [startup] replaying deferred {hook_name} (id={id})");
+                    if let Err(e) = self.try_fire_hook(hook, payload) {
+                        tracing::warn!("[startup] deferred hook {hook_name} failed: {e}");
+                        // Leave in DB as 'processing' — will be retried on next startup
+                        // after resetting status back to pending
+                        if let Ok(conn) = self.db.separate_conn() {
+                            let _ = conn.execute(
+                                "UPDATE deferred_hooks SET status = 'pending' WHERE id = ?1",
+                                [id],
+                            );
+                        }
+                        continue;
+                    }
+                    // Success — delete from DB
+                    if let Ok(conn) = self.db.separate_conn() {
+                        let _ = conn.execute("DELETE FROM deferred_hooks WHERE id = ?1", [id]);
+                    }
+                    // Drain pending transitions
+                    loop {
+                        let transitions = self.drain_pending_transitions();
+                        if transitions.is_empty() {
+                            break;
+                        }
+                        for (card_id, old_s, new_s) in &transitions {
+                            crate::kanban::fire_transition_hooks(&self.db, self, card_id, old_s, new_s);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     pub fn fire_hook(&self, hook: Hook, payload: serde_json::Value) -> Result<()> {

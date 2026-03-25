@@ -53,13 +53,16 @@ var triage = {
             [card.id]
           );
           if (issueNum.length > 0 && issueNum[0].github_issue_url) {
-            var port = agentdesk.config.get("server_port") || 8791;
-            try {
-              // DISABLED: Self-referential HTTP deadlock. Deferred to [I-0] recovery.
-              agentdesk.log.info("[triage] PMD classification request deferred for " + card.id);
+            var pmdCh = agentdesk.config.get("kanban_manager_channel_id");
+            if (pmdCh) {
+              var issueLink = "[" + issueNum[0].title + " #" + issueNum[0].github_issue_number + "](<" + issueNum[0].github_issue_url + ">)";
+              agentdesk.message.queue(
+                "channel:" + pmdCh,
+                "📋 Triage 분류 요청: " + issueLink,
+                "announce",
+                "system"
+              );
               agentdesk.log.info("[triage] PMD classification requested for " + card.id);
-            } catch(e) {
-              agentdesk.log.warn("[triage] PMD request failed: " + e);
             }
           }
         }

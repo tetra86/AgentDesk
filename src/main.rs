@@ -13,6 +13,9 @@ mod services;
 mod ui;
 mod utils;
 
+#[cfg(test)]
+mod integration_tests;
+
 // Re-export for crate-level access (used by services::discord::mod.rs)
 pub(crate) use cli::agentdesk_runtime_root;
 

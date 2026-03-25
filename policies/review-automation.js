@@ -9,8 +9,7 @@
  */
 
 function sendDiscordReview(target, content, bot) {
-  // DISABLED: Self-referential HTTP deadlock. Notifications deferred to [I-0] recovery.
-  agentdesk.log.info("[review] notification deferred: " + content.substring(0, 100));
+  agentdesk.message.queue(target, content, bot || "announce", "system");
 }
 
 function notifyPmdPendingDecision(cardId, reason) {

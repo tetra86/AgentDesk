@@ -21,8 +21,7 @@
 // Send notification via notify bot (system alerts, not agent communication)
 function sendNotifyAlert(channelTarget, message) {
   if (!channelTarget) return;
-  // DISABLED: Self-referential HTTP deadlock risk.
-  agentdesk.log.info("[notify] Alert deferred: " + message.substring(0, 120));
+  agentdesk.message.queue(channelTarget, message, "notify", "system");
 }
 
 // Get PMD channel for alerts
@@ -39,17 +38,12 @@ function getPMDChannel() {
 function sendDeadlockAlert(message) {
   var ch = agentdesk.config.get("deadlock_manager_channel_id");
   if (!ch) {
-    // Fallback to PMD channel if deadlock-manager not configured
-    sendNotifyAlert(getPMDChannel(), message);
+    // Fallback to PMD channel via announce bot (actionable alert, not info-only)
+    var pmd = getPMDChannel();
+    if (pmd) agentdesk.message.queue(pmd, message, "announce", "system");
     return;
   }
-  try {
-    var port = agentdesk.config.get("server_port") || 8791;
-    // DISABLED: Self-referential HTTP deadlock risk.
-    agentdesk.log.info("[deadlock] Alert deferred: " + message.substring(0, 120));
-  } catch (e) {
-    agentdesk.log.warn("[deadlock] Alert failed: " + e);
-  }
+  agentdesk.message.queue("channel:" + ch, message, "announce", "system");
 }
 
 var timeouts = {
@@ -173,20 +167,13 @@ var timeouts = {
             [card.id]
           );
           agentdesk.log.warn("[reconcile] Card " + card.id + " → pending_decision: " + reasons.join("; "));
-          // PMD notification — mirrors kanban-rules.js:262 notifyPMD()
-          // Uses announce bot (not notify) matching the canonical path.
-          // TODO(#120): replace with agentdesk.message.queue() when async queue lands
+          // PMD notification via async outbox (#120)
           var pmdCh = agentdesk.config.get("kanban_manager_channel_id");
           if (pmdCh) {
             var cardTitle2 = agentdesk.db.query("SELECT title FROM kanban_cards WHERE id = ?", [card.id]);
             var t2 = cardTitle2.length > 0 ? cardTitle2[0].title : card.id;
             var pmdMsg = "[PM Decision] " + t2 + "\n사유: " + reasons.join("; ");
-            // Queue for async delivery via kv_meta (picked up by future #120 worker)
-            agentdesk.db.execute(
-              "INSERT OR REPLACE INTO kv_meta (key, value) VALUES (?, ?)",
-              ["pending_notification:" + card.id, JSON.stringify({target: "channel:" + pmdCh, content: pmdMsg, bot: "announce"})]
-            );
-            agentdesk.log.info("[reconcile] PMD notification queued (announce): " + card.id);
+            agentdesk.message.queue("channel:" + pmdCh, pmdMsg, "announce", "system");
           }
           continue;
         }
@@ -241,11 +228,13 @@ var timeouts = {
         var cardUrl = (cardInfo.length > 0 && cardInfo[0].github_issue_url) ? "\n" + cardInfo[0].github_issue_url : "";
         var assignee = (cardInfo.length > 0 && cardInfo[0].assigned_agent_id) ? cardInfo[0].assigned_agent_id : "미배정";
         var kmChannel = getPMDChannel();
-        if (kmChannel) try {
-          // DISABLED: Self-referential HTTP deadlock risk.
-          agentdesk.log.warn("[timeout] PMD decision needed (deferred): " + cardTitle + " — " + MAX_DISPATCH_RETRIES + " retries exhausted");
-        } catch(e) {
-          agentdesk.log.warn("[timeout] PMD decision request failed: " + e);
+        if (kmChannel) {
+          agentdesk.message.queue(
+            kmChannel,
+            "[PM Decision] " + cardTitle + "\n사유: " + MAX_DISPATCH_RETRIES + " retries exhausted",
+            "announce",
+            "system"
+          );
         }
       }
     }
@@ -270,11 +259,13 @@ var timeouts = {
       var stalledUrl = (stalledInfo.length > 0 && stalledInfo[0].github_issue_url) ? "\n" + stalledInfo[0].github_issue_url : "";
       var stalledAssignee = (stalledInfo.length > 0 && stalledInfo[0].assigned_agent_id) ? stalledInfo[0].assigned_agent_id : "미배정";
       var kmChannel2 = getPMDChannel();
-      if (kmChannel2) try {
-        // DISABLED: Self-referential HTTP deadlock risk.
-        agentdesk.log.warn("[timeout] Stalled card PMD alert deferred: " + stalledTitle);
-      } catch(e) {
-        agentdesk.log.warn("[timeout] PMD stalled request failed: " + e);
+      if (kmChannel2) {
+        agentdesk.message.queue(
+          kmChannel2,
+          "[Stalled] " + stalledTitle + " (담당: " + stalledAssignee + ")" + stalledUrl + "\n2시간+ 활동 없음 → blocked",
+          "announce",
+          "system"
+        );
       }
     }
 
@@ -436,10 +427,13 @@ var timeouts = {
         ? "DISPATCH:" + ud.id + " - " + ud.title + "\n⚠️ 검토 전용 — 작업 착수 금지\n코드 리뷰만 수행하고 GitHub 이슈에 코멘트로 피드백해주세요."
         : "DISPATCH:" + ud.id + " - " + ud.title;
 
-      // DISABLED: Self-referential HTTP causes deadlock on first onTick.
-      // Dispatch notification is handled by Rust send_dispatch_to_discord
-      // via kanban.rs notify_new_dispatches_after_hooks.
-      agentdesk.log.info("[notify-recovery] Dispatch " + ud.id + " notification deferred to Rust path");
+      var notifyContent = prefix + issueLink;
+      agentdesk.message.queue("channel:" + channelId, notifyContent, "announce", "system");
+      agentdesk.db.execute(
+        "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('dispatch_notified:' || ?1, datetime('now'))",
+        [ud.id]
+      );
+      agentdesk.log.info("[notify-recovery] Dispatch " + ud.id + " queued for delivery");
     }
 
     // ─── [J] Failed 디스패치 자동 재시도 (30초 쿨다운, 최대 10회) ──
@@ -491,9 +485,13 @@ var timeouts = {
             var retryPrefix = useAlt
               ? "DISPATCH:" + newDispatchId + " - " + fd.title + "\n⚠️ 검토 전용 — 작업 착수 금지\n코드 리뷰만 수행하고 GitHub 이슈에 코멘트로 피드백해주세요."
               : "DISPATCH:" + newDispatchId + " - " + fd.title;
-            // DISABLED: Self-referential HTTP causes deadlock.
-            // Dispatch notification handled by Rust send_dispatch_to_discord.
-            agentdesk.log.info("[retry] Dispatch " + newDispatchId + " notification deferred to Rust path");
+            var retryContent = retryPrefix + issueLink;
+            agentdesk.message.queue("channel:" + retryChannelId, retryContent, "announce", "system");
+            agentdesk.db.execute(
+              "INSERT OR REPLACE INTO kv_meta (key, value) VALUES ('dispatch_notified:' || ?1, datetime('now'))",
+              [newDispatchId]
+            );
+            agentdesk.log.info("[retry] Dispatch " + newDispatchId + " notification queued");
           }
         }
       } catch (e) {

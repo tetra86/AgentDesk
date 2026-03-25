@@ -19,6 +19,9 @@ pub async fn run(
     engine: PolicyEngine,
     health_registry: Option<Arc<HealthRegistry>>,
 ) -> Result<()> {
+    // Startup: drain any deferred hooks persisted before last shutdown (#125)
+    engine.drain_startup_hooks();
+
     // Spawn periodic GitHub sync task
     let sync_interval = config.github.sync_interval_minutes;
     if sync_interval > 0 {
@@ -53,6 +56,15 @@ pub async fn run(
         let rl_db = db.clone();
         tokio::spawn(async move {
             rate_limit_sync_loop(rl_db).await;
+        });
+    }
+
+    // Spawn async message outbox worker (#120) — drains queued messages
+    {
+        let outbox_db = db.clone();
+        let outbox_port = config.server.port;
+        tokio::spawn(async move {
+            message_outbox_loop(outbox_db, outbox_port).await;
         });
     }
 
@@ -615,4 +627,97 @@ fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::
         }
     }
     Ok(count)
+}
+
+/// Async worker that drains the message_outbox table and delivers via /api/send (#120).
+/// Runs every 2 seconds, processes up to 10 messages per tick.
+async fn message_outbox_loop(db: Db, port: u16) {
+    use std::time::Duration;
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .expect("outbox HTTP client");
+
+    let url = format!("http://127.0.0.1:{port}/api/send");
+
+    // Wait for server to be ready
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    tracing::info!("[outbox] Message outbox worker started (polling every 2s)");
+
+    loop {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        // Fetch pending messages
+        let pending: Vec<(i64, String, String, String, String)> = {
+            let conn = match db.lock() {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            let mut stmt = match conn.prepare(
+                "SELECT id, target, content, bot, source FROM message_outbox \
+                 WHERE status = 'pending' ORDER BY id ASC LIMIT 10",
+            ) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            stmt.query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            })
+            .ok()
+            .map(|rows| rows.filter_map(|r| r.ok()).collect())
+            .unwrap_or_default()
+        };
+
+        for (id, target, content, bot, source) in pending {
+            let body = serde_json::json!({
+                "target": target,
+                "content": content,
+                "bot": bot,
+                "source": source,
+            });
+
+            match client.post(&url).json(&body).send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    if let Ok(conn) = db.lock() {
+                        conn.execute(
+                            "UPDATE message_outbox SET status = 'sent', sent_at = datetime('now') WHERE id = ?1",
+                            [id],
+                        )
+                        .ok();
+                    }
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    tracing::debug!("[{ts}] [outbox] ✅ delivered msg {id} → {target}");
+                }
+                Ok(resp) => {
+                    let status = resp.status();
+                    let err_text = resp.text().await.unwrap_or_default();
+                    if let Ok(conn) = db.lock() {
+                        conn.execute(
+                            "UPDATE message_outbox SET status = 'failed', error = ?1 WHERE id = ?2",
+                            rusqlite::params![format!("{status}: {err_text}"), id],
+                        )
+                        .ok();
+                    }
+                    tracing::warn!("[outbox] ❌ msg {id} → {target} failed: {status}");
+                }
+                Err(e) => {
+                    if let Ok(conn) = db.lock() {
+                        conn.execute(
+                            "UPDATE message_outbox SET status = 'failed', error = ?1 WHERE id = ?2",
+                            rusqlite::params![e.to_string(), id],
+                        )
+                        .ok();
+                    }
+                    tracing::warn!("[outbox] ❌ msg {id} → {target} error: {e}");
+                }
+            }
+        }
+    }
 }

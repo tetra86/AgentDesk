@@ -12,10 +12,7 @@
 // ── Helpers ──────────────────────────────────────────────────
 
 function sendDiscordNotification(target, content, bot) {
-  // DISABLED: Self-referential HTTP (/api/send on same server) from within
-  // fire_hook causes deadlock (blocking QuickJS + tokio runtime contention).
-  // PMD notifications are handled by timeouts.js [I-0] recovery instead.
-  agentdesk.log.info("[kanban] notification queued (deferred): " + content.substring(0, 100));
+  agentdesk.message.queue(target, content, bot || "announce", "system");
 }
 
 function notifyPMD(cardId, reason) {

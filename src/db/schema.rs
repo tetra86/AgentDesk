@@ -361,6 +361,47 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         );",
     )?;
 
+    // Deferred hooks queue — persistent queue for hooks skipped when engine is busy (#125)
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS deferred_hooks (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            hook_name  TEXT NOT NULL,
+            payload    TEXT NOT NULL DEFAULT '{}',
+            status     TEXT NOT NULL DEFAULT 'pending',
+            created_at DATETIME DEFAULT (datetime('now'))
+        );",
+    )?;
+    // Add status column if upgrading from pre-status schema
+    {
+        let has_status: bool = conn
+            .prepare("SELECT status FROM deferred_hooks LIMIT 0")
+            .is_ok();
+        if !has_status {
+            conn.execute_batch(
+                "ALTER TABLE deferred_hooks ADD COLUMN status TEXT NOT NULL DEFAULT 'pending';",
+            )?;
+        }
+    }
+    // Reset any 'processing' hooks from a previous crash back to 'pending'
+    conn.execute_batch(
+        "UPDATE deferred_hooks SET status = 'pending' WHERE status = 'processing';",
+    )?;
+
+    // Message outbox — async delivery queue to avoid self-referential HTTP deadlock (#120)
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS message_outbox (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            target     TEXT NOT NULL,
+            content    TEXT NOT NULL,
+            bot        TEXT NOT NULL DEFAULT 'announce',
+            source     TEXT NOT NULL DEFAULT 'system',
+            status     TEXT NOT NULL DEFAULT 'pending',
+            created_at DATETIME DEFAULT (datetime('now')),
+            sent_at    DATETIME,
+            error      TEXT
+        );",
+    )?;
+
     // Audit logs table for analytics dashboard
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS audit_logs (
