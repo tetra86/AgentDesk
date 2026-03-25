@@ -202,7 +202,9 @@ pub fn transition_status_with_opts(
     let extra = match new_status {
         "in_progress" => ", started_at = COALESCE(started_at, datetime('now'))",
         "requested" => ", requested_at = datetime('now')",
-        "done" => ", completed_at = datetime('now'), review_status = NULL, suggestion_pending_at = NULL",
+        "done" => {
+            ", completed_at = datetime('now'), review_status = NULL, suggestion_pending_at = NULL"
+        }
         _ => "",
     };
     let sql = format!(
@@ -764,11 +766,13 @@ mod tests {
         {
             let conn = db.lock().unwrap();
             // Use the exact same timestamp to simulate same-second creation
-            let pre_ts: String = conn.query_row(
-                "SELECT created_at FROM task_dispatches WHERE id = ?1",
-                [pre_dispatch_id],
-                |row| row.get(0),
-            ).unwrap();
+            let pre_ts: String = conn
+                .query_row(
+                    "SELECT created_at FROM task_dispatches WHERE id = ?1",
+                    [pre_dispatch_id],
+                    |row| row.get(0),
+                )
+                .unwrap();
             conn.execute(
                 "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at) \
                  VALUES (?1, 'card-notify', 'agent-1', 'review', 'pending', 'New', ?2, ?2)",
@@ -777,7 +781,8 @@ mod tests {
             conn.execute(
                 "UPDATE kanban_cards SET latest_dispatch_id = ?1 WHERE id = 'card-notify'",
                 [new_dispatch_id],
-            ).unwrap();
+            )
+            .unwrap();
         }
 
         // Verify: the rowid-based query used by notify_new_dispatches_after_hooks
@@ -785,12 +790,14 @@ mod tests {
         // No card_id filter — hooks can create dispatches for any card.
         let found: Vec<String> = {
             let conn = db.lock().unwrap();
-            let mut stmt = conn.prepare(
-                "SELECT td.id FROM task_dispatches td \
+            let mut stmt = conn
+                .prepare(
+                    "SELECT td.id FROM task_dispatches td \
                  JOIN kanban_cards kc ON td.kanban_card_id = kc.id \
                  WHERE td.status = 'pending' \
                    AND td.rowid > (SELECT rowid FROM task_dispatches WHERE id = ?1)",
-            ).unwrap();
+                )
+                .unwrap();
             stmt.query_map(rusqlite::params![pre_dispatch_id], |row| row.get(0))
                 .unwrap()
                 .filter_map(|r| r.ok())
@@ -809,7 +816,8 @@ mod tests {
                    AND td.created_at > (SELECT created_at FROM task_dispatches WHERE id = ?1)",
                 [pre_dispatch_id],
                 |row| row.get(0),
-            ).unwrap()
+            )
+            .unwrap()
         };
         assert_eq!(
             found_by_ts, 0,
@@ -850,16 +858,20 @@ mod tests {
         // The rowid-based query (no card_id filter) must find card-y's dispatch
         let found: Vec<(String, String)> = {
             let conn = db.lock().unwrap();
-            let mut stmt = conn.prepare(
-                "SELECT td.id, td.kanban_card_id FROM task_dispatches td \
+            let mut stmt = conn
+                .prepare(
+                    "SELECT td.id, td.kanban_card_id FROM task_dispatches td \
                  JOIN kanban_cards kc ON td.kanban_card_id = kc.id \
                  WHERE td.status = 'pending' \
                    AND td.rowid > (SELECT rowid FROM task_dispatches WHERE id = ?1)",
-            ).unwrap();
-            stmt.query_map(rusqlite::params![pre_id], |row| Ok((row.get(0)?, row.get(1)?)))
-                .unwrap()
-                .filter_map(|r| r.ok())
-                .collect()
+                )
+                .unwrap();
+            stmt.query_map(rusqlite::params![pre_id], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect()
         };
 
         assert_eq!(found.len(), 1, "must find cross-card dispatch");
@@ -868,6 +880,234 @@ mod tests {
         assert_eq!(
             found[0].1, "card-y",
             "dispatch must carry its own card_id for correct routing"
+        );
+    }
+
+    // ── Pipeline / auto-queue regression tests (#110) ──────────────
+
+    /// Ensure auto_queue tables exist (created lazily by auto_queue routes, not main migration)
+    fn ensure_auto_queue_tables(db: &Db) {
+        let conn = db.lock().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS auto_queue_runs (
+                id          TEXT PRIMARY KEY,
+                repo        TEXT,
+                agent_id    TEXT,
+                status      TEXT DEFAULT 'active',
+                ai_model    TEXT,
+                ai_rationale TEXT,
+                timeout_minutes INTEGER DEFAULT 120,
+                created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+                completed_at DATETIME
+            );
+            CREATE TABLE IF NOT EXISTS auto_queue_entries (
+                id              TEXT PRIMARY KEY,
+                run_id          TEXT REFERENCES auto_queue_runs(id),
+                kanban_card_id  TEXT REFERENCES kanban_cards(id),
+                agent_id        TEXT,
+                priority_rank   INTEGER DEFAULT 0,
+                reason          TEXT,
+                status          TEXT DEFAULT 'pending',
+                created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
+                dispatched_at   DATETIME,
+                completed_at    DATETIME
+            );",
+        ).unwrap();
+    }
+
+    fn seed_card_with_repo(db: &Db, card_id: &str, status: &str, repo_id: &str) {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO agents (id, name, discord_channel_id, discord_channel_alt) VALUES ('agent-1', 'Agent 1', '123', '456')",
+            [],
+        ).ok();
+        conn.execute(
+            "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, repo_id, created_at, updated_at)
+             VALUES (?1, 'Test Card', ?2, 'agent-1', ?3, datetime('now'), datetime('now'))",
+            rusqlite::params![card_id, status, repo_id],
+        ).unwrap();
+    }
+
+    /// Insert 2 pipeline stages (INTEGER AUTOINCREMENT id) and return their ids.
+    fn seed_pipeline_stages(db: &Db, repo_id: &str) -> (i64, i64) {
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO pipeline_stages (repo_id, stage_name, stage_order, trigger_after)
+             VALUES (?1, 'Build', 1, 'ready')",
+            [repo_id],
+        ).unwrap();
+        let stage1 = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO pipeline_stages (repo_id, stage_name, stage_order, trigger_after)
+             VALUES (?1, 'Deploy', 2, 'review_pass')",
+            [repo_id],
+        ).unwrap();
+        let stage2 = conn.last_insert_rowid();
+        (stage1, stage2)
+    }
+
+    fn seed_auto_queue_run(db: &Db, agent_id: &str) -> (String, String, String) {
+        ensure_auto_queue_tables(db);
+        let conn = db.lock().unwrap();
+        let run_id = "run-1";
+        let entry_a = "entry-a";
+        let entry_b = "entry-b";
+        conn.execute(
+            "INSERT INTO auto_queue_runs (id, status, agent_id, created_at) VALUES (?1, 'active', ?2, datetime('now'))",
+            rusqlite::params![run_id, agent_id],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, priority_rank)
+             VALUES (?1, ?2, 'card-q1', ?3, 'dispatched', 1)",
+            rusqlite::params![entry_a, run_id, agent_id],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, priority_rank)
+             VALUES (?1, ?2, 'card-q2', ?3, 'pending', 2)",
+            rusqlite::params![entry_b, run_id, agent_id],
+        ).unwrap();
+        (run_id.to_string(), entry_a.to_string(), entry_b.to_string())
+    }
+
+    /// #110: Pipeline stage should NOT advance on implementation dispatch completion alone.
+    /// The onDispatchCompleted in pipeline.js is now a no-op — advancement happens
+    /// only through review-automation processVerdict after review passes.
+    #[test]
+    fn pipeline_no_auto_advance_on_dispatch_complete() {
+        let db = test_db();
+        let engine = test_engine(&db);
+
+        seed_card_with_repo(&db, "card-pipe", "in_progress", "repo-1");
+        let (stage1, _stage2) = seed_pipeline_stages(&db, "repo-1");
+
+        // Assign pipeline stage (use integer id)
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "UPDATE kanban_cards SET pipeline_stage_id = ?1 WHERE id = 'card-pipe'",
+                [stage1],
+            ).unwrap();
+        }
+
+        // Create and complete an implementation dispatch
+        seed_dispatch(&db, "card-pipe", "pending");
+        let dispatch_id = "dispatch-card-pipe-pending";
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "UPDATE task_dispatches SET status = 'completed', result = '{}' WHERE id = ?1",
+                [dispatch_id],
+            ).unwrap();
+        }
+
+        // Fire OnDispatchCompleted — should NOT create a new dispatch for stage-2
+        let _ = engine.fire_hook(
+            Hook::OnDispatchCompleted,
+            json!({ "dispatch_id": dispatch_id }),
+        );
+
+        // Verify: pipeline_stage_id should still be stage-1 (not advanced)
+        // pipeline_stage_id is TEXT, pipeline_stages.id is INTEGER AUTOINCREMENT
+        let stage_id: Option<String> = {
+            let conn = db.lock().unwrap();
+            conn.query_row(
+                "SELECT pipeline_stage_id FROM kanban_cards WHERE id = 'card-pipe'",
+                [],
+                |row| row.get(0),
+            ).unwrap()
+        };
+        assert_eq!(
+            stage_id.as_deref(),
+            Some(stage1.to_string().as_str()),
+            "pipeline_stage_id must NOT advance on dispatch completion alone"
+        );
+
+        // Verify: no new pending dispatch was created for stage-2
+        let new_dispatches: i64 = {
+            let conn = db.lock().unwrap();
+            conn.query_row(
+                "SELECT COUNT(*) FROM task_dispatches WHERE kanban_card_id = 'card-pipe' AND status = 'pending'",
+                [],
+                |row| row.get(0),
+            ).unwrap()
+        };
+        assert_eq!(
+            new_dispatches, 0,
+            "no new dispatch should be created by pipeline.js onDispatchCompleted"
+        );
+    }
+
+    /// #110: Rust transition_status marks auto_queue_entries as done,
+    /// and this single update is sufficient (no JS triple-update).
+    #[test]
+    fn transition_to_done_marks_auto_queue_entry() {
+        let db = test_db();
+        ensure_auto_queue_tables(&db);
+        let engine = test_engine(&db);
+
+        // Seed cards for the queue
+        seed_card(&db, "card-q1", "review");
+        seed_card(&db, "card-q2", "ready");
+        seed_dispatch(&db, "card-q1", "pending");
+        let (_run_id, entry_a, _entry_b) = seed_auto_queue_run(&db, "agent-1");
+
+        // Transition card-q1 to done
+        let result = transition_status_with_opts(&db, &engine, "card-q1", "done", "review", true);
+        assert!(result.is_ok(), "transition to done should succeed");
+
+        // Verify: entry_a should be 'done' (set by Rust transition_status)
+        let entry_status: String = {
+            let conn = db.lock().unwrap();
+            conn.query_row(
+                "SELECT status FROM auto_queue_entries WHERE id = ?1",
+                [&entry_a],
+                |row| row.get(0),
+            ).unwrap()
+        };
+        assert_eq!(entry_status, "done", "Rust must mark auto_queue_entry as done");
+    }
+
+    /// #110: review → done → auto-queue should not conflict with pending_decision.
+    /// When card goes to pending_decision, auto-queue entry should NOT be marked done.
+    #[test]
+    fn pending_decision_does_not_complete_auto_queue_entry() {
+        let db = test_db();
+        ensure_auto_queue_tables(&db);
+        let engine = test_engine(&db);
+
+        seed_card(&db, "card-pd", "review");
+        seed_dispatch(&db, "card-pd", "pending");
+
+        // Create auto-queue entry
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_runs (id, status, agent_id, created_at) VALUES ('run-pd', 'active', 'agent-1', datetime('now'))",
+                [],
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO auto_queue_entries (id, run_id, kanban_card_id, agent_id, status, priority_rank)
+                 VALUES ('entry-pd', 'run-pd', 'card-pd', 'agent-1', 'dispatched', 1)",
+                [],
+            ).unwrap();
+        }
+
+        // Transition to pending_decision (NOT done)
+        let result = transition_status_with_opts(&db, &engine, "card-pd", "pending_decision", "pm-gate", true);
+        assert!(result.is_ok());
+
+        // Verify: entry should still be 'dispatched' (not done)
+        let entry_status: String = {
+            let conn = db.lock().unwrap();
+            conn.query_row(
+                "SELECT status FROM auto_queue_entries WHERE id = 'entry-pd'",
+                [],
+                |row| row.get(0),
+            ).unwrap()
+        };
+        assert_eq!(
+            entry_status, "dispatched",
+            "pending_decision must NOT mark auto_queue_entry as done"
         );
     }
 }

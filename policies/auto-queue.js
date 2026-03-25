@@ -2,8 +2,11 @@ var autoQueue = {
   name: "auto-queue",
   priority: 500,
 
-  // When a card reaches terminal state, mark queue entry as done
-  // and dispatch next pending entry for the same agent
+  // ── Authoritative auto-queue continuation (#110) ──────────────
+  // This is the SINGLE path for done → next queued item.
+  // Rust transition_status() already marks auto_queue_entries as 'done'
+  // before firing OnCardTerminal, so we don't re-mark here.
+  // kanban-rules.js does NOT touch auto_queue_entries (removed in #110).
   onCardTerminal: function(payload) {
     var cards = agentdesk.db.query(
       "SELECT assigned_agent_id FROM kanban_cards WHERE id = ?",
@@ -13,72 +16,29 @@ var autoQueue = {
 
     var agentId = cards[0].assigned_agent_id;
 
-    // Mark queue entry as done (dispatched → done)
-    var result = agentdesk.db.execute(
-      "UPDATE auto_queue_entries SET status = 'done', completed_at = datetime('now') WHERE kanban_card_id = ? AND status = 'dispatched'",
+    // Verify this card had a dispatched queue entry (Rust already set it to 'done').
+    // If no entry was in 'done' state with recent completion, this card is not from auto-queue.
+    var wasQueued = agentdesk.db.query(
+      "SELECT COUNT(*) as cnt FROM auto_queue_entries WHERE kanban_card_id = ? AND status = 'done'",
       [payload.card_id]
     );
+    if (wasQueued.length === 0 || wasQueued[0].cnt === 0) return;
 
-    // Guard: if no entry was updated, this card had no dispatched queue entry
-    // (duplicate OnCardTerminal or card not from auto-queue) — skip next dispatch
-    if (result && result.changes === 0) return;
-
-    // Check if agent has any active (non-terminal) cards
+    // Check if agent has any active (non-terminal) cards — don't dispatch if busy
     var active = agentdesk.db.query(
       "SELECT COUNT(*) as cnt FROM kanban_cards WHERE assigned_agent_id = ? AND status IN ('requested','in_progress','review')",
       [agentId]
     );
-    if (active.length > 0 && active[0].cnt > 0) return;
-
-    // Find next pending entry for this agent from active runs
-    var nextEntry = agentdesk.db.query(
-      "SELECT e.id, e.kanban_card_id, e.run_id, kc.title " +
-      "FROM auto_queue_entries e " +
-      "JOIN auto_queue_runs r ON e.run_id = r.id " +
-      "JOIN kanban_cards kc ON e.kanban_card_id = kc.id " +
-      "WHERE e.agent_id = ? AND e.status = 'pending' AND r.status = 'active' " +
-      "ORDER BY e.priority_rank ASC LIMIT 1",
-      [agentId]
-    );
-
-    if (nextEntry.length > 0) {
-      var entry = nextEntry[0];
-      agentdesk.log.info("[auto-queue] Dispatching next entry for " + agentId + ": " + entry.kanban_card_id);
-
-      // Create dispatch first — only mark entry as dispatched on success
-      // dispatch.create sets card status to 'requested' internally
-      try {
-        agentdesk.dispatch.create(
-          entry.kanban_card_id,
-          agentId,
-          "implementation",
-          entry.title
-        );
-
-        // Dispatch succeeded — now mark entry
-        agentdesk.db.execute(
-          "UPDATE auto_queue_entries SET status = 'dispatched', dispatched_at = datetime('now') WHERE id = ?",
-          [entry.id]
-        );
-
-        // Check if run is complete
-        var remaining = agentdesk.db.query(
-          "SELECT COUNT(*) as cnt FROM auto_queue_entries WHERE run_id = ? AND status = 'pending'",
-          [entry.run_id]
-        );
-        if (remaining.length > 0 && remaining[0].cnt === 0) {
-          agentdesk.db.execute(
-            "UPDATE auto_queue_runs SET status = 'completed', completed_at = datetime('now') WHERE id = ?",
-            [entry.run_id]
-          );
-        }
-      } catch (e) {
-        agentdesk.log.warn("[auto-queue] dispatch failed, entry stays pending for retry: " + e);
-      }
+    if (active.length > 0 && active[0].cnt > 0) {
+      agentdesk.log.info("[auto-queue] Agent " + agentId + " still has active cards, deferring next dispatch");
+      return;
     }
+
+    dispatchNextEntry(agentId);
   },
 
-  // Periodic: check for idle agents with pending queue entries
+  // ── Periodic recovery: dispatch next entry for idle agents (#110) ──
+  // Catches cases where onCardTerminal dispatch failed or was missed.
   onTick: function() {
     var idleWithQueue = agentdesk.db.query(
       "SELECT DISTINCT e.agent_id " +
@@ -88,14 +48,63 @@ var autoQueue = {
       "AND NOT EXISTS (" +
       "  SELECT 1 FROM kanban_cards kc " +
       "  WHERE kc.assigned_agent_id = e.agent_id " +
-      "  AND kc.status IN ('requested','in_progress')" +
+      "  AND kc.status IN ('requested','in_progress','review')" +
       ")"
     );
 
     for (var i = 0; i < idleWithQueue.length; i++) {
-      agentdesk.log.info("[auto-queue] Idle agent " + idleWithQueue[i].agent_id + " has pending queue entries");
+      var agentId = idleWithQueue[i].agent_id;
+      agentdesk.log.info("[auto-queue] onTick recovery: idle agent " + agentId + " has pending entries, dispatching");
+      dispatchNextEntry(agentId);
     }
   }
 };
+
+// ── Shared dispatch helper ─────────────────────────────────────
+function dispatchNextEntry(agentId) {
+  var nextEntry = agentdesk.db.query(
+    "SELECT e.id, e.kanban_card_id, e.run_id, kc.title " +
+    "FROM auto_queue_entries e " +
+    "JOIN auto_queue_runs r ON e.run_id = r.id " +
+    "JOIN kanban_cards kc ON e.kanban_card_id = kc.id " +
+    "WHERE e.agent_id = ? AND e.status = 'pending' AND r.status = 'active' " +
+    "ORDER BY e.priority_rank ASC LIMIT 1",
+    [agentId]
+  );
+
+  if (nextEntry.length === 0) return;
+
+  var entry = nextEntry[0];
+  agentdesk.log.info("[auto-queue] Dispatching next entry for " + agentId + ": " + entry.kanban_card_id);
+
+  try {
+    agentdesk.dispatch.create(
+      entry.kanban_card_id,
+      agentId,
+      "implementation",
+      entry.title
+    );
+
+    // Dispatch succeeded — mark entry
+    agentdesk.db.execute(
+      "UPDATE auto_queue_entries SET status = 'dispatched', dispatched_at = datetime('now') WHERE id = ?",
+      [entry.id]
+    );
+
+    // Check if run is complete (no more pending)
+    var remaining = agentdesk.db.query(
+      "SELECT COUNT(*) as cnt FROM auto_queue_entries WHERE run_id = ? AND status = 'pending'",
+      [entry.run_id]
+    );
+    if (remaining.length > 0 && remaining[0].cnt === 0) {
+      agentdesk.db.execute(
+        "UPDATE auto_queue_runs SET status = 'completed', completed_at = datetime('now') WHERE id = ?",
+        [entry.run_id]
+      );
+    }
+  } catch (e) {
+    agentdesk.log.warn("[auto-queue] dispatch failed for " + entry.kanban_card_id + ", will retry on next tick: " + e);
+  }
+}
 
 agentdesk.registerPolicy(autoQueue);
