@@ -55,15 +55,8 @@ var triage = {
           if (issueNum.length > 0 && issueNum[0].github_issue_url) {
             var port = agentdesk.config.get("server_port") || 8791;
             try {
-              agentdesk.http.post("http://127.0.0.1:" + port + "/api/send", {
-                target: "channel:1478652416533463101",
-                content: "[ADK → PMD] 에이전트 자동 분류 요청\n\n" +
-                  "#" + issueNum[0].github_issue_number + " " + issueNum[0].title + "\n" +
-                  issueNum[0].github_issue_url + "\n\n" +
-                  "이슈 내용을 분석하여 적절한 에이전트를 배정해주세요.\n" +
-                  "POST /api/kanban-cards/" + card.id + "/assign {agent_id: \"...\"} 로 배정 가능합니다.",
-                source: "triage-rules"
-              });
+              // DISABLED: Self-referential HTTP deadlock. Deferred to [I-0] recovery.
+              agentdesk.log.info("[triage] PMD classification request deferred for " + card.id);
               agentdesk.log.info("[triage] PMD classification requested for " + card.id);
             } catch(e) {
               agentdesk.log.warn("[triage] PMD request failed: " + e);

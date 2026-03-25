@@ -21,17 +21,8 @@
 // Send notification via notify bot (system alerts, not agent communication)
 function sendNotifyAlert(channelTarget, message) {
   if (!channelTarget) return;
-  try {
-    var port = agentdesk.config.get("server_port") || 8791;
-    agentdesk.http.post("http://127.0.0.1:" + port + "/api/send", {
-      target: channelTarget,
-      content: message,
-      bot: "notify",
-      source: "timeouts"
-    });
-  } catch (e) {
-    agentdesk.log.warn("[notify] Alert send failed: " + e);
-  }
+  // DISABLED: Self-referential HTTP deadlock risk.
+  agentdesk.log.info("[notify] Alert deferred: " + message.substring(0, 120));
 }
 
 // Get PMD channel for alerts
@@ -54,14 +45,10 @@ function sendDeadlockAlert(message) {
   }
   try {
     var port = agentdesk.config.get("server_port") || 8791;
-    agentdesk.http.post("http://127.0.0.1:" + port + "/api/send", {
-      target: "channel:" + ch,
-      content: message,
-      bot: "announce",
-      source: "timeouts"
-    });
+    // DISABLED: Self-referential HTTP deadlock risk.
+    agentdesk.log.info("[deadlock] Alert deferred: " + message.substring(0, 120));
   } catch (e) {
-    agentdesk.log.warn("[deadlock] Alert send failed: " + e);
+    agentdesk.log.warn("[deadlock] Alert failed: " + e);
   }
 }
 
@@ -117,20 +104,8 @@ var timeouts = {
         var assignee = (cardInfo.length > 0 && cardInfo[0].assigned_agent_id) ? cardInfo[0].assigned_agent_id : "미배정";
         var kmChannel = getPMDChannel();
         if (kmChannel) try {
-          var port = agentdesk.config.get("server_port") || 8791;
-          agentdesk.http.post("http://127.0.0.1:" + port + "/api/send", {
-            target: kmChannel,
-            content: "[칸반매니저] 🔴 디스패치 재시도 소진\n\n" +
-              "카드: " + cardTitle + "\n" +
-              "담당: " + assignee + "\n" +
-              "사유: " + MAX_DISPATCH_RETRIES + "회 재시도 모두 실패 (에이전트 무응답)\n\n" +
-              "다음 중 하나를 선택해주세요:\n" +
-              "• 재디스패치 → 같은/다른 에이전트에게 재전송\n" +
-              "• 백로그 → 우선순위 재조정\n" +
-              "• 취소 → 이슈 닫기" + cardUrl,
-            source: "timeouts",
-            bot: "announce"
-          });
+          // DISABLED: Self-referential HTTP deadlock risk.
+          agentdesk.log.warn("[timeout] PMD decision needed (deferred): " + cardTitle + " — " + MAX_DISPATCH_RETRIES + " retries exhausted");
         } catch(e) {
           agentdesk.log.warn("[timeout] PMD decision request failed: " + e);
         }
@@ -158,20 +133,8 @@ var timeouts = {
       var stalledAssignee = (stalledInfo.length > 0 && stalledInfo[0].assigned_agent_id) ? stalledInfo[0].assigned_agent_id : "미배정";
       var kmChannel2 = getPMDChannel();
       if (kmChannel2) try {
-        var port = agentdesk.config.get("server_port") || 8791;
-        agentdesk.http.post("http://127.0.0.1:" + port + "/api/send", {
-          target: kmChannel2,
-          content: "[칸반매니저] ⚠️ 정체 카드 결정 요청\n\n" +
-            "카드: " + stalledTitle + "\n" +
-            "담당: " + stalledAssignee + "\n" +
-            "사유: 2시간 이상 진행 없음 → blocked\n\n" +
-            "다음 중 하나를 선택해주세요:\n" +
-            "• 재디스패치 → 에이전트에게 재전송\n" +
-            "• 백로그 → 우선순위 재조정\n" +
-            "• 취소 → 이슈 닫기" + stalledUrl,
-          source: "timeouts",
-          bot: "announce"
-        });
+        // DISABLED: Self-referential HTTP deadlock risk.
+        agentdesk.log.warn("[timeout] Stalled card PMD alert deferred: " + stalledTitle);
       } catch(e) {
         agentdesk.log.warn("[timeout] PMD stalled request failed: " + e);
       }

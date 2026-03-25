@@ -9,14 +9,8 @@
  */
 
 function sendDiscordReview(target, content, bot) {
-  try {
-    var port = agentdesk.config.get("server_port") || 8791;
-    agentdesk.http.post("http://127.0.0.1:" + port + "/api/send", {
-      target: target, content: content, source: "review-automation", bot: bot || "announce"
-    });
-  } catch (e) {
-    agentdesk.log.warn("[review] Discord send failed: " + e);
-  }
+  // DISABLED: Self-referential HTTP deadlock. Notifications deferred to [I-0] recovery.
+  agentdesk.log.info("[review] notification deferred: " + content.substring(0, 100));
 }
 
 function notifyPmdPendingDecision(cardId, reason) {
