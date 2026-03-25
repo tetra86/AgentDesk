@@ -148,8 +148,14 @@ var timeouts = {
             [card.id]
           );
           agentdesk.log.warn("[reconcile] Card " + card.id + " → pending_decision: " + reasons.join("; "));
-          // PMD notification (deferred — sendDiscordNotification is disabled)
-          agentdesk.log.info("[reconcile] PMD notification deferred: " + card.id + " — " + reasons.join("; "));
+          // PMD notification — same as kanban-rules.js:262
+          // (currently deferred via sendDiscordNotification, will work when #120 lands)
+          var pmdCh = agentdesk.config.get("kanban_manager_channel_id");
+          if (pmdCh) {
+            var cardTitle2 = agentdesk.db.query("SELECT title FROM kanban_cards WHERE id = ?", [card.id]);
+            var t2 = cardTitle2.length > 0 ? cardTitle2[0].title : card.id;
+            sendNotifyAlert("channel:" + pmdCh, "[PM Decision] " + t2 + "\n사유: " + reasons.join("; "));
+          }
           continue;
         }
       }
