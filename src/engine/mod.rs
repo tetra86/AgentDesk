@@ -37,6 +37,9 @@ impl Drop for PolicyEngineInner {
 #[derive(Clone)]
 pub struct PolicyEngine {
     inner: Arc<Mutex<PolicyEngineInner>>,
+    /// Hooks that were skipped by try_fire_hook (engine was busy).
+    /// Drained and re-executed when the engine lock is next acquired.
+    deferred_hooks: Arc<Mutex<Vec<(Hook, serde_json::Value)>>>,
 }
 
 /// Summary of a loaded policy (for the /api/policies endpoint).
@@ -108,6 +111,7 @@ impl PolicyEngine {
                 policies: store,
                 _watcher: watcher,
             })),
+            deferred_hooks: Arc::new(Mutex::new(Vec::new())),
         })
     }
 
@@ -119,14 +123,29 @@ impl PolicyEngine {
         let inner = match self.inner.try_lock() {
             Ok(guard) => guard,
             Err(std::sync::TryLockError::WouldBlock) => {
-                tracing::debug!("try_fire_hook({hook}): engine busy, skipping");
+                tracing::info!("try_fire_hook({hook}): engine busy, deferring");
+                if let Ok(mut deferred) = self.deferred_hooks.lock() {
+                    deferred.push((hook, payload));
+                }
                 return Ok(());
             }
             Err(std::sync::TryLockError::Poisoned(e)) => {
                 return Err(anyhow::anyhow!("engine lock poisoned: {e}"));
             }
         };
-        Self::fire_hook_with_guard(inner, hook, payload)
+        // Execute the requested hook
+        Self::fire_hook_with_guard(&inner, hook, payload)?;
+        // Drain and execute any deferred hooks
+        let deferred: Vec<(Hook, serde_json::Value)> = self
+            .deferred_hooks
+            .lock()
+            .map(|mut d| d.drain(..).collect())
+            .unwrap_or_default();
+        for (h, p) in deferred {
+            tracing::info!("fire_hook(deferred {h})");
+            let _ = Self::fire_hook_with_guard(&inner, h, p);
+        }
+        Ok(())
     }
 
     pub fn fire_hook(&self, hook: Hook, payload: serde_json::Value) -> Result<()> {
@@ -134,11 +153,11 @@ impl PolicyEngine {
             .inner
             .lock()
             .map_err(|e| anyhow::anyhow!("engine lock poisoned: {e}"))?;
-        Self::fire_hook_with_guard(inner, hook, payload)
+        Self::fire_hook_with_guard(&inner, hook, payload)
     }
 
     fn fire_hook_with_guard(
-        inner: std::sync::MutexGuard<'_, PolicyEngineInner>,
+        inner: &std::sync::MutexGuard<'_, PolicyEngineInner>,
         hook: Hook,
         payload: serde_json::Value,
     ) -> Result<()> {
