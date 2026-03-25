@@ -1232,4 +1232,110 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert!(body.0.get("ok").and_then(|v| v.as_bool()).unwrap_or(false));
     }
+
+    #[tokio::test]
+    async fn accept_on_done_card_fails_closed_without_stranding() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) VALUES ('agent-1', 'Agent 1', '123', '456')",
+                [],
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, latest_dispatch_id, review_status, created_at, updated_at)
+                 VALUES ('card-done', 'Done Card', 'done', 'agent-1', 'dispatch-orig', 'reviewed', datetime('now'), datetime('now'))",
+                [],
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at)
+                 VALUES ('dispatch-orig', 'card-done', 'agent-1', 'review-decision', 'pending', '[Review Decision]', datetime('now'), datetime('now'))",
+                [],
+            ).unwrap();
+        }
+
+        let state = AppState {
+            db: db.clone(),
+            engine,
+            health_registry: None,
+        };
+
+        let (status, _body) = submit_review_decision(
+            State(state),
+            Json(ReviewDecisionBody {
+                card_id: "card-done".to_string(),
+                decision: "accept".to_string(),
+                comment: None,
+            }),
+        )
+        .await;
+
+        // Dispatch creation should fail (done terminal guard) → 500
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+
+        // Card must NOT have moved to in_progress — it should stay done
+        let conn = db.lock().unwrap();
+        let card_status: String = conn
+            .query_row(
+                "SELECT status FROM kanban_cards WHERE id = 'card-done'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(card_status, "done", "card must stay done, not stranded in in_progress");
+    }
+
+    #[tokio::test]
+    async fn dismiss_then_late_accept_does_not_reopen() {
+        let db = test_db();
+        let engine = test_engine(&db);
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) VALUES ('agent-1', 'Agent 1', '123', '456')",
+                [],
+            ).unwrap();
+            // Card already moved to done via dismiss
+            conn.execute(
+                "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, latest_dispatch_id, review_status, created_at, updated_at)
+                 VALUES ('card-dismissed', 'Dismissed Card', 'done', 'agent-1', 'dispatch-rd', NULL, datetime('now'), datetime('now'))",
+                [],
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at)
+                 VALUES ('dispatch-rd', 'card-dismissed', 'agent-1', 'review-decision', 'completed', '[Review Decision]', datetime('now'), datetime('now'))",
+                [],
+            ).unwrap();
+        }
+
+        let state = AppState {
+            db: db.clone(),
+            engine,
+            health_registry: None,
+        };
+
+        let (status, _) = submit_review_decision(
+            State(state),
+            Json(ReviewDecisionBody {
+                card_id: "card-dismissed".to_string(),
+                decision: "accept".to_string(),
+                comment: Some("late accept after dismiss".to_string()),
+            }),
+        )
+        .await;
+
+        // Should fail — done card cannot create rework dispatch
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+
+        let conn = db.lock().unwrap();
+        let card_status: String = conn
+            .query_row(
+                "SELECT status FROM kanban_cards WHERE id = 'card-dismissed'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(card_status, "done", "dismissed card must stay done on late accept");
+    }
 }

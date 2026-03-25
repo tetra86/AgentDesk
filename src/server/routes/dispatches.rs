@@ -1102,30 +1102,24 @@ pub(super) async fn send_review_result_to_primary(
         return;
     }
 
-    // For improve/rework/reject: create a review-decision dispatch to the original agent
-    let db_ref = db;
-    let dispatch_id = uuid::Uuid::new_v4().to_string();
-    {
-        let conn = match db_ref.lock() {
-            Ok(c) => c,
-            Err(_) => return,
-        };
-        conn.execute(
-            "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, context, created_at, updated_at)
-             VALUES (?1, ?2, ?3, 'review-decision', 'pending', ?4, ?5, datetime('now'), datetime('now'))",
-            rusqlite::params![
-                dispatch_id,
-                card_id,
-                &agent_id,
-                format!("[리뷰 검토] {title}"),
-                serde_json::json!({"verdict": verdict}).to_string(),
-            ],
-        ).ok();
-        conn.execute(
-            "UPDATE kanban_cards SET latest_dispatch_id = ?1, updated_at = datetime('now') WHERE id = ?2",
-            rusqlite::params![dispatch_id, card_id],
-        ).ok();
-    }
+    // For improve/rework/reject: create a review-decision dispatch via central create_dispatch_core
+    // to enforce the done terminal guard (prevents review-decision on done cards).
+    let dispatch_id = match crate::dispatch::create_dispatch_core(
+        db,
+        card_id,
+        &agent_id,
+        "review-decision",
+        &format!("[리뷰 검토] {title}"),
+        &serde_json::json!({"verdict": verdict}),
+    ) {
+        Ok((id, _old_status)) => id,
+        Err(e) => {
+            tracing::warn!(
+                "[review-followup] skipping review-decision dispatch for card {card_id}: {e}"
+            );
+            return;
+        }
+    };
 
     let url_line = issue_url.map(|u| format!("\n{u}")).unwrap_or_default();
     let message = format!(
@@ -2078,5 +2072,53 @@ mod tests {
             thread_id.is_none(),
             "thread_id must not be saved when thread message POST fails"
         );
+    }
+
+    /// send_review_result_to_primary must not create a review-decision dispatch
+    /// for done cards — the central create_dispatch_core done guard blocks it.
+    #[tokio::test]
+    async fn review_followup_does_not_create_dispatch_for_done_card() {
+        let db = test_db();
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) VALUES ('agent-1', 'Agent 1', '123', '456')",
+                [],
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, latest_dispatch_id, created_at, updated_at)
+                 VALUES ('card-done', 'Done Card', 'done', 'agent-1', 'dispatch-review', datetime('now'), datetime('now'))",
+                [],
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, result, created_at, updated_at)
+                 VALUES ('dispatch-review', 'card-done', 'agent-1', 'review', 'completed', '[Review R1]', '{\"verdict\":\"rework\"}', datetime('now'), datetime('now'))",
+                [],
+            ).unwrap();
+        }
+
+        // This triggers send_review_result_to_primary for a done card
+        handle_completed_dispatch_followups(&db, "dispatch-review").await;
+
+        let conn = db.lock().unwrap();
+        // latest_dispatch_id should NOT have changed (no new dispatch created)
+        let latest: String = conn
+            .query_row(
+                "SELECT latest_dispatch_id FROM kanban_cards WHERE id = 'card-done'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(latest, "dispatch-review", "done card latest_dispatch_id must not be overwritten");
+
+        // Only the original dispatch should exist — no review-decision was created
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM task_dispatches WHERE kanban_card_id = 'card-done'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "no review-decision dispatch should be created for done card");
     }
 }

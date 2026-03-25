@@ -309,8 +309,7 @@ pub async fn hook_session(
             .and_then(|(dtype, dstatus)| {
                 ((dtype == "implementation"
                     || dtype == "rework"
-                    || dtype == "review"
-                    || dtype == "review-decision")
+                    || dtype == "review")
                     && dstatus == "pending")
                     .then_some(did.clone())
             })
@@ -892,7 +891,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn idle_hook_auto_completes_pending_review_decision_dispatch() {
+    async fn idle_hook_does_not_auto_complete_review_decision_dispatch() {
         let db = test_db();
         let engine = test_engine(&db);
         let state = AppState {
@@ -963,29 +962,10 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        let dispatch_result: Option<String> = conn
-            .query_row(
-                "SELECT result FROM task_dispatches WHERE id = ?1",
-                [dispatch_id],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let active_dispatch_id: Option<String> = conn
-            .query_row(
-                "SELECT active_dispatch_id FROM sessions WHERE session_key = 'session-review-decision'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
 
-        // review-decision dispatches are auto-completed on idle (989043b)
-        assert_eq!(dispatch_status, "completed");
-        assert!(
-            dispatch_result
-                .unwrap_or_default()
-                .contains("\"completion_source\":\"session_idle\"")
-        );
-        assert_eq!(active_dispatch_id, None);
+        // review-decision dispatches must NOT be auto-completed on idle —
+        // they require explicit agent action (accept/dispute/dismiss)
+        assert_eq!(dispatch_status, "pending");
     }
 
     #[test]
