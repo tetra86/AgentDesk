@@ -92,6 +92,7 @@ pub struct HookSessionBody {
     pub tokens: Option<u64>,
     pub cwd: Option<String>,
     pub dispatch_id: Option<String>,
+    pub claude_session_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -318,8 +319,8 @@ pub async fn hook_session(
     };
 
     let result = conn.execute(
-        "INSERT INTO sessions (session_key, agent_id, provider, status, session_info, model, tokens, cwd, active_dispatch_id, thread_channel_id, last_heartbeat)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, datetime('now'))
+        "INSERT INTO sessions (session_key, agent_id, provider, status, session_info, model, tokens, cwd, active_dispatch_id, thread_channel_id, claude_session_id, last_heartbeat)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, datetime('now'))
          ON CONFLICT(session_key) DO UPDATE SET
            status = excluded.status,
            provider = excluded.provider,
@@ -334,6 +335,7 @@ pub async fn hook_session(
            END,
            agent_id = COALESCE(excluded.agent_id, sessions.agent_id),
            thread_channel_id = COALESCE(excluded.thread_channel_id, sessions.thread_channel_id),
+           claude_session_id = COALESCE(excluded.claude_session_id, sessions.claude_session_id),
            last_heartbeat = datetime('now')",
         rusqlite::params![
             body.session_key,
@@ -346,6 +348,7 @@ pub async fn hook_session(
             body.cwd,
             body.dispatch_id,
             thread_channel_id,
+            body.claude_session_id,
         ],
     );
 
@@ -538,6 +541,42 @@ pub async fn delete_session(
     }
 }
 
+/// GET /api/dispatched-sessions/claude-session-id?session_key=...
+/// Returns the stored claude_session_id for the given session_key.
+pub async fn get_claude_session_id(
+    State(state): State<AppState>,
+    Query(params): Query<DeleteSessionQuery>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let conn = match state.db.lock() {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{e}")})),
+            );
+        }
+    };
+
+    match conn.query_row(
+        "SELECT claude_session_id FROM sessions WHERE session_key = ?1",
+        [&params.session_key],
+        |row| row.get::<_, Option<String>>(0),
+    ) {
+        Ok(claude_session_id) => (
+            StatusCode::OK,
+            Json(json!({"claude_session_id": claude_session_id})),
+        ),
+        Err(rusqlite::Error::QueryReturnedNoRows) => (
+            StatusCode::OK,
+            Json(json!({"claude_session_id": null})),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("{e}")})),
+        ),
+    }
+}
+
 /// GC stale thread sessions from DB: idle/disconnected + older than 1 hour.
 /// Thread sessions are identified by having a non-NULL thread_channel_id.
 pub fn gc_stale_thread_sessions_db(conn: &rusqlite::Connection) -> usize {
@@ -690,6 +729,7 @@ mod tests {
                 tokens: None,
                 cwd: None,
                 dispatch_id: Some(dispatch_id.to_string()),
+                claude_session_id: None,
             }),
         )
         .await;
@@ -707,6 +747,7 @@ mod tests {
                 tokens: Some(42),
                 cwd: None,
                 dispatch_id: Some(dispatch_id.to_string()),
+                claude_session_id: None,
             }),
         )
         .await;
@@ -792,6 +833,7 @@ mod tests {
                 tokens: None,
                 cwd: None,
                 dispatch_id: Some(dispatch_id.to_string()),
+                claude_session_id: None,
             }),
         )
         .await;
@@ -809,6 +851,7 @@ mod tests {
                 tokens: Some(11),
                 cwd: None,
                 dispatch_id: Some(dispatch_id.to_string()),
+                claude_session_id: None,
             }),
         )
         .await;
@@ -887,6 +930,7 @@ mod tests {
                 tokens: None,
                 cwd: None,
                 dispatch_id: Some(dispatch_id.to_string()),
+                claude_session_id: None,
             }),
         )
         .await;
@@ -904,6 +948,7 @@ mod tests {
                 tokens: Some(17),
                 cwd: None,
                 dispatch_id: Some(dispatch_id.to_string()),
+                claude_session_id: None,
             }),
         )
         .await;
@@ -999,6 +1044,7 @@ mod tests {
                 tokens: None,
                 cwd: None,
                 dispatch_id: None,
+                claude_session_id: None,
             }),
         )
         .await;
@@ -1099,6 +1145,7 @@ mod tests {
                 tokens: None,
                 cwd: None,
                 dispatch_id: None,
+                claude_session_id: None,
             }),
         )
         .await;

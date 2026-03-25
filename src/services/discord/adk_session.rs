@@ -167,6 +167,60 @@ pub(super) async fn delete_adk_session(session_key: &str, api_port: u16) {
     }
 }
 
+/// Save the Claude CLI session_id to DB so it survives dcserver restarts.
+/// Called at turn completion with the session_id returned by the Claude CLI.
+pub(super) async fn save_claude_session_id(
+    session_key: &str,
+    claude_session_id: &str,
+    api_port: u16,
+) {
+    let body = serde_json::json!({
+        "session_key": session_key,
+        "claude_session_id": claude_session_id,
+    });
+    match reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{api_port}/api/hook/session"))
+        .json(&body)
+        .send()
+        .await
+    {
+        Ok(resp) if !resp.status().is_success() => {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            eprintln!(
+                "  [{ts}] ⚠ save_claude_session_id failed: HTTP {}",
+                resp.status()
+            );
+        }
+        Err(e) => {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            eprintln!("  [{ts}] ⚠ save_claude_session_id error: {e}");
+        }
+        _ => {}
+    }
+}
+
+/// Fetch the stored claude_session_id from DB for a given session_key.
+/// Returns None if no record exists or if the field is NULL.
+pub(super) async fn fetch_claude_session_id(
+    session_key: &str,
+    api_port: u16,
+) -> Option<String> {
+    let url = format!("http://127.0.0.1:{api_port}/api/dispatched-sessions/claude-session-id");
+    let resp = reqwest::Client::new()
+        .get(&url)
+        .query(&[("session_key", session_key)])
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let json: serde_json::Value = resp.json().await.ok()?;
+    json.get("claude_session_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
 fn normalize_user_task_summary(input: &str) -> Option<String> {
     let first_line = input
         .lines()

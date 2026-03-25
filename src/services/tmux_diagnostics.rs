@@ -11,6 +11,8 @@ fn tmux_exit_reason_path(tmux_session_name: &str) -> String {
 pub fn tmux_session_exists(tmux_session_name: &str) -> bool {
     Command::new("tmux")
         .args(["has-session", "-t", tmux_session_name])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .status()
         .map(|s| s.success())
         .unwrap_or(false)

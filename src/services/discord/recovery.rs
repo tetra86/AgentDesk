@@ -395,6 +395,8 @@ pub(super) async fn restore_inflight_turns(
         let can_recover = tmux_session_name.as_deref().map_or(false, |name| {
             std::process::Command::new("tmux")
                 .args(["has-session", "-t", name])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
                 .status()
                 .map(|s| s.success())
                 .unwrap_or(false)

@@ -1055,7 +1055,7 @@ pub(super) fn spawn_turn_bridge(
 
         // Update in-memory session under lock, then do file I/O outside the
         // lock to avoid blocking other tasks (including health checks).
-        let file_save_info = {
+        let (file_save_info, claude_sid_to_persist) = {
             let mut data = shared_owned.core.lock().await;
             if let Some(session) = data.sessions.get_mut(&channel_id) {
                 if !session.cleared && !is_prompt_too_long {
@@ -1072,20 +1072,34 @@ pub(super) fn spawn_turn_bridge(
                     });
                     let current_path = session.current_path.clone();
                     let channel_name = session.channel_name.clone();
-                    current_path.map(|path| {
+                    let claude_sid = session.session_id.clone();
+                    let info = current_path.map(|path| {
                         let snapshot = session.clone();
                         (path, channel_name, snapshot)
-                    })
+                    });
+                    (info, claude_sid)
                 } else {
-                    None
+                    (None, None)
                 }
             } else {
-                None
+                (None, None)
             }
         };
         // File I/O runs without holding core lock
         if let Some((path, _channel_name, session_snapshot)) = file_save_info {
             save_session_to_file(&session_snapshot, &path);
+        }
+
+        // Persist claude_session_id to DB so it survives dcserver restarts.
+        if let (Some(ref session_key), Some(ref claude_sid)) =
+            (adk_session_key, claude_sid_to_persist)
+        {
+            super::adk_session::save_claude_session_id(
+                session_key,
+                claude_sid,
+                shared_owned.api_port,
+            )
+            .await;
         }
 
         // Clear restart report BEFORE clearing inflight state (which removes

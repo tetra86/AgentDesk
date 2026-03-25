@@ -905,6 +905,8 @@ pub fn handle_restart_dcserver(
             // Verify the session exists
             let check = std::process::Command::new("tmux")
                 .args(["has-session", "-t", tmux_session])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
                 .status();
             if check.map(|s| s.success()).unwrap_or(false) {
                 // Use current log size as offset to avoid matching stale "Bot connected" lines

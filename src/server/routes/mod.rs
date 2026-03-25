@@ -261,6 +261,10 @@ pub fn api_router(
             "/hook/session",
             post(dispatched_sessions::hook_session).delete(dispatched_sessions::delete_session),
         )
+        .route(
+            "/dispatched-sessions/claude-session-id",
+            get(dispatched_sessions::get_claude_session_id),
+        )
         // Messages
         .route(
             "/messages",
