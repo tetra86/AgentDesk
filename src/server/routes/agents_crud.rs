@@ -1,0 +1,490 @@
+//! Agent CRUD handlers + system listing endpoints.
+//! Extracted from mod.rs for #102.
+
+use axum::{
+    Json,
+    extract::{Path, Query, State},
+    http::StatusCode,
+};
+use serde::Deserialize;
+use serde_json::json;
+
+use super::AppState;
+
+// ── Query / Body structs ─────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub(super) struct ListAgentsQuery {
+    #[serde(rename = "officeId")]
+    office_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct CreateAgentBody {
+    id: String,
+    name: String,
+    name_ko: Option<String>,
+    provider: Option<String>,
+    department: Option<String>,
+    avatar_emoji: Option<String>,
+    discord_channel_id: Option<String>,
+    discord_channel_alt: Option<String>,
+    office_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct UpdateAgentBody {
+    name: Option<String>,
+    name_ko: Option<String>,
+    provider: Option<String>,
+    department: Option<String>,
+    department_id: Option<String>,
+    avatar_emoji: Option<String>,
+    discord_channel_id: Option<String>,
+    discord_channel_alt: Option<String>,
+    alias: Option<String>,
+    cli_provider: Option<String>,
+    sprite_number: Option<i64>,
+}
+
+// ── Handlers ─────────────────────────────────────────────────────
+
+pub(super) async fn list_agents(
+    State(state): State<AppState>,
+    Query(params): Query<ListAgentsQuery>,
+) -> Json<serde_json::Value> {
+    let agents = match state.db.lock() {
+        Ok(conn) => {
+            let (sql, bind_values): (String, Vec<String>) = if let Some(ref oid) = params.office_id
+            {
+                (
+                    "SELECT a.id, a.name, a.name_ko, a.provider, a.department, a.avatar_emoji,
+                            a.discord_channel_id, a.discord_channel_alt, a.status, a.xp,
+                            a.sprite_number, d.name, d.name, NULL, a.created_at,
+                            (SELECT COUNT(DISTINCT kc.id) FROM kanban_cards kc WHERE kc.assigned_agent_id = a.id AND kc.status = 'done') AS tasks_done,
+                            (SELECT COALESCE(SUM(s.tokens), 0) FROM sessions s WHERE s.agent_id = a.id) AS total_tokens,
+                            (SELECT td2.id FROM task_dispatches td2 JOIN kanban_cards kc ON kc.latest_dispatch_id = td2.id WHERE td2.to_agent_id = a.id AND kc.status = 'in_progress' LIMIT 1) AS current_task,
+                            (SELECT s.thread_channel_id FROM sessions s WHERE s.agent_id = a.id AND s.status = 'working' ORDER BY s.last_heartbeat DESC, s.id DESC LIMIT 1) AS current_thread_channel_id
+                     FROM agents a
+                     INNER JOIN office_agents oa ON oa.agent_id = a.id
+                     LEFT JOIN departments d ON d.id = a.department
+                     WHERE oa.office_id = ?1
+                     ORDER BY a.id".to_string(),
+                    vec![oid.clone()],
+                )
+            } else {
+                (
+                    "SELECT a.id, a.name, a.name_ko, a.provider, a.department, a.avatar_emoji,
+                            a.discord_channel_id, a.discord_channel_alt, a.status, a.xp,
+                            a.sprite_number, d.name, d.name, NULL, a.created_at,
+                            (SELECT COUNT(DISTINCT kc.id) FROM kanban_cards kc WHERE kc.assigned_agent_id = a.id AND kc.status = 'done') AS tasks_done,
+                            (SELECT COALESCE(SUM(s.tokens), 0) FROM sessions s WHERE s.agent_id = a.id) AS total_tokens,
+                            (SELECT td2.id FROM task_dispatches td2 JOIN kanban_cards kc ON kc.latest_dispatch_id = td2.id WHERE td2.to_agent_id = a.id AND kc.status = 'in_progress' LIMIT 1) AS current_task,
+                            (SELECT s.thread_channel_id FROM sessions s WHERE s.agent_id = a.id AND s.status = 'working' ORDER BY s.last_heartbeat DESC, s.id DESC LIMIT 1) AS current_thread_channel_id
+                     FROM agents a
+                     LEFT JOIN departments d ON d.id = a.department
+                     ORDER BY a.id".to_string(),
+                    vec![],
+                )
+            };
+
+            let mut stmt = match conn.prepare(&sql) {
+                Ok(s) => s,
+                Err(e) => {
+                    return Json(json!({ "error": format!("query prepare failed: {e}") }));
+                }
+            };
+
+            let params_ref: Vec<&dyn rusqlite::types::ToSql> = bind_values
+                .iter()
+                .map(|v| v as &dyn rusqlite::types::ToSql)
+                .collect();
+
+            let rows = stmt
+                .query_map(params_ref.as_slice(), |row| {
+                    let provider = row.get::<_, Option<String>>(3)?;
+                    let discord_channel_alt = row.get::<_, Option<String>>(7)?;
+                    let xp_val = row.get::<_, f64>(9).unwrap_or(0.0) as i64;
+                    Ok(json!({
+                        "id": row.get::<_, String>(0)?,
+                        "name": row.get::<_, String>(1)?,
+                        "name_ko": row.get::<_, Option<String>>(2)?,
+                        "provider": provider,
+                        "cli_provider": provider,
+                        "department": row.get::<_, Option<String>>(4)?,
+                        "department_id": row.get::<_, Option<String>>(4)?,
+                        "avatar_emoji": row.get::<_, Option<String>>(5)?,
+                        "discord_channel_id": row.get::<_, Option<String>>(6)?,
+                        "discord_channel_alt": discord_channel_alt,
+                        "discord_channel_id_codex": discord_channel_alt,
+                        "status": row.get::<_, Option<String>>(8)?,
+                        "xp": xp_val,
+                        "stats_xp": xp_val,
+                        "stats_tasks_done": row.get::<_, i64>(15).unwrap_or(0),
+                        "stats_tokens": row.get::<_, i64>(16).unwrap_or(0),
+                        "sprite_number": row.get::<_, Option<i64>>(10)?,
+                        "department_name": row.get::<_, Option<String>>(11)?,
+                        "department_name_ko": row.get::<_, Option<String>>(12)?,
+                        "department_color": row.get::<_, Option<String>>(13)?,
+                        "created_at": row.get::<_, Option<String>>(14)?,
+                        "alias": serde_json::Value::Null,
+                        "role_id": row.get::<_, Option<String>>(0)?,
+                        "personality": serde_json::Value::Null,
+                        "current_task_id": row.get::<_, Option<String>>(17)?,
+                        "current_thread_channel_id": row.get::<_, Option<String>>(18)?,
+                    }))
+                })
+                .ok();
+
+            match rows {
+                Some(iter) => iter.filter_map(|r| r.ok()).collect::<Vec<_>>(),
+                None => Vec::new(),
+            }
+        }
+        Err(_) => Vec::new(),
+    };
+
+    Json(json!({ "agents": agents }))
+}
+
+pub(super) async fn get_agent(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<serde_json::Value> {
+    match state.db.lock() {
+        Ok(conn) => {
+            let result = conn.query_row(
+                "SELECT a.id, a.name, a.name_ko, a.provider, a.department, a.avatar_emoji,
+                        a.discord_channel_id, a.discord_channel_alt, a.status, a.xp,
+                        a.sprite_number, d.name, d.name, NULL, a.created_at,
+                        (SELECT COUNT(DISTINCT kc.id) FROM kanban_cards kc WHERE kc.assigned_agent_id = a.id AND kc.status = 'done') AS tasks_done,
+                        (SELECT COALESCE(SUM(s.tokens), 0) FROM sessions s WHERE s.agent_id = a.id) AS total_tokens,
+                        (SELECT td2.id FROM task_dispatches td2 JOIN kanban_cards kc ON kc.latest_dispatch_id = td2.id WHERE td2.to_agent_id = a.id AND kc.status = 'in_progress' LIMIT 1) AS current_task,
+                        (SELECT s.thread_channel_id FROM sessions s WHERE s.agent_id = a.id AND s.status = 'working' ORDER BY s.last_heartbeat DESC, s.id DESC LIMIT 1) AS current_thread_channel_id
+                 FROM agents a
+                 LEFT JOIN departments d ON d.id = a.department
+                 WHERE a.id = ?1",
+                [&id],
+                |row| {
+                    let provider = row.get::<_, Option<String>>(3)?;
+                    let discord_channel_alt = row.get::<_, Option<String>>(7)?;
+                    let xp_val = row.get::<_, f64>(9).unwrap_or(0.0) as i64;
+                    Ok(json!({
+                        "id": row.get::<_, String>(0)?,
+                        "name": row.get::<_, String>(1)?,
+                        "name_ko": row.get::<_, Option<String>>(2)?,
+                        "provider": provider,
+                        "cli_provider": provider,
+                        "department": row.get::<_, Option<String>>(4)?,
+                        "department_id": row.get::<_, Option<String>>(4)?,
+                        "avatar_emoji": row.get::<_, Option<String>>(5)?,
+                        "discord_channel_id": row.get::<_, Option<String>>(6)?,
+                        "discord_channel_alt": discord_channel_alt,
+                        "discord_channel_id_codex": discord_channel_alt,
+                        "status": row.get::<_, Option<String>>(8)?,
+                        "xp": xp_val,
+                        "stats_xp": xp_val,
+                        "stats_tasks_done": row.get::<_, i64>(15).unwrap_or(0),
+                        "stats_tokens": row.get::<_, i64>(16).unwrap_or(0),
+                        "sprite_number": row.get::<_, Option<i64>>(10)?,
+                        "department_name": row.get::<_, Option<String>>(11)?,
+                        "department_name_ko": row.get::<_, Option<String>>(12)?,
+                        "department_color": row.get::<_, Option<String>>(13)?,
+                        "created_at": row.get::<_, Option<String>>(14)?,
+                        "alias": serde_json::Value::Null,
+                        "role_id": row.get::<_, Option<String>>(0)?,
+                        "personality": serde_json::Value::Null,
+                        "current_task_id": row.get::<_, Option<String>>(17)?,
+                        "current_thread_channel_id": row.get::<_, Option<String>>(18)?,
+                    }))
+                },
+            );
+
+            match result {
+                Ok(agent) => Json(json!({ "agent": agent })),
+                Err(rusqlite::Error::QueryReturnedNoRows) => {
+                    Json(json!({ "error": "agent not found" }))
+                }
+                Err(e) => Json(json!({ "error": format!("query failed: {e}") })),
+            }
+        }
+        Err(_) => Json(json!({ "error": "db lock failed" })),
+    }
+}
+
+pub(super) async fn create_agent(
+    State(state): State<AppState>,
+    Json(body): Json<CreateAgentBody>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let conn = match state.db.lock() {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{e}")})),
+            );
+        }
+    };
+
+    if let Err(e) = conn.execute(
+        "INSERT INTO agents (id, name, name_ko, provider, department, avatar_emoji, discord_channel_id, discord_channel_alt)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        rusqlite::params![
+            body.id,
+            body.name,
+            body.name_ko,
+            body.provider,
+            body.department,
+            body.avatar_emoji,
+            body.discord_channel_id,
+            body.discord_channel_alt,
+        ],
+    ) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("{e}")})),
+        );
+    }
+
+    if let Some(ref office_id) = body.office_id {
+        if let Err(e) = conn.execute(
+            "INSERT OR REPLACE INTO office_agents (office_id, agent_id) VALUES (?1, ?2)",
+            rusqlite::params![office_id, body.id],
+        ) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{e}")})),
+            );
+        }
+    }
+
+    match conn.query_row(
+        "SELECT id, name, name_ko, provider, department, avatar_emoji,
+                discord_channel_id, discord_channel_alt, status, xp
+         FROM agents WHERE id = ?1",
+        [&body.id],
+        |row| {
+            Ok(json!({
+                "id": row.get::<_, String>(0)?,
+                "name": row.get::<_, String>(1)?,
+                "name_ko": row.get::<_, Option<String>>(2)?,
+                "provider": row.get::<_, Option<String>>(3)?,
+                "department": row.get::<_, Option<String>>(4)?,
+                "avatar_emoji": row.get::<_, Option<String>>(5)?,
+                "discord_channel_id": row.get::<_, Option<String>>(6)?,
+                "discord_channel_alt": row.get::<_, Option<String>>(7)?,
+                "status": row.get::<_, Option<String>>(8)?,
+                "xp": row.get::<_, f64>(9).unwrap_or(0.0) as i64,
+            }))
+        },
+    ) {
+        Ok(agent) => (StatusCode::CREATED, Json(json!({"agent": agent}))),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("{e}")})),
+        ),
+    }
+}
+
+pub(super) async fn update_agent(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<UpdateAgentBody>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let conn = match state.db.lock() {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{e}")})),
+            );
+        }
+    };
+
+    let mut sets: Vec<String> = Vec::new();
+    let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+    let mut idx = 1;
+
+    if let Some(ref name) = body.name {
+        sets.push(format!("name = ?{}", idx));
+        values.push(Box::new(name.clone()));
+        idx += 1;
+    }
+    if let Some(ref name_ko) = body.name_ko {
+        sets.push(format!("name_ko = ?{}", idx));
+        values.push(Box::new(name_ko.clone()));
+        idx += 1;
+    }
+    if let Some(ref provider) = body.provider {
+        sets.push(format!("provider = ?{}", idx));
+        values.push(Box::new(provider.clone()));
+        idx += 1;
+    }
+    let dept_value = body.department_id.as_ref().or(body.department.as_ref());
+    if let Some(department) = dept_value {
+        sets.push(format!("department = ?{}", idx));
+        values.push(Box::new(department.clone()));
+        idx += 1;
+    }
+    if let Some(ref avatar_emoji) = body.avatar_emoji {
+        sets.push(format!("avatar_emoji = ?{}", idx));
+        values.push(Box::new(avatar_emoji.clone()));
+        idx += 1;
+    }
+    if let Some(ref discord_channel_id) = body.discord_channel_id {
+        sets.push(format!("discord_channel_id = ?{}", idx));
+        values.push(Box::new(discord_channel_id.clone()));
+        idx += 1;
+    }
+    if let Some(ref discord_channel_alt) = body.discord_channel_alt {
+        sets.push(format!("discord_channel_alt = ?{}", idx));
+        values.push(Box::new(discord_channel_alt.clone()));
+        idx += 1;
+    }
+
+    if sets.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "no fields to update"})),
+        );
+    }
+
+    sets.push(format!("updated_at = datetime('now')"));
+
+    let sql = format!("UPDATE agents SET {} WHERE id = ?{}", sets.join(", "), idx);
+    values.push(Box::new(id.clone()));
+
+    let params_ref: Vec<&dyn rusqlite::types::ToSql> = values.iter().map(|v| v.as_ref()).collect();
+    match conn.execute(&sql, params_ref.as_slice()) {
+        Ok(0) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "agent not found"})),
+            );
+        }
+        Ok(_) => {}
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{e}")})),
+            );
+        }
+    }
+
+    match conn.query_row(
+        "SELECT id, name, name_ko, provider, department, avatar_emoji,
+                discord_channel_id, discord_channel_alt, status, xp
+         FROM agents WHERE id = ?1",
+        [&id],
+        |row| {
+            Ok(json!({
+                "id": row.get::<_, String>(0)?,
+                "name": row.get::<_, String>(1)?,
+                "name_ko": row.get::<_, Option<String>>(2)?,
+                "provider": row.get::<_, Option<String>>(3)?,
+                "department": row.get::<_, Option<String>>(4)?,
+                "avatar_emoji": row.get::<_, Option<String>>(5)?,
+                "discord_channel_id": row.get::<_, Option<String>>(6)?,
+                "discord_channel_alt": row.get::<_, Option<String>>(7)?,
+                "status": row.get::<_, Option<String>>(8)?,
+                "xp": row.get::<_, f64>(9).unwrap_or(0.0) as i64,
+            }))
+        },
+    ) {
+        Ok(agent) => (StatusCode::OK, Json(json!({"agent": agent}))),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("{e}")})),
+        ),
+    }
+}
+
+pub(super) async fn delete_agent(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let conn = match state.db.lock() {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{e}")})),
+            );
+        }
+    };
+
+    match conn.execute("DELETE FROM agents WHERE id = ?1", [&id]) {
+        Ok(0) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "agent not found"})),
+        ),
+        Ok(_) => {
+            let _ = conn.execute("DELETE FROM office_agents WHERE agent_id = ?1", [&id]);
+            (StatusCode::OK, Json(json!({"ok": true})))
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("{e}")})),
+        ),
+    }
+}
+
+pub(super) async fn list_sessions(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let sessions = match state.db.lock() {
+        Ok(conn) => {
+            let mut stmt = match conn.prepare(
+                "SELECT id, session_key, agent_id, provider, status, active_dispatch_id,
+                        model, tokens, cwd, last_heartbeat
+                 FROM sessions
+                 WHERE status IN ('connected', 'working', 'idle')
+                 ORDER BY id",
+            ) {
+                Ok(s) => s,
+                Err(e) => {
+                    return Json(json!({ "error": format!("query prepare failed: {e}") }));
+                }
+            };
+
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok(json!({
+                        "id": row.get::<_, i64>(0)?,
+                        "session_key": row.get::<_, Option<String>>(1)?,
+                        "agent_id": row.get::<_, Option<String>>(2)?,
+                        "provider": row.get::<_, Option<String>>(3)?,
+                        "status": row.get::<_, Option<String>>(4)?,
+                        "active_dispatch_id": row.get::<_, Option<String>>(5)?,
+                        "model": row.get::<_, Option<String>>(6)?,
+                        "tokens": row.get::<_, i64>(7)?,
+                        "cwd": row.get::<_, Option<String>>(8)?,
+                        "last_heartbeat": row.get::<_, Option<String>>(9)?,
+                    }))
+                })
+                .ok();
+
+            match rows {
+                Some(iter) => iter.filter_map(|r| r.ok()).collect::<Vec<_>>(),
+                None => Vec::new(),
+            }
+        }
+        Err(_) => Vec::new(),
+    };
+
+    Json(json!({ "sessions": sessions }))
+}
+
+pub(super) async fn list_policies(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let policies = state.engine.list_policies();
+    let items: Vec<serde_json::Value> = policies
+        .into_iter()
+        .map(|p| {
+            json!({
+                "name": p.name,
+                "file": p.file,
+                "priority": p.priority,
+                "hooks": p.hooks,
+            })
+        })
+        .collect();
+    Json(json!({ "policies": items }))
+}
