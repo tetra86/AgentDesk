@@ -38,6 +38,9 @@ pub fn register_globals(ctx: &Ctx<'_>, db: Db) -> JsResult<()> {
     // ── agentdesk.kanban ────────────────────────────────────────
     register_kanban_ops(ctx, db.clone())?;
 
+    // ── agentdesk.kv ─────────────────────────────────────────────
+    register_kv_ops(ctx, db.clone())?;
+
     // ── agentdesk.message ────────────────────────────────────────
     register_message_ops(ctx, db)?;
 
@@ -853,6 +856,87 @@ fn register_kanban_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
     "#,
     )?;
 
+    Ok(())
+}
+
+// ── KV ops (#126) ─────────────────────────────────────────────────
+//
+// agentdesk.kv.set(key, value, ttlSeconds) — set with optional TTL
+// agentdesk.kv.get(key) → value or null (filters expired)
+// agentdesk.kv.delete(key) — delete a key
+
+fn register_kv_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
+    let ad: Object<'js> = ctx.globals().get("agentdesk")?;
+    let kv_obj = Object::new(ctx.clone())?;
+
+    // kv.set(key, value, ttlSeconds?)
+    let db_set = db.clone();
+    kv_obj.set(
+        "set",
+        Function::new(
+            ctx.clone(),
+            move |key: String, value: String, ttl_seconds: i64| -> String {
+                let conn = match db_set.separate_conn() {
+                    Ok(c) => c,
+                    Err(e) => return format!(r#"{{"error":"{}"}}"#, e),
+                };
+                let result = if ttl_seconds > 0 {
+                    conn.execute(
+                        &format!(
+                            "INSERT OR REPLACE INTO kv_meta (key, value, expires_at) VALUES (?1, ?2, datetime('now', '+{} seconds'))",
+                            ttl_seconds
+                        ),
+                        rusqlite::params![key, value],
+                    )
+                } else {
+                    conn.execute(
+                        "INSERT OR REPLACE INTO kv_meta (key, value, expires_at) VALUES (?1, ?2, NULL)",
+                        rusqlite::params![key, value],
+                    )
+                };
+                match result {
+                    Ok(_) => r#"{"ok":true}"#.to_string(),
+                    Err(e) => format!(r#"{{"error":"{}"}}"#, e),
+                }
+            },
+        )?,
+    )?;
+
+    // kv.get(key) → value string or empty string (skips expired)
+    let db_get = db.clone();
+    kv_obj.set(
+        "get",
+        Function::new(ctx.clone(), move |key: String| -> String {
+            let conn = match db_get.separate_conn() {
+                Ok(c) => c,
+                Err(_) => return String::new(),
+            };
+            conn.query_row(
+                "SELECT value FROM kv_meta WHERE key = ?1 AND (expires_at IS NULL OR expires_at > datetime('now'))",
+                [&key],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap_or_default()
+        })?,
+    )?;
+
+    // kv.delete(key)
+    let db_del = db;
+    kv_obj.set(
+        "delete",
+        Function::new(ctx.clone(), move |key: String| -> String {
+            let conn = match db_del.separate_conn() {
+                Ok(c) => c,
+                Err(e) => return format!(r#"{{"error":"{}"}}"#, e),
+            };
+            match conn.execute("DELETE FROM kv_meta WHERE key = ?1", [&key]) {
+                Ok(_) => r#"{"ok":true}"#.to_string(),
+                Err(e) => format!(r#"{{"error":"{}"}}"#, e),
+            }
+        })?,
+    )?;
+
+    ad.set("kv", kv_obj)?;
     Ok(())
 }
 

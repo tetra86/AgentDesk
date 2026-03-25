@@ -414,5 +414,19 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         );",
     )?;
 
+    // #126: Add expires_at column to kv_meta for TTL support
+    {
+        let has_expires: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('kv_meta') WHERE name = 'expires_at'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(false);
+        if !has_expires {
+            conn.execute_batch("ALTER TABLE kv_meta ADD COLUMN expires_at TEXT;")?;
+        }
+    }
+
     Ok(())
 }

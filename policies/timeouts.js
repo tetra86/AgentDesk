@@ -988,9 +988,13 @@ timeouts.onTick1min = function(ev) {
   agentdesk.log.debug("[tick1min] took " + (Date.now() - start) + "ms");
 };
 
-// 5min tier: [R] [B] [F] [G] [H] [I] [ctx]
+// 5min tier: [R] [B] [F] [G] [H] [I] [ctx] + TTL cleanup
 timeouts.onTick5min = function(ev) {
   var start = Date.now();
+  // #126: Purge expired kv_meta keys
+  try {
+    agentdesk.db.execute("DELETE FROM kv_meta WHERE expires_at IS NOT NULL AND expires_at < datetime('now')");
+  } catch(e) { agentdesk.log.warn("[tick5min] kv_ttl error: " + e); }
   try { timeouts._section_R(); } catch(e) { agentdesk.log.warn("[tick5min] R error: " + e); }
   try { timeouts._section_B(); } catch(e) { agentdesk.log.warn("[tick5min] B error: " + e); }
   try { timeouts._section_F(); } catch(e) { agentdesk.log.warn("[tick5min] F error: " + e); }
