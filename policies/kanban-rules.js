@@ -265,6 +265,12 @@ var rules = {
             "UPDATE kanban_cards SET review_status = 'awaiting_dod', awaiting_dod_at = datetime('now') WHERE id = ?",
             [card.id]
           );
+          // #117: sync canonical review state
+          agentdesk.db.execute(
+            "INSERT INTO card_review_state (card_id, state, updated_at) VALUES (?, 'awaiting_dod', datetime('now')) " +
+            "ON CONFLICT(card_id) DO UPDATE SET state = 'awaiting_dod', updated_at = datetime('now')",
+            [card.id]
+          );
           agentdesk.log.warn("[pm-gate] Card " + card.id + " → review(awaiting_dod): " + reasons[0]);
           return;
         }
@@ -272,6 +278,12 @@ var rules = {
         agentdesk.kanban.setStatus(card.id, "pending_decision");
         agentdesk.db.execute(
           "UPDATE kanban_cards SET review_status = NULL, suggestion_pending_at = NULL WHERE id = ?",
+          [card.id]
+        );
+        // #117: sync canonical review state
+        agentdesk.db.execute(
+          "INSERT INTO card_review_state (card_id, state, updated_at) VALUES (?, 'idle', datetime('now')) " +
+          "ON CONFLICT(card_id) DO UPDATE SET state = 'idle', pending_dispatch_id = NULL, updated_at = datetime('now')",
           [card.id]
         );
         agentdesk.log.warn("[pm-gate] Card " + card.id + " → pending_decision: " + reasons.join("; "));

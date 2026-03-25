@@ -733,6 +733,12 @@ pub async fn redispatch_card(
         }
 
         // Clear review_status and latest_dispatch_id (status → 'requested' handled by create_dispatch)
+        // #117: sync canonical review state
+        conn.execute(
+            "INSERT INTO card_review_state (card_id, state, updated_at) VALUES (?1, 'idle', datetime('now')) \
+             ON CONFLICT(card_id) DO UPDATE SET state = 'idle', pending_dispatch_id = NULL, updated_at = datetime('now')",
+            [&id],
+        ).ok();
         match conn.execute(
             "UPDATE kanban_cards SET review_status = NULL, latest_dispatch_id = NULL, updated_at = datetime('now') WHERE id = ?1",
             [&id],
@@ -947,6 +953,13 @@ pub async fn defer_dod(
                     "UPDATE kanban_cards SET review_status = 'reviewing', review_entered_at = datetime('now'), awaiting_dod_at = NULL WHERE id = ?1",
                     [&id],
                 ).ok();
+                // #117: sync canonical review state
+                conn.execute(
+                    "INSERT INTO card_review_state (card_id, state, review_entered_at, updated_at) \
+                     VALUES (?1, 'reviewing', datetime('now'), datetime('now')) \
+                     ON CONFLICT(card_id) DO UPDATE SET state = 'reviewing', review_entered_at = datetime('now'), updated_at = datetime('now')",
+                    [&id],
+                ).ok();
                 true
             } else {
                 false
@@ -979,6 +992,50 @@ pub async fn defer_dod(
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": format!("{e}")})),
+        ),
+    }
+}
+
+/// GET /api/kanban-cards/:id/review-state
+/// #117: Returns the canonical card_review_state record for a card.
+pub async fn get_card_review_state(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let conn = match state.db.lock() {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{e}")})),
+            );
+        }
+    };
+
+    match conn.query_row(
+        "SELECT card_id, review_round, state, pending_dispatch_id, last_verdict, \
+         last_decision, decided_by, decided_at, review_entered_at, updated_at \
+         FROM card_review_state WHERE card_id = ?1",
+        [&id],
+        |row| {
+            Ok(json!({
+                "card_id": row.get::<_, String>(0)?,
+                "review_round": row.get::<_, i64>(1)?,
+                "state": row.get::<_, String>(2)?,
+                "pending_dispatch_id": row.get::<_, Option<String>>(3)?,
+                "last_verdict": row.get::<_, Option<String>>(4)?,
+                "last_decision": row.get::<_, Option<String>>(5)?,
+                "decided_by": row.get::<_, Option<String>>(6)?,
+                "decided_at": row.get::<_, Option<String>>(7)?,
+                "review_entered_at": row.get::<_, Option<String>>(8)?,
+                "updated_at": row.get::<_, Option<String>>(9)?,
+            }))
+        },
+    ) {
+        Ok(state) => (StatusCode::OK, Json(state)),
+        Err(_) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "no review state for this card"})),
         ),
     }
 }
@@ -1594,6 +1651,13 @@ pub async fn pm_decision(
                     if let Ok(conn) = state.db.lock() {
                         conn.execute(
                             "UPDATE kanban_cards SET review_status = 'rework_pending' WHERE id = ?1",
+                            [&body.card_id],
+                        ).ok();
+                        // #117: sync canonical review state
+                        conn.execute(
+                            "INSERT INTO card_review_state (card_id, state, last_decision, updated_at) \
+                             VALUES (?1, 'rework_pending', 'pm_rework', datetime('now')) \
+                             ON CONFLICT(card_id) DO UPDATE SET state = 'rework_pending', last_decision = 'pm_rework', pending_dispatch_id = NULL, updated_at = datetime('now')",
                             [&body.card_id],
                         ).ok();
                     }

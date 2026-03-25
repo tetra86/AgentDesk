@@ -73,6 +73,12 @@ var reviewAutomation = {
         "UPDATE kanban_cards SET review_status = NULL, suggestion_pending_at = NULL WHERE id = ?",
         [card.id]
       );
+      // #117: sync canonical review state
+      agentdesk.db.execute(
+        "INSERT INTO card_review_state (card_id, state, updated_at) VALUES (?, 'idle', datetime('now')) " +
+        "ON CONFLICT(card_id) DO UPDATE SET state = 'idle', pending_dispatch_id = NULL, updated_at = datetime('now')",
+        [card.id]
+      );
       agentdesk.log.info("[review] Review disabled, card " + card.id + " → pending_decision");
       notifyPmdPendingDecision(card.id, "리뷰 비활성화 — PM 판단 필요");
       return;
@@ -85,6 +91,15 @@ var reviewAutomation = {
       [newRound, card.id]
     );
 
+    // #117: Update canonical card_review_state
+    agentdesk.db.execute(
+      "INSERT INTO card_review_state (card_id, review_round, state, review_entered_at, updated_at) " +
+      "VALUES (?, ?, 'reviewing', datetime('now'), datetime('now')) " +
+      "ON CONFLICT(card_id) DO UPDATE SET review_round = ?, state = 'reviewing', " +
+      "review_entered_at = datetime('now'), pending_dispatch_id = NULL, updated_at = datetime('now')",
+      [card.id, newRound, newRound]
+    );
+
     // Check review round limit — exceed → pending_decision with PMD notification
     var maxRounds = agentdesk.config.get("max_review_rounds") || 3;
     if (newRound > maxRounds) {
@@ -92,6 +107,12 @@ var reviewAutomation = {
       agentdesk.db.execute(
         "UPDATE kanban_cards SET review_status = 'dilemma_pending', blocked_reason = ? WHERE id = ?",
         ["Max review rounds (" + maxRounds + ") exceeded — PM decision needed", card.id]
+      );
+      // #117: sync canonical review state
+      agentdesk.db.execute(
+        "INSERT INTO card_review_state (card_id, review_round, state, updated_at) VALUES (?, ?, 'dilemma_pending', datetime('now')) " +
+        "ON CONFLICT(card_id) DO UPDATE SET review_round = ?, state = 'dilemma_pending', updated_at = datetime('now')",
+        [card.id, newRound, newRound]
       );
       agentdesk.log.warn("[review] Max review rounds (" + maxRounds + ") reached for " + card.id + " → pending_decision");
       notifyPmdPendingDecision(card.id, "리뷰 라운드 상한(" + maxRounds + "회) 초과");
@@ -108,6 +129,12 @@ var reviewAutomation = {
       );
       agentdesk.db.execute(
         "UPDATE kanban_cards SET review_status = NULL, suggestion_pending_at = NULL WHERE id = ?",
+        [card.id]
+      );
+      // #117: sync canonical review state
+      agentdesk.db.execute(
+        "INSERT INTO card_review_state (card_id, state, updated_at) VALUES (?, 'idle', datetime('now')) " +
+        "ON CONFLICT(card_id) DO UPDATE SET state = 'idle', pending_dispatch_id = NULL, updated_at = datetime('now')",
         [card.id]
       );
       agentdesk.log.info("[review] Counter-model disabled, card " + card.id + " → pending_decision");
@@ -131,6 +158,12 @@ var reviewAutomation = {
       );
       agentdesk.db.execute(
         "UPDATE kanban_cards SET review_status = NULL, suggestion_pending_at = NULL WHERE id = ?",
+        [card.id]
+      );
+      // #117: sync canonical review state
+      agentdesk.db.execute(
+        "INSERT INTO card_review_state (card_id, state, updated_at) VALUES (?, 'idle', datetime('now')) " +
+        "ON CONFLICT(card_id) DO UPDATE SET state = 'idle', pending_dispatch_id = NULL, updated_at = datetime('now')",
         [card.id]
       );
       agentdesk.log.info("[review] No counter channel for " + card.assigned_agent_id + " → pending_decision");
@@ -249,6 +282,14 @@ function processVerdict(cardId, verdict, result) {
       [cardId]
     );
 
+    // #117: Update canonical card_review_state — review passed
+    agentdesk.db.execute(
+      "INSERT INTO card_review_state (card_id, state, last_verdict, updated_at) " +
+      "VALUES (?, 'idle', ?, datetime('now')) " +
+      "ON CONFLICT(card_id) DO UPDATE SET state = 'idle', last_verdict = ?, pending_dispatch_id = NULL, updated_at = datetime('now')",
+      [cardId, verdict, verdict]
+    );
+
     // Review passed — check for next pipeline stage, otherwise done (#110)
     // Look for the next stage AFTER current pipeline_stage_id (stage_order based),
     // OR the first review_pass stage if card has no current pipeline stage.
@@ -346,6 +387,14 @@ function processVerdict(cardId, verdict, result) {
       [cardId]
     );
     agentdesk.log.info("[review] Card " + cardId + " needs review decision → suggestion_pending");
+
+    // #117: Update canonical card_review_state
+    agentdesk.db.execute(
+      "INSERT INTO card_review_state (card_id, state, last_verdict, updated_at) " +
+      "VALUES (?, 'suggestion_pending', ?, datetime('now')) " +
+      "ON CONFLICT(card_id) DO UPDATE SET state = 'suggestion_pending', last_verdict = ?, updated_at = datetime('now')",
+      [cardId, verdict, verdict]
+    );
 
     // Notification to original agent's primary channel is handled by Rust
     // (dispatched_sessions.rs / dispatches.rs sends async Discord message after OnDispatchCompleted)

@@ -1123,7 +1123,19 @@ pub(super) async fn send_review_result_to_primary(
         &format!("[리뷰 검토] {title}"),
         &serde_json::json!({"verdict": verdict}),
     ) {
-        Ok((id, _old_status)) => id,
+        Ok((id, _old_status)) => {
+            // #117: Update canonical card_review_state with pending_dispatch_id
+            if let Ok(conn) = db.lock() {
+                conn.execute(
+                    "INSERT INTO card_review_state (card_id, state, pending_dispatch_id, last_verdict, updated_at) \
+                     VALUES (?1, 'suggestion_pending', ?2, ?3, datetime('now')) \
+                     ON CONFLICT(card_id) DO UPDATE SET \
+                       pending_dispatch_id = ?2, last_verdict = ?3, updated_at = datetime('now')",
+                    rusqlite::params![card_id, id, verdict],
+                ).ok();
+            }
+            id
+        }
         Err(e) => {
             tracing::warn!(
                 "[review-followup] skipping review-decision dispatch for card {card_id}: {e}"

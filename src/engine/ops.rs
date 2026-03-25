@@ -404,6 +404,17 @@ fn dispatch_create_raw(
         &context,
     ) {
         Ok((dispatch_id, _old_status)) => {
+            // #117: Update card_review_state.pending_dispatch_id for review-decision
+            if dispatch_type == "review-decision" {
+                if let Ok(conn) = db.separate_conn() {
+                    conn.execute(
+                        "INSERT INTO card_review_state (card_id, state, pending_dispatch_id, updated_at) \
+                         VALUES (?1, 'suggestion_pending', ?2, datetime('now')) \
+                         ON CONFLICT(card_id) DO UPDATE SET pending_dispatch_id = ?2, updated_at = datetime('now')",
+                        rusqlite::params![card_id, dispatch_id],
+                    ).ok();
+                }
+            }
             // Get issue URL for Discord message
             let issue_url: Option<String> = db.separate_conn().ok().and_then(|conn| {
                 conn.query_row(
@@ -674,6 +685,21 @@ fn register_kanban_ops<'js>(ctx: &Ctx<'js>, db: Db) -> JsResult<()> {
             if new_status == "done" {
                 conn.execute(
                     "UPDATE auto_queue_entries SET status = 'done', completed_at = datetime('now') WHERE kanban_card_id = ?1 AND status = 'dispatched'",
+                    [&card_id],
+                ).ok();
+            }
+
+            // #117: Sync canonical review state on status transitions
+            if new_status == "done" || new_status == "ready" || new_status == "backlog" {
+                conn.execute(
+                    "INSERT INTO card_review_state (card_id, state, updated_at) VALUES (?1, 'idle', datetime('now')) \
+                     ON CONFLICT(card_id) DO UPDATE SET state = 'idle', pending_dispatch_id = NULL, updated_at = datetime('now')",
+                    [&card_id],
+                ).ok();
+            } else if new_status == "review" {
+                conn.execute(
+                    "INSERT INTO card_review_state (card_id, state, review_entered_at, updated_at) VALUES (?1, 'reviewing', datetime('now'), datetime('now')) \
+                     ON CONFLICT(card_id) DO UPDATE SET state = 'reviewing', review_entered_at = datetime('now'), updated_at = datetime('now')",
                     [&card_id],
                 ).ok();
             }

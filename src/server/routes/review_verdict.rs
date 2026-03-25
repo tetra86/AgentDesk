@@ -6,6 +6,35 @@ use super::AppState;
 use crate::engine::hooks::Hook;
 use crate::services::provider::ProviderKind;
 
+/// #117: Update the canonical card_review_state record after a review-decision action.
+fn update_card_review_state(
+    db: &crate::db::Db,
+    card_id: &str,
+    decision: &str,
+    dispatch_id: Option<&str>,
+) {
+    let state = match decision {
+        "accept" => "rework_pending",
+        "dispute" => "reviewing",
+        "dismiss" => "idle",
+        _ => return,
+    };
+    if let Ok(conn) = db.lock() {
+        conn.execute(
+            "INSERT INTO card_review_state (card_id, state, last_decision, decided_at, pending_dispatch_id, updated_at)
+             VALUES (?1, ?2, ?3, datetime('now'), NULL, datetime('now'))
+             ON CONFLICT(card_id) DO UPDATE SET
+               state = ?2,
+               last_decision = ?3,
+               decided_by = NULL,
+               decided_at = datetime('now'),
+               pending_dispatch_id = NULL,
+               updated_at = datetime('now')",
+            rusqlite::params![card_id, state, decision],
+        ).ok();
+    }
+}
+
 /// Write a review-passed marker file for the reviewed commit.
 /// `promote-release.sh` checks this before allowing release promotion.
 ///
@@ -390,20 +419,30 @@ pub async fn submit_review_decision(
         );
     }
 
-    // Validate that a pending review-decision dispatch exists for this card.
-    // This prevents duplicate accept/dispute/dismiss on the same dispatch.
-    // The dispatch is completed after the decision-specific logic runs, not before,
-    // because transition_status requires an active (pending/dispatched) dispatch.
+    // #117: Look up pending review-decision via canonical card_review_state first,
+    // falling back to legacy latest_dispatch_id for cards not yet in the canonical table.
     let pending_rd_id: Option<String> = conn
         .query_row(
             "SELECT td.id FROM task_dispatches td \
-             JOIN kanban_cards kc ON kc.latest_dispatch_id = td.id \
-             WHERE kc.id = ?1 AND td.dispatch_type = 'review-decision' \
+             JOIN card_review_state crs ON crs.pending_dispatch_id = td.id \
+             WHERE crs.card_id = ?1 AND td.dispatch_type = 'review-decision' \
              AND td.status IN ('pending', 'dispatched')",
             [&body.card_id],
             |row| row.get(0),
         )
-        .ok();
+        .ok()
+        .or_else(|| {
+            // Fallback: legacy path via latest_dispatch_id
+            conn.query_row(
+                "SELECT td.id FROM task_dispatches td \
+                 JOIN kanban_cards kc ON kc.latest_dispatch_id = td.id \
+                 WHERE kc.id = ?1 AND td.dispatch_type = 'review-decision' \
+                 AND td.status IN ('pending', 'dispatched')",
+                [&body.card_id],
+                |row| row.get(0),
+            )
+            .ok()
+        });
 
     if pending_rd_id.is_none() {
         // No pending review-decision dispatch → stale or duplicate call
@@ -494,6 +533,9 @@ pub async fn submit_review_decision(
                         .await;
                     });
 
+                    // #117: Update canonical review state before returning
+                    update_card_review_state(&state.db, &body.card_id, "accept", pending_rd_id.as_deref());
+
                     return (
                         StatusCode::OK,
                         Json(json!({
@@ -563,6 +605,9 @@ pub async fn submit_review_decision(
                 }
             }
 
+            // #117: Update canonical review state before returning
+            update_card_review_state(&state.db, &body.card_id, "dispute", pending_rd_id.as_deref());
+
             return (
                 StatusCode::OK,
                 Json(json!({
@@ -604,6 +649,9 @@ pub async fn submit_review_decision(
         }
         _ => {}
     }
+
+    // #117: Update canonical review state for all decision paths
+    update_card_review_state(&state.db, &body.card_id, &body.decision, pending_rd_id.as_deref());
 
     (
         StatusCode::OK,
@@ -1715,5 +1763,58 @@ mod tests {
             )
             .unwrap();
         assert_eq!(pending_count, 1, "exactly 1 pending review-decision per card");
+    }
+
+    /// #117: card_review_state is updated when review-decision is consumed (accept path).
+    #[tokio::test]
+    async fn accept_updates_canonical_review_state() {
+        let db = test_db();
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO agents (id, name, discord_channel_id, discord_channel_alt) VALUES ('agent-1', 'Agent 1', '123', '456')",
+                [],
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, latest_dispatch_id, review_status, created_at, updated_at)
+                 VALUES ('card-rs', 'Review State Test', 'review', 'agent-1', 'rd-rs', 'suggestion_pending', datetime('now'), datetime('now'))",
+                [],
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO task_dispatches (id, kanban_card_id, to_agent_id, dispatch_type, status, title, created_at, updated_at)
+                 VALUES ('rd-rs', 'card-rs', 'agent-1', 'review-decision', 'pending', 'RD', datetime('now'), datetime('now'))",
+                [],
+            ).unwrap();
+        }
+
+        let state = AppState {
+            db: db.clone(),
+            engine: test_engine(&db),
+            health_registry: None,
+        };
+
+        let (status, _) = submit_review_decision(
+            State(state),
+            Json(ReviewDecisionBody {
+                card_id: "card-rs".to_string(),
+                decision: "accept".to_string(),
+                comment: None,
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "accept should succeed");
+
+        // Verify card_review_state was updated
+        let conn = db.lock().unwrap();
+        let (rs_state, last_decision): (String, Option<String>) = conn
+            .query_row(
+                "SELECT state, last_decision FROM card_review_state WHERE card_id = 'card-rs'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(rs_state, "rework_pending", "canonical state should be rework_pending after accept");
+        assert_eq!(last_decision.as_deref(), Some("accept"), "last_decision should be accept");
     }
 }

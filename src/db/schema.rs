@@ -293,6 +293,65 @@ pub fn migrate(conn: &Connection) -> Result<()> {
          WHERE dispatch_type = 'review-decision' AND status IN ('pending', 'dispatched');",
     );
 
+    // #117: Canonical card-level review state — single source of truth for review lifecycle.
+    // Replaces the scattered review_status/review_round/latest_dispatch_id as the canonical record.
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS card_review_state (
+            card_id             TEXT PRIMARY KEY REFERENCES kanban_cards(id),
+            review_round        INTEGER NOT NULL DEFAULT 0,
+            state               TEXT NOT NULL DEFAULT 'idle',
+            pending_dispatch_id TEXT,
+            last_verdict        TEXT,
+            last_decision       TEXT,
+            decided_by          TEXT,
+            decided_at          TEXT,
+            review_entered_at   TEXT,
+            updated_at          TEXT DEFAULT (datetime('now'))
+        );",
+    )?;
+
+    // Backfill card_review_state from existing kanban_cards data
+    let backfilled: usize = conn
+        .execute(
+            "INSERT OR IGNORE INTO card_review_state (card_id, review_round, state, review_entered_at, updated_at)
+             SELECT id, COALESCE(review_round, 0),
+               CASE
+                 WHEN status = 'done' THEN 'idle'
+                 WHEN review_status = 'reviewing' THEN 'reviewing'
+                 WHEN review_status = 'suggestion_pending' THEN 'suggestion_pending'
+                 WHEN review_status = 'rework_pending' THEN 'rework_pending'
+                 WHEN review_status = 'awaiting_dod' THEN 'awaiting_dod'
+                 WHEN review_status = 'dilemma_pending' THEN 'dilemma_pending'
+                 WHEN status = 'review' THEN 'reviewing'
+                 ELSE 'idle'
+               END,
+               review_entered_at,
+               datetime('now')
+             FROM kanban_cards
+             WHERE status NOT IN ('backlog', 'ready')",
+            [],
+        )
+        .unwrap_or(0);
+    if backfilled > 0 {
+        tracing::info!("Backfilled {backfilled} card_review_state records (#117)");
+    }
+
+    // Populate pending_dispatch_id from active review-decision dispatches
+    let _ = conn.execute(
+        "UPDATE card_review_state SET pending_dispatch_id = (
+             SELECT td.id FROM task_dispatches td
+             WHERE td.kanban_card_id = card_review_state.card_id
+             AND td.dispatch_type = 'review-decision'
+             AND td.status IN ('pending', 'dispatched')
+             ORDER BY td.rowid DESC LIMIT 1
+         )
+         WHERE card_id IN (
+             SELECT kanban_card_id FROM task_dispatches
+             WHERE dispatch_type = 'review-decision' AND status IN ('pending', 'dispatched')
+         )",
+        [],
+    );
+
     // Rate limit cache table (provider → cached rate-limit JSON)
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS rate_limit_cache (

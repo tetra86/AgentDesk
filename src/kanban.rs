@@ -213,6 +213,21 @@ pub fn transition_status_with_opts(
     );
     conn.execute(&sql, rusqlite::params![new_status, card_id])?;
 
+    // #117: Sync canonical review state on status transitions
+    if new_status == "done" || new_status == "ready" || new_status == "backlog" {
+        conn.execute(
+            "INSERT INTO card_review_state (card_id, state, updated_at) VALUES (?1, 'idle', datetime('now')) \
+             ON CONFLICT(card_id) DO UPDATE SET state = 'idle', pending_dispatch_id = NULL, updated_at = datetime('now')",
+            [card_id],
+        ).ok();
+    } else if new_status == "review" {
+        conn.execute(
+            "INSERT INTO card_review_state (card_id, state, review_entered_at, updated_at) VALUES (?1, 'reviewing', datetime('now'), datetime('now')) \
+             ON CONFLICT(card_id) DO UPDATE SET state = 'reviewing', review_entered_at = datetime('now'), updated_at = datetime('now')",
+            [card_id],
+        ).ok();
+    }
+
     // ── D: Audit log ──
     log_audit(&conn, card_id, &old_status, new_status, source, "OK");
 
