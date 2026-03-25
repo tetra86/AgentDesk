@@ -326,7 +326,8 @@ pub(crate) fn notify_hook_created_dispatches(db: &Db, pre_hook_max_rowid: i64) {
                      FROM task_dispatches td \
                      JOIN kanban_cards kc ON td.kanban_card_id = kc.id \
                      WHERE td.status = 'pending' \
-                       AND td.rowid > ?1",
+                       AND td.rowid > ?1 \
+                       AND NOT EXISTS (SELECT 1 FROM kv_meta WHERE key = 'dispatch_notified:' || td.id)",
                 )
                 .ok();
             stmt.as_mut()
