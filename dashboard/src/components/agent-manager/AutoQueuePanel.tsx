@@ -32,6 +32,25 @@ const ENTRY_STATUS_STYLE: Record<string, { bg: string; text: string; label: stri
   skipped: { bg: "rgba(107,114,128,0.18)", text: "#9ca3af", label: "건너뜀", labelEn: "Skipped" },
 };
 
+function reorderPendingIds(ids: string[], fromId: string, toId: string): string[] | null {
+  const fromIdx = ids.indexOf(fromId);
+  const toIdx = ids.indexOf(toId);
+  if (fromIdx === -1 || toIdx === -1 || fromIdx === toIdx) return null;
+
+  const nextIds = [...ids];
+  nextIds.splice(fromIdx, 1);
+  nextIds.splice(toIdx, 0, fromId);
+  return nextIds;
+}
+
+function shiftPendingId(ids: string[], entryId: string, offset: -1 | 1): string[] | null {
+  const fromIdx = ids.indexOf(entryId);
+  if (fromIdx === -1) return null;
+  const toIdx = fromIdx + offset;
+  if (toIdx < 0 || toIdx >= ids.length) return null;
+  return reorderPendingIds(ids, entryId, ids[toIdx]);
+}
+
 // ── Draggable Entry Row ──
 
 function EntryRow({
@@ -43,6 +62,7 @@ function EntryRow({
   isDragging,
   isDropTarget,
   dragHandlers,
+  moveControls,
 }: {
   entry: DispatchQueueEntryType;
   idx: number;
@@ -58,6 +78,12 @@ function EntryRow({
     onDragLeave: (e: React.DragEvent) => void;
     onDrop: (e: React.DragEvent) => void;
     onDragEnd: () => void;
+  };
+  moveControls?: {
+    canMoveUp: boolean;
+    canMoveDown: boolean;
+    onMoveUp: () => void;
+    onMoveDown: () => void;
   };
 }) {
   const sty = ENTRY_STATUS_STYLE[entry.status] ?? ENTRY_STATUS_STYLE.pending;
@@ -112,6 +138,43 @@ function EntryRow({
       >
         {tr(sty.label, sty.labelEn)}
       </span>
+      {isPending && moveControls && (
+        <div className="inline-flex rounded-md overflow-hidden border shrink-0" style={{ borderColor: "rgba(148,163,184,0.2)" }}>
+          <button
+            type="button"
+            onClick={moveControls.onMoveUp}
+            disabled={!moveControls.canMoveUp}
+            aria-label={tr("위로 이동", "Move up")}
+            title={tr("위로 이동", "Move up")}
+            className="px-1.5 py-0.5 text-[10px]"
+            style={{
+              color: moveControls.canMoveUp ? "var(--th-text-secondary)" : "var(--th-text-muted)",
+              backgroundColor: "rgba(15,23,42,0.65)",
+              opacity: moveControls.canMoveUp ? 1 : 0.45,
+              touchAction: "manipulation",
+            }}
+          >
+            ↑
+          </button>
+          <button
+            type="button"
+            onClick={moveControls.onMoveDown}
+            disabled={!moveControls.canMoveDown}
+            aria-label={tr("아래로 이동", "Move down")}
+            title={tr("아래로 이동", "Move down")}
+            className="px-1.5 py-0.5 text-[10px] border-l"
+            style={{
+              borderColor: "rgba(148,163,184,0.2)",
+              color: moveControls.canMoveDown ? "var(--th-text-secondary)" : "var(--th-text-muted)",
+              backgroundColor: "rgba(15,23,42,0.65)",
+              opacity: moveControls.canMoveDown ? 1 : 0.45,
+              touchAction: "manipulation",
+            }}
+          >
+            ↓
+          </button>
+        </div>
+      )}
       {isPending && (
         <button
           onClick={() => onSkip(entry.id)}
@@ -180,26 +243,20 @@ function useDragReorder(
           return;
         }
 
-        // Compute new order
         const ids = pendingEntries.map((pe) => pe.id);
-        const fromIdx = ids.indexOf(fromId);
-        const toIdx = ids.indexOf(toId);
-        if (fromIdx === -1 || toIdx === -1) {
+        const reorderedIds = reorderPendingIds(ids, fromId, toId);
+        if (!reorderedIds) {
           setDragId(null);
           setDropTargetId(null);
           dragIdRef.current = null;
           return;
         }
 
-        // Move fromIdx to toIdx
-        ids.splice(fromIdx, 1);
-        ids.splice(toIdx, 0, fromId);
-
         setDragId(null);
         setDropTargetId(null);
         dragIdRef.current = null;
 
-        void onReorder(ids, agentId);
+        void onReorder(reorderedIds, agentId);
       },
       onDragEnd: () => {
         setDragId(null);
@@ -209,7 +266,28 @@ function useDragReorder(
     };
   };
 
-  return { dragId, dropTargetId, makeDragHandlers };
+  const makeMoveControls = (entry: DispatchQueueEntryType) => {
+    if (entry.status !== "pending") return undefined;
+
+    const ids = pendingEntries.map((pendingEntry) => pendingEntry.id);
+    const index = ids.indexOf(entry.id);
+    if (index === -1) return undefined;
+
+    return {
+      canMoveUp: index > 0,
+      canMoveDown: index < ids.length - 1,
+      onMoveUp: () => {
+        const reorderedIds = shiftPendingId(ids, entry.id, -1);
+        if (reorderedIds) void onReorder(reorderedIds, agentId);
+      },
+      onMoveDown: () => {
+        const reorderedIds = shiftPendingId(ids, entry.id, 1);
+        if (reorderedIds) void onReorder(reorderedIds, agentId);
+      },
+    };
+  };
+
+  return { dragId, dropTargetId, makeDragHandlers, makeMoveControls };
 }
 
 // ── Main Panel ──
@@ -567,34 +645,42 @@ export default function AutoQueuePanel({ tr, locale, agents, selectedRepo, selec
                 ))}
               </div>
 
-              {/* View mode toggle */}
-              {Object.keys(agentStats).length > 1 && (
-                <div
-                  className="inline-flex rounded-lg border overflow-hidden"
-                  style={{ borderColor: "rgba(148,163,184,0.22)" }}
-                >
-                  <button
-                    onClick={() => setViewMode("all")}
-                    className="text-[10px] px-2 py-1 transition-colors"
-                    style={{
-                      backgroundColor: viewMode === "all" ? "rgba(139,92,246,0.2)" : "transparent",
-                      color: viewMode === "all" ? "#a78bfa" : "var(--th-text-muted)",
-                    }}
+              <div className="flex items-center gap-2 flex-wrap justify-end">
+                {pendingCount > 1 && (
+                  <span className="text-[10px]" style={{ color: "var(--th-text-muted)" }}>
+                    {tr("순서 변경: 드래그 또는 ↑↓", "Reorder: drag or ↑↓")}
+                  </span>
+                )}
+
+                {/* View mode toggle */}
+                {Object.keys(agentStats).length > 1 && (
+                  <div
+                    className="inline-flex rounded-lg border overflow-hidden"
+                    style={{ borderColor: "rgba(148,163,184,0.22)" }}
                   >
-                    {tr("전체", "All")}
-                  </button>
-                  <button
-                    onClick={() => setViewMode("agent")}
-                    className="text-[10px] px-2 py-1 transition-colors"
-                    style={{
-                      backgroundColor: viewMode === "agent" ? "rgba(139,92,246,0.2)" : "transparent",
-                      color: viewMode === "agent" ? "#a78bfa" : "var(--th-text-muted)",
-                    }}
-                  >
-                    {tr("에이전트별", "By Agent")}
-                  </button>
-                </div>
-              )}
+                    <button
+                      onClick={() => setViewMode("all")}
+                      className="text-[10px] px-2 py-1 transition-colors"
+                      style={{
+                        backgroundColor: viewMode === "all" ? "rgba(139,92,246,0.2)" : "transparent",
+                        color: viewMode === "all" ? "#a78bfa" : "var(--th-text-muted)",
+                      }}
+                    >
+                      {tr("전체", "All")}
+                    </button>
+                    <button
+                      onClick={() => setViewMode("agent")}
+                      className="text-[10px] px-2 py-1 transition-colors"
+                      style={{
+                        backgroundColor: viewMode === "agent" ? "rgba(139,92,246,0.2)" : "transparent",
+                        color: viewMode === "agent" ? "#a78bfa" : "var(--th-text-muted)",
+                      }}
+                    >
+                      {tr("에이전트별", "By Agent")}
+                    </button>
+                  </div>
+                )}
+              </div>
             </div>
           )}
 
@@ -619,6 +705,7 @@ export default function AutoQueuePanel({ tr, locale, agents, selectedRepo, selec
                       isDragging={allDrag.dragId === entry.id}
                       isDropTarget={allDrag.dropTargetId === entry.id}
                       dragHandlers={allDrag.makeDragHandlers(entry)}
+                      moveControls={allDrag.makeMoveControls(entry)}
                     />
                   </div>
                 </div>
@@ -730,6 +817,7 @@ function AgentSubQueue({
           isDragging={drag.dragId === entry.id}
           isDropTarget={drag.dropTargetId === entry.id}
           dragHandlers={drag.makeDragHandlers(entry)}
+          moveControls={drag.makeMoveControls(entry)}
         />
       ))}
     </div>
