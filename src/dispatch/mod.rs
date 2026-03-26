@@ -30,13 +30,14 @@ pub fn create_dispatch_core(
         };
         if let Some(obj) = ctx_val.as_object_mut() {
             if !obj.contains_key("reviewed_commit") {
-                let repo_dir = std::env::var("AGENTDESK_REPO_DIR").unwrap_or_else(|_| {
-                    dirs::home_dir()
-                        .expect("HOME directory not found")
+                let repo_dir = match std::env::var("AGENTDESK_REPO_DIR") {
+                    Ok(d) => d,
+                    Err(_) => dirs::home_dir()
+                        .ok_or_else(|| anyhow::anyhow!("HOME directory not found; set AGENTDESK_REPO_DIR"))?
                         .join("AgentDesk")
                         .to_string_lossy()
-                        .into_owned()
-                });
+                        .into_owned(),
+                };
                 if let Some(commit) = std::process::Command::new("git")
                     .args(["rev-parse", "HEAD"])
                     .current_dir(&repo_dir)
