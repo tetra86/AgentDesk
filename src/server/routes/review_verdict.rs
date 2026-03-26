@@ -798,7 +798,7 @@ const MIN_CATEGORY_OUTCOMES: i64 = 3;
 
 /// Spawn a background task to re-aggregate review tuning data.
 /// Uses a lightweight debounce: skips if the last aggregate was < 60s ago.
-fn spawn_aggregate_if_needed(db: &crate::db::Db) {
+pub fn spawn_aggregate_if_needed(db: &crate::db::Db) {
     let db = db.clone();
     tokio::spawn(async move {
         // Debounce: check if guidance file was written recently

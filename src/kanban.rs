@@ -327,7 +327,9 @@ pub fn transition_status_with_opts(
     if new_status == "done" {
         // #119: Record true_negative for cards that passed review and reached done
         // without post-pass bugs (i.e., the review correctly found no issues).
-        record_true_negative_if_pass(db, card_id);
+        if record_true_negative_if_pass(db, card_id) {
+            crate::server::routes::review_verdict::spawn_aggregate_if_needed(db);
+        }
 
         let _ = engine.try_fire_hook(
             Hook::OnCardTerminal,
@@ -710,7 +712,8 @@ fn log_audit(
 
 /// #119: When a card reaches done after a review pass verdict, record a true_negative
 /// tuning outcome. This confirms the review was correct in not finding issues.
-fn record_true_negative_if_pass(db: &Db, card_id: &str) {
+/// Returns true if a TN was actually inserted.
+fn record_true_negative_if_pass(db: &Db, card_id: &str) -> bool {
     if let Ok(conn) = db.lock() {
         // Check if the card's last review verdict was "pass" or "approved"
         let last_verdict: Option<String> = conn
@@ -732,20 +735,25 @@ fn record_true_negative_if_pass(db: &Db, card_id: &str) {
                     )
                     .ok();
 
-                conn.execute(
+                let inserted = conn.execute(
                     "INSERT INTO review_tuning_outcomes \
                      (card_id, dispatch_id, review_round, verdict, decision, outcome, finding_categories) \
                      VALUES (?1, NULL, ?2, ?3, 'done', 'true_negative', NULL)",
                     rusqlite::params![card_id, review_round, last_verdict.as_deref().unwrap_or("pass")],
                 )
-                .ok();
-                tracing::info!(
-                    "[review-tuning] #119 recorded true_negative: card={card_id} (pass → done)"
-                );
+                .map(|n| n > 0)
+                .unwrap_or(false);
+                if inserted {
+                    tracing::info!(
+                        "[review-tuning] #119 recorded true_negative: card={card_id} (pass → done)"
+                    );
+                }
+                return inserted;
             }
             _ => {} // No review or non-pass verdict — nothing to record
         }
     }
+    false
 }
 
 /// #119: When a card is reopened after reaching done with a pass verdict,
