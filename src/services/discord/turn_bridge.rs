@@ -1405,59 +1405,75 @@ pub(super) fn spawn_turn_bridge(
         // For dispatch-based turns (threads), kill the tmux session after
         // finalization. Thread sessions are one-shot — keeping claude alive
         // in "Ready for input" blocks idle detection and the auto-complete pipeline.
+        //
+        // Exception (#145): unified-thread auto-queue runs reuse the same thread
+        // session across multiple entries. Skip kill if the run is still active.
         #[cfg(unix)]
         if dispatch_id.is_some() {
-            if let Some(ref name) = cancel_token
-                .tmux_session
-                .lock()
-                .ok()
-                .and_then(|g| g.clone())
-            {
-                record_tmux_exit_reason(name, "dispatch turn completed — killing thread session");
-                let sess = name.clone();
-                let kill_result = tokio::task::spawn_blocking(move || {
-                    std::process::Command::new("tmux")
-                        .args(["kill-session", "-t", &sess])
-                        .output()
-                })
-                .await;
-                let kill_ok = matches!(&kill_result, Ok(Ok(o)) if o.status.success());
-                if !kill_ok {
-                    match &kill_result {
-                        Ok(Ok(o)) => {
-                            let ts = chrono::Local::now().format("%H:%M:%S");
-                            eprintln!(
-                                "  [{ts}] ⚠ tmux kill-session failed for {}: {}",
-                                name,
-                                String::from_utf8_lossy(&o.stderr)
-                            );
+            let should_kill = if let Some(ref did) = dispatch_id {
+                !crate::dispatch::is_unified_thread_active(did)
+            } else {
+                true
+            };
+            if should_kill {
+                if let Some(ref name) = cancel_token
+                    .tmux_session
+                    .lock()
+                    .ok()
+                    .and_then(|g| g.clone())
+                {
+                    record_tmux_exit_reason(name, "dispatch turn completed — killing thread session");
+                    let sess = name.clone();
+                    let kill_result = tokio::task::spawn_blocking(move || {
+                        std::process::Command::new("tmux")
+                            .args(["kill-session", "-t", &sess])
+                            .output()
+                    })
+                    .await;
+                    let kill_ok = matches!(&kill_result, Ok(Ok(o)) if o.status.success());
+                    if !kill_ok {
+                        match &kill_result {
+                            Ok(Ok(o)) => {
+                                let ts = chrono::Local::now().format("%H:%M:%S");
+                                eprintln!(
+                                    "  [{ts}] ⚠ tmux kill-session failed for {}: {}",
+                                    name,
+                                    String::from_utf8_lossy(&o.stderr)
+                                );
+                            }
+                            Ok(Err(e)) => {
+                                let ts = chrono::Local::now().format("%H:%M:%S");
+                                eprintln!("  [{ts}] ⚠ tmux kill-session error for {name}: {e}");
+                            }
+                            Err(e) => {
+                                let ts = chrono::Local::now().format("%H:%M:%S");
+                                eprintln!("  [{ts}] ⚠ tmux kill-session spawn error for {name}: {e}");
+                            }
+                            _ => {}
                         }
-                        Ok(Err(e)) => {
-                            let ts = chrono::Local::now().format("%H:%M:%S");
-                            eprintln!("  [{ts}] ⚠ tmux kill-session error for {name}: {e}");
-                        }
-                        Err(e) => {
-                            let ts = chrono::Local::now().format("%H:%M:%S");
-                            eprintln!("  [{ts}] ⚠ tmux kill-session spawn error for {name}: {e}");
-                        }
-                        _ => {}
                     }
-                }
 
-                // Only delete the DB session row if tmux kill succeeded.
-                // If kill failed, leave the row so the periodic reaper can retry.
-                if kill_ok {
-                    if let Some(session_key) = super::adk_session::build_adk_session_key(
-                        &shared_owned,
-                        channel_id,
-                        &provider,
-                    )
-                    .await
-                    {
-                        super::adk_session::delete_adk_session(&session_key, shared_owned.api_port)
-                            .await;
+                    // Only delete the DB session row if tmux kill succeeded.
+                    // If kill failed, leave the row so the periodic reaper can retry.
+                    if kill_ok {
+                        if let Some(session_key) = super::adk_session::build_adk_session_key(
+                            &shared_owned,
+                            channel_id,
+                            &provider,
+                        )
+                        .await
+                        {
+                            super::adk_session::delete_adk_session(&session_key, shared_owned.api_port)
+                                .await;
+                        }
                     }
                 }
+            } else {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                println!(
+                    "  [{ts}] ♻ Skipping tmux kill for unified-thread dispatch {:?} — run still active",
+                    dispatch_id
+                );
             }
         }
 

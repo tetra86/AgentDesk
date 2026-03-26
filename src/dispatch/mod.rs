@@ -447,6 +447,102 @@ pub fn query_dispatch_row(
     .map_err(|e| anyhow::anyhow!("Dispatch query error: {e}"))
 }
 
+/// Check whether a dispatch belongs to an active unified-thread auto-queue run.
+///
+/// Returns `true` when:
+/// - The dispatch's kanban card is part of an active/paused auto-queue run
+/// - That run has `unified_thread_id IS NOT NULL`
+/// - The run still has pending or dispatched entries remaining
+///
+/// When `true`, callers should **not** tear down the tmux session because the
+/// same thread will be reused for subsequent queue entries.
+///
+/// Uses a standalone `rusqlite::Connection` opened from the runtime DB path
+/// to avoid lock contention with the main `Db` mutex.
+pub fn is_unified_thread_active(dispatch_id: &str) -> bool {
+    let root = match crate::cli::agentdesk_runtime_root() {
+        Some(r) => r,
+        None => return false,
+    };
+    let db_path = root.join("data/agentdesk.sqlite");
+    let conn = match rusqlite::Connection::open(&db_path) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let result: bool = conn
+        .query_row(
+            "SELECT COUNT(*) > 0 \
+             FROM auto_queue_entries e \
+             JOIN auto_queue_runs r ON e.run_id = r.id \
+             WHERE e.run_id = ( \
+                 SELECT e2.run_id FROM auto_queue_entries e2 \
+                 JOIN task_dispatches td ON td.kanban_card_id = e2.kanban_card_id \
+                 WHERE td.id = ?1 LIMIT 1 \
+             ) \
+             AND r.status IN ('active', 'paused') \
+             AND e.status IN ('pending', 'dispatched') \
+             AND r.unified_thread_id IS NOT NULL",
+            [dispatch_id],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+    result
+}
+
+/// Check whether a thread channel belongs to an active unified-thread auto-queue run.
+///
+/// Looks up `auto_queue_runs` by `unified_thread_channel_id` matching the
+/// given Discord channel ID. Returns `true` when a matching active/paused run
+/// still has pending or dispatched entries.
+pub fn is_unified_thread_channel_active(channel_id: u64) -> bool {
+    let root = match crate::cli::agentdesk_runtime_root() {
+        Some(r) => r,
+        None => return false,
+    };
+    let db_path = root.join("data/agentdesk.sqlite");
+    let conn = match rusqlite::Connection::open(&db_path) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let channel_str = channel_id.to_string();
+    let result: bool = conn
+        .query_row(
+            "SELECT COUNT(*) > 0 \
+             FROM auto_queue_entries e \
+             JOIN auto_queue_runs r ON e.run_id = r.id \
+             WHERE r.unified_thread_channel_id = ?1 \
+             AND r.status IN ('active', 'paused') \
+             AND e.status IN ('pending', 'dispatched') \
+             AND r.unified_thread_id IS NOT NULL",
+            [&channel_str],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+    result
+}
+
+/// Check whether a channel name (from tmux session parsing) belongs to an active
+/// unified-thread auto-queue run. Extracts the thread channel ID from the
+/// `-t{15+digit}` suffix in the channel name.
+pub fn is_unified_thread_channel_name_active(channel_name: &str) -> bool {
+    // Extract thread channel ID from channel name suffix (-t{15+digits})
+    let thread_channel_id: u64 = match channel_name.rfind("-t") {
+        Some(pos) => {
+            let suffix = &channel_name[pos + 2..];
+            if suffix.len() >= 15 && suffix.chars().all(|c| c.is_ascii_digit()) {
+                suffix.parse().unwrap_or(0)
+            } else {
+                return false;
+            }
+        }
+        None => return false,
+    };
+    if thread_channel_id == 0 {
+        return false;
+    }
+    is_unified_thread_channel_active(thread_channel_id)
+}
+
 /// Determine provider from a Discord channel name suffix.
 fn provider_from_channel_suffix(channel: &str) -> Option<&'static str> {
     if channel.ends_with("-cc") {
