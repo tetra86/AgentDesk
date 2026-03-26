@@ -1061,14 +1061,17 @@ export async function getEffectivePipeline(
 }
 
 export async function getRepoPipeline(repo: string): Promise<{ repo: string; pipeline_config: unknown }> {
-  return request(`/api/pipeline/config/repo/${encodeURIComponent(repo)}`);
+  // Server expects /repo/{owner}/{repo} as two segments, not one encoded segment
+  const [owner, name] = repo.split("/");
+  return request(`/api/pipeline/config/repo/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`);
 }
 
 export async function setRepoPipeline(
   repo: string,
   config: unknown,
 ): Promise<{ ok: boolean }> {
-  return request(`/api/pipeline/config/repo/${encodeURIComponent(repo)}`, {
+  const [owner, name] = repo.split("/");
+  return request(`/api/pipeline/config/repo/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`, {
     method: "PUT",
     body: JSON.stringify({ config }),
   });
