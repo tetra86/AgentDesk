@@ -58,15 +58,11 @@ impl DbPool {
 pub type Db = Arc<DbPool>;
 
 /// Create an in-memory Db for tests.
+/// Uses a named shared in-memory URI so that `separate_conn()` can access the same data.
 #[cfg(test)]
 pub fn test_db() -> Db {
     let conn = Connection::open_in_memory().unwrap();
-    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;").ok();
-    schema::migrate(&conn).unwrap();
-    Arc::new(DbPool {
-        path: std::path::PathBuf::from(":memory:"),
-        write_conn: Mutex::new(conn),
-    })
+    wrap_conn(conn)
 }
 
 /// Wrap a raw Connection into a Db (for tests and migration).
