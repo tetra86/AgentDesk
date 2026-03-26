@@ -6,6 +6,40 @@ use super::AppState;
 use crate::engine::hooks::Hook;
 use crate::services::provider::ProviderKind;
 
+/// #119: Record a review tuning outcome for FP/FN aggregation.
+fn record_tuning_outcome(
+    db: &crate::db::Db,
+    card_id: &str,
+    dispatch_id: Option<&str>,
+    review_round: Option<i64>,
+    verdict: &str,
+    decision: Option<&str>,
+    outcome: &str,
+    finding_categories: Option<&str>,
+) {
+    if let Ok(conn) = db.lock() {
+        conn.execute(
+            "INSERT INTO review_tuning_outcomes \
+             (card_id, dispatch_id, review_round, verdict, decision, outcome, finding_categories) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![
+                card_id,
+                dispatch_id,
+                review_round,
+                verdict,
+                decision,
+                outcome,
+                finding_categories,
+            ],
+        )
+        .ok();
+        tracing::info!(
+            "[review-tuning] #119 recorded outcome: card={card_id} verdict={verdict} decision={} outcome={outcome}",
+            decision.unwrap_or("none")
+        );
+    }
+}
+
 /// #117: Update the canonical card_review_state record after a review-decision action.
 fn update_card_review_state(
     db: &crate::db::Db,
@@ -351,8 +385,34 @@ pub async fn submit_verdict(
         });
     }
 
-    // When review passes, stamp a marker so promote-release.sh can verify
+    // #119: Record true_negative outcome for pass verdicts
     if body.overall == "pass" || body.overall == "approved" {
+        if let Some(ref cid) = card_id {
+            let review_round: Option<i64> = state
+                .db
+                .lock()
+                .ok()
+                .and_then(|conn| {
+                    conn.query_row(
+                        "SELECT review_round FROM card_review_state WHERE card_id = ?1",
+                        [cid],
+                        |row| row.get(0),
+                    )
+                    .ok()
+                });
+            record_tuning_outcome(
+                &state.db,
+                cid,
+                Some(&body.dispatch_id),
+                review_round,
+                &body.overall,
+                None,
+                "true_negative",
+                None,
+            );
+        }
+
+        // When review passes, stamp a marker so promote-release.sh can verify
         stamp_review_passed_marker(effective_commit.as_deref());
     }
 
@@ -654,6 +714,75 @@ pub async fn submit_review_decision(
     // #117: Update canonical review state for all decision paths
     update_card_review_state(&state.db, &body.card_id, &body.decision, pending_rd_id.as_deref());
 
+    // #119: Record tuning outcome based on decision type
+    if body.decision == "accept" || body.decision == "dismiss" {
+        let (review_round, last_verdict, finding_cats) = state
+            .db
+            .lock()
+            .ok()
+            .map(|conn| {
+                let round: Option<i64> = conn
+                    .query_row(
+                        "SELECT review_round FROM card_review_state WHERE card_id = ?1",
+                        [&body.card_id],
+                        |row| row.get(0),
+                    )
+                    .ok();
+                let verdict: Option<String> = conn
+                    .query_row(
+                        "SELECT last_verdict FROM card_review_state WHERE card_id = ?1",
+                        [&body.card_id],
+                        |row| row.get(0),
+                    )
+                    .ok()
+                    .flatten();
+                // Extract finding categories from the last review dispatch result
+                let cats: Option<String> = conn
+                    .query_row(
+                        "SELECT td.result FROM task_dispatches td \
+                         WHERE td.kanban_card_id = ?1 AND td.dispatch_type = 'review' \
+                         AND td.status = 'completed' ORDER BY td.rowid DESC LIMIT 1",
+                        [&body.card_id],
+                        |row| row.get::<_, Option<String>>(0),
+                    )
+                    .ok()
+                    .flatten()
+                    .and_then(|r| {
+                        serde_json::from_str::<serde_json::Value>(&r)
+                            .ok()
+                            .and_then(|v| {
+                                v["items"].as_array().map(|items| {
+                                    let cats: Vec<String> = items
+                                        .iter()
+                                        .filter_map(|it| {
+                                            it["category"].as_str().map(|s| s.to_string())
+                                        })
+                                        .collect();
+                                    serde_json::to_string(&cats).unwrap_or_default()
+                                })
+                            })
+                    });
+                (round, verdict, cats)
+            })
+            .unwrap_or((None, None, None));
+
+        let outcome = if body.decision == "accept" {
+            "true_positive"
+        } else {
+            "false_positive"
+        };
+        record_tuning_outcome(
+            &state.db,
+            &body.card_id,
+            pending_rd_id.as_deref(),
+            review_round,
+            last_verdict.as_deref().unwrap_or("unknown"),
+            Some(&body.decision),
+            outcome,
+            finding_cats.as_deref(),
+        );
+    }
+
     (
         StatusCode::OK,
         Json(json!({
@@ -662,6 +791,178 @@ pub async fn submit_review_decision(
             "decision": body.decision,
         })),
     )
+}
+
+// ── #119: Review tuning aggregation ──────────────────────────────────────────
+
+/// POST /api/review-tuning/aggregate
+///
+/// Aggregates review tuning outcomes (FP/FN rates per finding category)
+/// and writes tuning guidance to kv_meta + a file for prompt injection.
+pub async fn aggregate_review_tuning(
+    State(state): State<AppState>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let conn = match state.db.lock() {
+        Ok(c) => c,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "db lock failed"})),
+            )
+        }
+    };
+
+    // Aggregate outcomes — collect all rows into a Vec first to release the borrow
+    let mut total_tp = 0i64;
+    let mut total_fp = 0i64;
+    let mut total_tn = 0i64;
+    let mut fp_categories: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+    let mut tp_categories: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+
+    {
+        let mut stmt = match conn.prepare(
+            "SELECT outcome, finding_categories \
+             FROM review_tuning_outcomes \
+             WHERE created_at > datetime('now', '-30 days')",
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("query failed: {e}")})),
+                )
+            }
+        };
+
+        let rows: Vec<(String, Option<String>)> = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                ))
+            })
+            .ok()
+            .into_iter()
+            .flat_map(|r| r.flatten())
+            .collect();
+
+        for (outcome, cats_json) in &rows {
+            match outcome.as_str() {
+                "true_positive" => total_tp += 1,
+                "false_positive" => total_fp += 1,
+                "true_negative" => total_tn += 1,
+                _ => {}
+            }
+            if let Some(cats) = cats_json {
+                if let Ok(cats_arr) = serde_json::from_str::<Vec<String>>(cats) {
+                    let target = match outcome.as_str() {
+                        "false_positive" => Some(&mut fp_categories),
+                        "true_positive" => Some(&mut tp_categories),
+                        _ => None,
+                    };
+                    if let Some(map) = target {
+                        for cat in cats_arr {
+                            *map.entry(cat).or_insert(0) += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Build tuning guidance text
+    let total = total_tp + total_fp + total_tn;
+    let mut guidance_lines: Vec<String> = Vec::new();
+
+    if total > 0 {
+        let fp_rate = if total_tp + total_fp > 0 {
+            total_fp as f64 / (total_tp + total_fp) as f64
+        } else {
+            0.0
+        };
+
+        guidance_lines.push(format!(
+            "지난 30일 리뷰 통계: 전체 {}건 (정탐 {}건, 오탐 {}건, 정상 {}건, 오탐률 {:.0}%)",
+            total, total_tp, total_fp, total_tn, fp_rate * 100.0
+        ));
+
+        // High FP categories
+        let mut fp_sorted: Vec<_> = fp_categories.iter().collect();
+        fp_sorted.sort_by(|a, b| b.1.cmp(a.1));
+        for (cat, count) in fp_sorted.iter().take(5) {
+            let tp_count = tp_categories.get(*cat).copied().unwrap_or(0);
+            let cat_total = *count + tp_count;
+            if cat_total > 0 && **count as f64 / cat_total as f64 > 0.5 {
+                guidance_lines.push(format!(
+                    "- 과도 지적 카테고리 '{}': 오탐 {}건/전체 {}건 — 이 유형은 엄격도를 낮춰라",
+                    cat, count, cat_total
+                ));
+            }
+        }
+
+        // High TP categories (categories reviewers correctly catch)
+        let mut tp_sorted: Vec<_> = tp_categories.iter().collect();
+        tp_sorted.sort_by(|a, b| b.1.cmp(a.1));
+        for (cat, count) in tp_sorted.iter().take(3) {
+            let fp_count = fp_categories.get(*cat).copied().unwrap_or(0);
+            let cat_total = *count + fp_count;
+            if cat_total >= 2 && **count as f64 / cat_total as f64 > 0.7 {
+                guidance_lines.push(format!(
+                    "- 정탐 빈출 카테고리 '{}': 정탐 {}건/전체 {}건 — 이 유형은 계속 주의 깊게 확인하라",
+                    cat, count, cat_total
+                ));
+            }
+        }
+    }
+
+    let guidance = if guidance_lines.is_empty() {
+        String::new()
+    } else {
+        guidance_lines.join("\n")
+    };
+
+    // Store in kv_meta
+    conn.execute(
+        "INSERT INTO kv_meta (key, value) VALUES ('review_tuning_guidance', ?1) \
+         ON CONFLICT(key) DO UPDATE SET value = ?1",
+        [&guidance],
+    )
+    .ok();
+
+    // Write to file for prompt_builder to read
+    let guidance_path = review_tuning_guidance_path();
+    if let Some(parent) = guidance_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&guidance_path, &guidance);
+    tracing::info!(
+        "[review-tuning] #119 aggregation complete: tp={total_tp} fp={total_fp} tn={total_tn}, guidance written to {}",
+        guidance_path.display()
+    );
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "ok": true,
+            "total": total,
+            "true_positive": total_tp,
+            "false_positive": total_fp,
+            "true_negative": total_tn,
+            "guidance_lines": guidance_lines.len(),
+        })),
+    )
+}
+
+/// Well-known path for review tuning guidance file.
+/// Uses ~/.adk/release/runtime/ (same logic as agentdesk_runtime_root).
+pub fn review_tuning_guidance_path() -> std::path::PathBuf {
+    let root = std::env::var("AGENTDESK_ROOT_DIR")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|h| h.join(".adk").join("release")))
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    root.join("runtime").join("review-tuning-guidance.txt")
 }
 
 #[cfg(test)]

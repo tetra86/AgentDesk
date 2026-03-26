@@ -420,6 +420,22 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         );",
     )?;
 
+    // #119: Review tuning outcomes — tracks verdict→decision classification
+    // for aggregating false positive/negative rates to auto-tune review prompts.
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS review_tuning_outcomes (
+            id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+            card_id            TEXT,
+            dispatch_id        TEXT,
+            review_round       INTEGER,
+            verdict            TEXT NOT NULL,
+            decision           TEXT,
+            outcome            TEXT NOT NULL,
+            finding_categories TEXT,
+            created_at         DATETIME DEFAULT (datetime('now'))
+        );",
+    )?;
+
     // #126: Add expires_at column to kv_meta for TTL support
     {
         let has_expires: bool = conn

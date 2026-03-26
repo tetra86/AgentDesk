@@ -1,6 +1,6 @@
 use super::settings::{
-    discord_token_hash, load_longterm_memory_catalog, load_role_prompt, load_shared_prompt,
-    render_peer_agent_guidance,
+    discord_token_hash, load_longterm_memory_catalog, load_review_tuning_guidance,
+    load_role_prompt, load_shared_prompt, render_peer_agent_guidance,
 };
 use super::*;
 
@@ -93,6 +93,12 @@ pub(super) fn build_system_prompt(
                      - 리뷰 verdict 제출 후 dispatch를 완료한다"
                         .to_string(),
             });
+
+            // #119: Inject review tuning guidance if available
+            if let Some(guidance) = load_review_tuning_guidance() {
+                system_prompt_owned.push_str("\n\n[Review Tuning — 과거 리뷰 정확도 기반 가이던스]\n");
+                system_prompt_owned.push_str(&guidance);
+            }
         } else if let Some(shared_prompt) = load_shared_prompt() {
             // Full profile: inject complete shared agent prompt (AGENTS.md)
             system_prompt_owned.push_str("\n\n[Shared Agent Rules]\n");

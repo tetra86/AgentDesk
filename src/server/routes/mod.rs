@@ -349,6 +349,11 @@ pub fn api_router(
             "/review-decision",
             post(review_verdict::submit_review_decision),
         )
+        // #119: Review tuning aggregation
+        .route(
+            "/review-tuning/aggregate",
+            post(review_verdict::aggregate_review_tuning),
+        )
         .route("/pm-decision", post(kanban::pm_decision))
         .layer(axum::middleware::from_fn(auth::auth_middleware))
         .with_state(state)
