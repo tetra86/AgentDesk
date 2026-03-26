@@ -187,6 +187,17 @@ pub fn api_router(
             "/pipeline/cards/{cardId}/history",
             get(pipeline::get_card_history),
         )
+        // Pipeline config hierarchy (#135)
+        .route("/pipeline/config/default", get(pipeline::get_default_pipeline))
+        .route("/pipeline/config/effective", get(pipeline::get_effective_pipeline))
+        .route(
+            "/pipeline/config/repo/{owner}/{repo}",
+            get(pipeline::get_repo_pipeline).put(pipeline::set_repo_pipeline),
+        )
+        .route(
+            "/pipeline/config/agent/{agent_id}",
+            get(pipeline::get_agent_pipeline).put(pipeline::set_agent_pipeline),
+        )
         // GitHub repos
         .route(
             "/github/repos",

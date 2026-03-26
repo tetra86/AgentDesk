@@ -65,12 +65,12 @@ pub fn transition_status_with_opts(
 ) -> Result<TransitionResult> {
     let conn = db.lock().map_err(|e| anyhow::anyhow!("DB lock: {e}"))?;
 
-    // Get current status
-    let old_status: String = conn
+    // Get current status + repo/agent for pipeline resolution (#135)
+    let (old_status, card_repo_id, card_agent_id): (String, Option<String>, Option<String>) = conn
         .query_row(
-            "SELECT status FROM kanban_cards WHERE id = ?1",
+            "SELECT status, repo_id, assigned_agent_id FROM kanban_cards WHERE id = ?1",
             [card_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .map_err(|_| anyhow::anyhow!("card not found: {card_id}"))?;
 
@@ -82,9 +82,18 @@ pub fn transition_status_with_opts(
         });
     }
 
-    // ── Pipeline-driven validation (#106) ──
-    // Use YAML pipeline config if loaded, fall back to hardcoded rules otherwise.
-    let pipeline = crate::pipeline::try_get();
+    // ── Pipeline-driven validation (#106 + #135 hierarchy) ──
+    // Resolve effective pipeline: default → repo override → agent override.
+    let effective = if crate::pipeline::try_get().is_some() {
+        Some(crate::pipeline::resolve_for_card(
+            &conn,
+            card_repo_id.as_deref(),
+            card_agent_id.as_deref(),
+        ))
+    } else {
+        None
+    };
+    let pipeline = effective.as_ref();
 
     // Terminal guard: terminal states cannot revert (unless force=true)
     let is_terminal = pipeline
@@ -314,40 +323,13 @@ pub fn transition_status_with_opts(
     // GitHub auto-sync (close on done, comment on review)
     github_sync_on_transition(db, card_id, new_status);
 
-    // Fire hooks
-    let _ = engine.try_fire_hook(
-        Hook::OnCardTransition,
-        json!({
-            "card_id": card_id,
-            "from": old_status,
-            "to": new_status,
-        }),
-    );
+    // Fire hooks — driven by pipeline hooks section (#134/#135)
+    // The effective pipeline's hooks_for_state() determines which hooks fire on entry.
+    fire_dynamic_hooks(engine, pipeline, card_id, &old_status, new_status);
 
-    if new_status == "done" {
-        // #119: Record true_negative for cards that passed review and reached done
-        // without post-pass bugs (i.e., the review correctly found no issues).
-        if record_true_negative_if_pass(db, card_id) {
-            crate::server::routes::review_verdict::spawn_aggregate_if_needed(db);
-        }
-
-        let _ = engine.try_fire_hook(
-            Hook::OnCardTerminal,
-            json!({
-                "card_id": card_id,
-                "status": "done",
-            }),
-        );
-    }
-
-    if new_status == "review" {
-        let _ = engine.try_fire_hook(
-            Hook::OnReviewEnter,
-            json!({
-                "card_id": card_id,
-                "from": old_status,
-            }),
-        );
+    // #119: Record true_negative for cards that passed review and reached done
+    if new_status == "done" && record_true_negative_if_pass(db, card_id) {
+        crate::server::routes::review_verdict::spawn_aggregate_if_needed(db);
     }
 
     Ok(TransitionResult {
@@ -362,6 +344,56 @@ pub struct TransitionResult {
     pub changed: bool,
     pub from: String,
     pub to: String,
+}
+
+/// Fire hooks dynamically based on the effective pipeline's hooks section (#134/#135).
+///
+/// Falls back to the legacy hardcoded hooks (OnCardTransition, OnReviewEnter,
+/// OnCardTerminal) when no pipeline hooks are defined for the state.
+fn fire_dynamic_hooks(
+    engine: &PolicyEngine,
+    pipeline: Option<&crate::pipeline::PipelineConfig>,
+    card_id: &str,
+    old_status: &str,
+    new_status: &str,
+) {
+    let payload = json!({
+        "card_id": card_id,
+        "from": old_status,
+        "to": new_status,
+    });
+
+    if let Some(p) = pipeline {
+        if let Some(bindings) = p.hooks_for_state(new_status) {
+            // Fire all on_enter hooks defined in the pipeline YAML
+            for hook_name in &bindings.on_enter {
+                if let Some(h) = Hook::from_str(hook_name) {
+                    let _ = engine.try_fire_hook(h, payload.clone());
+                } else {
+                    tracing::warn!(
+                        "[kanban] Unknown hook in pipeline on_enter: {hook_name} (state: {new_status})"
+                    );
+                }
+            }
+            return; // pipeline hooks are authoritative — skip legacy fallback
+        }
+    }
+
+    // Legacy fallback: hardcoded hooks (when pipeline has no hooks section for this state)
+    let _ = engine.try_fire_hook(Hook::OnCardTransition, payload);
+
+    if new_status == "done" {
+        let _ = engine.try_fire_hook(
+            Hook::OnCardTerminal,
+            json!({ "card_id": card_id, "status": "done" }),
+        );
+    }
+    if new_status == "review" {
+        let _ = engine.try_fire_hook(
+            Hook::OnReviewEnter,
+            json!({ "card_id": card_id, "from": old_status }),
+        );
+    }
 }
 
 /// Fire hooks for a status transition that already happened in the DB.
@@ -402,38 +434,28 @@ pub fn fire_transition_hooks(db: &Db, engine: &PolicyEngine, card_id: &str, from
     // GitHub auto-sync
     github_sync_on_transition(db, card_id, to);
 
-    let _ = engine.try_fire_hook(
-        Hook::OnCardTransition,
-        json!({
-            "card_id": card_id,
-            "from": from,
-            "to": to,
-        }),
-    );
+    // Resolve effective pipeline for this card (#135)
+    let effective = if crate::pipeline::try_get().is_some() {
+        db.lock().ok().map(|conn| {
+            let repo_id: Option<String> = conn
+                .query_row("SELECT repo_id FROM kanban_cards WHERE id = ?1", [card_id], |r| r.get(0))
+                .ok()
+                .flatten();
+            let agent_id: Option<String> = conn
+                .query_row("SELECT assigned_agent_id FROM kanban_cards WHERE id = ?1", [card_id], |r| r.get(0))
+                .ok()
+                .flatten();
+            crate::pipeline::resolve_for_card(&conn, repo_id.as_deref(), agent_id.as_deref())
+        })
+    } else {
+        None
+    };
 
-    if to == "done" {
-        // #119: Record true_negative for cards that passed review and reached done
-        if record_true_negative_if_pass(db, card_id) {
-            crate::server::routes::review_verdict::spawn_aggregate_if_needed(db);
-        }
+    fire_dynamic_hooks(engine, effective.as_ref(), card_id, from, to);
 
-        let _ = engine.try_fire_hook(
-            Hook::OnCardTerminal,
-            json!({
-                "card_id": card_id,
-                "status": "done",
-            }),
-        );
-    }
-
-    if to == "review" {
-        let _ = engine.try_fire_hook(
-            Hook::OnReviewEnter,
-            json!({
-                "card_id": card_id,
-                "from": from,
-            }),
-        );
+    // #119: Record true_negative for cards that passed review and reached done
+    if to == "done" && record_true_negative_if_pass(db, card_id) {
+        crate::server::routes::review_verdict::spawn_aggregate_if_needed(db);
     }
 
     // After all hooks, check if a new dispatch was created (by onCardTerminal, onReviewEnter, etc.)

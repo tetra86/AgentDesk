@@ -1,15 +1,24 @@
-//! Data-driven pipeline engine (#106 P1-P2).
+//! Data-driven pipeline engine (#106 P1-P4).
 //!
 //! Loads pipeline definition from YAML and provides lookup methods
 //! used by `kanban.rs` for transition validation.
+//!
+//! ## Hierarchy (#135)
+//!
+//! Pipeline configs form a three-level inheritance chain:
+//!   **default** → **repo** → **agent**
+//!
+//! Each level can override specific sections (states, transitions, gates,
+//! hooks, clocks, timeouts). Omitted sections inherit from the parent.
+//! `resolve()` merges the chain into a single effective `PipelineConfig`.
 
 use anyhow::{Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::OnceLock;
 
-/// Global singleton pipeline config, loaded once at startup.
+/// Global singleton pipeline config (the default), loaded once at startup.
 static PIPELINE: OnceLock<PipelineConfig> = OnceLock::new();
 
 /// Load pipeline from YAML file. Called once during server startup.
@@ -37,9 +46,93 @@ pub fn try_get() -> Option<&'static PipelineConfig> {
     PIPELINE.get()
 }
 
+/// Parse a pipeline override from JSON (stored in DB).
+/// Returns None if the input is empty/null.
+pub fn parse_override(json_str: &str) -> Result<Option<PipelineOverride>> {
+    let trimmed = json_str.trim();
+    if trimmed.is_empty() || trimmed == "null" || trimmed == "{}" {
+        return Ok(None);
+    }
+    let ovr: PipelineOverride =
+        serde_json::from_str(trimmed).with_context(|| "parsing pipeline override JSON")?;
+    Ok(Some(ovr))
+}
+
+/// Resolve the effective pipeline for a given (repo, agent) combination.
+///
+/// Merges: default → repo_override → agent_override.
+/// Each override only replaces the sections it explicitly provides.
+pub fn resolve(
+    repo_override: Option<&PipelineOverride>,
+    agent_override: Option<&PipelineOverride>,
+) -> PipelineConfig {
+    let base = get().clone();
+    let after_repo = match repo_override {
+        Some(ovr) => base.merge(ovr),
+        None => base,
+    };
+    match agent_override {
+        Some(ovr) => after_repo.merge(ovr),
+        None => after_repo,
+    }
+}
+
+/// Resolve effective pipeline from DB, looking up repo and agent overrides.
+pub fn resolve_for_card(
+    conn: &rusqlite::Connection,
+    repo_id: Option<&str>,
+    agent_id: Option<&str>,
+) -> PipelineConfig {
+    let repo_ovr = repo_id
+        .and_then(|rid| {
+            conn.query_row(
+                "SELECT pipeline_config FROM github_repos WHERE id = ?1",
+                [rid],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .ok()
+            .flatten()
+        })
+        .and_then(|json| parse_override(&json).ok().flatten());
+
+    let agent_ovr = agent_id
+        .and_then(|aid| {
+            conn.query_row(
+                "SELECT pipeline_config FROM agents WHERE id = ?1",
+                [aid],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .ok()
+            .flatten()
+        })
+        .and_then(|json| parse_override(&json).ok().flatten());
+
+    resolve(repo_ovr.as_ref(), agent_ovr.as_ref())
+}
+
+// ── Override Schema ──────────────────────────────────────────────
+
+/// A partial pipeline config used for repo/agent-level overrides.
+/// Only non-None fields replace the parent's values.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PipelineOverride {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub states: Option<Vec<StateConfig>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transitions: Option<Vec<TransitionConfig>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gates: Option<HashMap<String, GateConfig>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hooks: Option<HashMap<String, HookBindings>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub clocks: Option<HashMap<String, ClockConfig>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeouts: Option<HashMap<String, TimeoutConfig>>,
+}
+
 // ── Schema ───────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PipelineConfig {
     pub name: String,
     pub version: u32,
@@ -55,7 +148,7 @@ pub struct PipelineConfig {
     pub timeouts: HashMap<String, TimeoutConfig>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StateConfig {
     pub id: String,
     pub label: String,
@@ -63,7 +156,7 @@ pub struct StateConfig {
     pub terminal: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransitionConfig {
     pub from: String,
     pub to: String,
@@ -73,7 +166,7 @@ pub struct TransitionConfig {
     pub gates: Vec<String>,
 }
 
-#[derive(Debug, Deserialize, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TransitionType {
     Free,
@@ -81,7 +174,7 @@ pub enum TransitionType {
     ForceOnly,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GateConfig {
     #[serde(rename = "type")]
     pub gate_type: String,
@@ -91,7 +184,7 @@ pub struct GateConfig {
     pub description: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HookBindings {
     #[serde(default)]
     pub on_enter: Vec<String>,
@@ -99,14 +192,14 @@ pub struct HookBindings {
     pub on_exit: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClockConfig {
     pub set: String,
     #[serde(default)]
     pub mode: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TimeoutConfig {
     pub duration: String,
     pub clock: String,
@@ -116,6 +209,54 @@ pub struct TimeoutConfig {
     pub on_exhaust: Option<String>,
     #[serde(default)]
     pub condition: Option<String>,
+}
+
+// ── Merge ────────────────────────────────────────────────────────
+
+impl PipelineConfig {
+    /// Merge an override into this config, returning the result.
+    /// Override fields replace base fields entirely when present.
+    pub fn merge(&self, ovr: &PipelineOverride) -> PipelineConfig {
+        PipelineConfig {
+            name: self.name.clone(),
+            version: self.version,
+            states: ovr
+                .states
+                .as_ref()
+                .cloned()
+                .unwrap_or_else(|| self.states.clone()),
+            transitions: ovr
+                .transitions
+                .as_ref()
+                .cloned()
+                .unwrap_or_else(|| self.transitions.clone()),
+            gates: ovr
+                .gates
+                .as_ref()
+                .cloned()
+                .unwrap_or_else(|| self.gates.clone()),
+            hooks: ovr
+                .hooks
+                .as_ref()
+                .cloned()
+                .unwrap_or_else(|| self.hooks.clone()),
+            clocks: ovr
+                .clocks
+                .as_ref()
+                .cloned()
+                .unwrap_or_else(|| self.clocks.clone()),
+            timeouts: ovr
+                .timeouts
+                .as_ref()
+                .cloned()
+                .unwrap_or_else(|| self.timeouts.clone()),
+        }
+    }
+
+    /// Serialize to JSON (for API responses / DB storage).
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap_or(serde_json::json!({}))
+    }
 }
 
 // ── Lookup methods ───────────────────────────────────────────────
@@ -149,7 +290,7 @@ impl PipelineConfig {
     }
 
     /// Validate internal consistency.
-    fn validate(&self) -> Result<()> {
+    pub fn validate(&self) -> Result<()> {
         let state_ids: Vec<&str> = self.states.iter().map(|s| s.id.as_str()).collect();
 
         // All transition from/to must reference valid states

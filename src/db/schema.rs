@@ -43,6 +43,9 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     let _ = conn.execute_batch("ALTER TABLE agents ADD COLUMN sprite_number INTEGER DEFAULT NULL;");
     let _ = conn.execute_batch("ALTER TABLE agents ADD COLUMN description TEXT;");
     let _ = conn.execute_batch("ALTER TABLE agents ADD COLUMN system_prompt TEXT;");
+    // #135: Per-repo and per-agent pipeline override (JSON)
+    let _ = conn.execute_batch("ALTER TABLE github_repos ADD COLUMN pipeline_config TEXT;");
+    let _ = conn.execute_batch("ALTER TABLE agents ADD COLUMN pipeline_config TEXT;");
     let _ = conn.execute_batch("ALTER TABLE task_dispatches ADD COLUMN thread_id TEXT;");
     let _ =
         conn.execute_batch("ALTER TABLE task_dispatches ADD COLUMN retry_count INTEGER DEFAULT 0;");
