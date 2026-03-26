@@ -530,7 +530,27 @@ pub(crate) async fn send_dispatch_to_discord(
     };
 
     // For review dispatches, use the alternate channel (counter-model)
-    let use_alt = use_counter_model_channel(dispatch_type.as_deref());
+    let mut use_alt = use_counter_model_channel(dispatch_type.as_deref());
+
+    // #137: In unified thread mode, always use primary channel so all dispatches
+    // go to the same thread (review included). Check if this card is in a unified run.
+    let is_unified_run: bool = db
+        .lock()
+        .ok()
+        .and_then(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) > 0 FROM auto_queue_runs r \
+                 JOIN auto_queue_entries e ON e.run_id = r.id \
+                 WHERE e.kanban_card_id = ?1 AND r.unified_thread = 1 AND r.status = 'active'",
+                [card_id],
+                |row| row.get(0),
+            )
+            .ok()
+        })
+        .unwrap_or(false);
+    if is_unified_run {
+        use_alt = false; // Force primary channel for unified thread
+    }
 
     // Look up agent's discord channel
     let channel_id: Option<String> = {
