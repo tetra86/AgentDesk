@@ -152,8 +152,13 @@ fn stamp_review_passed_marker(reviewed_commit: Option<&str>) {
     let commit = if let Some(c) = reviewed_commit {
         c.to_string()
     } else {
-        let repo_dir = std::env::var("AGENTDESK_REPO_DIR")
-            .unwrap_or_else(|_| format!("{}/AgentDesk", env!("HOME")));
+        let repo_dir = std::env::var("AGENTDESK_REPO_DIR").unwrap_or_else(|_| {
+            dirs::home_dir()
+                .expect("HOME directory not found")
+                .join("AgentDesk")
+                .to_string_lossy()
+                .into_owned()
+        });
         let out = std::process::Command::new("git")
             .args(["rev-parse", "HEAD"])
             .current_dir(&repo_dir)
@@ -164,8 +169,13 @@ fn stamp_review_passed_marker(reviewed_commit: Option<&str>) {
         let Some(c) = out else { return };
         c
     };
-    let root = std::env::var("AGENTDESK_ROOT_DIR")
-        .unwrap_or_else(|_| format!("{}/.adk/release", env!("HOME")));
+    let root = std::env::var("AGENTDESK_ROOT_DIR").unwrap_or_else(|_| {
+        dirs::home_dir()
+            .expect("HOME directory not found")
+            .join(".adk/release")
+            .to_string_lossy()
+            .into_owned()
+    });
     let dir = format!("{}/runtime/review_passed", root);
     let _ = std::fs::create_dir_all(&dir);
     let _ = std::fs::write(format!("{}/{}", dir, commit), "");
