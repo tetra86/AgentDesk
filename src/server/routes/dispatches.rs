@@ -685,12 +685,18 @@ pub(crate) async fn send_dispatch_to_discord(
             map_json.and_then(|json_str| {
                 // Try parsing as JSON map {"channel_id": "thread_id", ...}
                 if let Ok(map) = serde_json::from_str::<serde_json::Value>(&json_str) {
-                    map.get(&channel_id_num.to_string())
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string())
+                    if map.is_object() {
+                        map.get(&channel_id_num.to_string())
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
+                    } else {
+                        // Legacy: parsed as number/string, not a JSON object — skip
+                        // A new JSON map will be created when a thread is made for this channel
+                        None
+                    }
                 } else {
-                    // Legacy: plain thread_id string — use as-is if channel matches
-                    Some(json_str)
+                    // Unparseable — skip, will be overwritten with proper JSON map
+                    None
                 }
             })
         });
@@ -766,7 +772,7 @@ pub(crate) async fn send_dispatch_to_discord(
                         "SELECT kc.github_issue_number FROM auto_queue_entries e \
                          JOIN auto_queue_runs r ON e.run_id = r.id \
                          JOIN kanban_cards kc ON e.kanban_card_id = kc.id \
-                         WHERE r.unified_thread = 1 AND r.unified_thread_id IS NULL \
+                         WHERE r.unified_thread = 1 \
                          AND e.kanban_card_id = ?1 AND kc.github_issue_number IS NOT NULL \
                          LIMIT 1",
                     )
@@ -786,7 +792,7 @@ pub(crate) async fn send_dispatch_to_discord(
                         "SELECT kc.github_issue_number FROM auto_queue_entries e \
                          JOIN auto_queue_runs r ON e.run_id = r.id \
                          JOIN kanban_cards kc ON e.kanban_card_id = kc.id \
-                         WHERE r.unified_thread = 1 AND r.unified_thread_id IS NULL \
+                         WHERE r.unified_thread = 1 \
                          AND e.run_id IN (SELECT run_id FROM auto_queue_entries WHERE kanban_card_id = ?1) \
                          AND kc.github_issue_number IS NOT NULL \
                          ORDER BY e.priority_rank ASC",
@@ -880,7 +886,9 @@ pub(crate) async fn send_dispatch_to_discord(
                             )
                             .ok();
                             set_thread_for_channel(&conn, card_id, channel_id_num, thread_id);
-                            // #137: Store unified thread per channel in JSON map
+                            // #141: Store unified thread per channel in JSON map
+                            // Save when: no existing thread for this channel (unified_thread_id is None)
+                            // AND this card belongs to a unified run
                             if unified_thread_id.is_none() && is_unified_run {
                                 // Read existing map, add this channel's thread
                                 let existing: String = conn
@@ -891,8 +899,35 @@ pub(crate) async fn send_dispatch_to_discord(
                                         |row| row.get(0),
                                     )
                                     .unwrap_or_else(|_| "{}".to_string());
-                                let mut map: serde_json::Value = serde_json::from_str(&existing)
-                                    .unwrap_or(serde_json::json!({}));
+                                // #141: Ensure we have a proper JSON object — legacy plain
+                                // string/number values get upgraded to a map, preserving
+                                // the legacy thread_id under the primary channel key
+                                let mut map: serde_json::Value = serde_json::from_str::<serde_json::Value>(&existing)
+                                    .ok()
+                                    .filter(|v: &serde_json::Value| v.is_object())
+                                    .unwrap_or_else(|| {
+                                        // Legacy: plain thread_id — promote to JSON map
+                                        // Preserve it under primary channel key if available
+                                        let legacy_tid = existing.trim().to_string();
+                                        if legacy_tid.is_empty() || legacy_tid == "{}" {
+                                            return serde_json::json!({});
+                                        }
+                                        let primary_ch: Option<String> = conn
+                                            .query_row(
+                                                "SELECT discord_channel_id FROM agents WHERE id = ?1",
+                                                [agent_id],
+                                                |row| row.get(0),
+                                            )
+                                            .ok();
+                                        let primary_num: Option<u64> = primary_ch.and_then(|ch| {
+                                            ch.parse().ok().or_else(|| resolve_channel_alias(&ch))
+                                        });
+                                        if let Some(pch) = primary_num {
+                                            serde_json::json!({ pch.to_string(): legacy_tid })
+                                        } else {
+                                            serde_json::json!({})
+                                        }
+                                    });
                                 map[channel_id_num.to_string()] = serde_json::json!(thread_id);
                                 conn.execute(
                                     "UPDATE auto_queue_runs SET unified_thread_id = ?1 \
