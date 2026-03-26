@@ -652,6 +652,29 @@ export default function OnboardingWizard({ isKo, onComplete }: Props) {
                 {tr("에서 New Application 클릭", " → Click New Application")}
               </li>
               <li>{tr("왼쪽 Bot 탭 → Reset Token → 토큰 복사", "Left Bot tab → Reset Token → Copy token")}</li>
+              <li>
+                {tr(
+                  "같은 Bot 탭에서 Privileged Gateway Intents 3개를 모두 활성화:",
+                  "On the same Bot tab, enable all 3 Privileged Gateway Intents:",
+                )}
+                <ul className="list-disc list-inside ml-4 mt-1 space-y-0.5">
+                  <li>
+                    <strong>MESSAGE CONTENT</strong>
+                    {" — "}
+                    {tr("봇이 메시지 내용을 읽을 수 있습니다", "Allows the bot to read message content")}
+                  </li>
+                  <li>
+                    <strong>SERVER MEMBERS</strong>
+                    {" — "}
+                    {tr("서버 멤버 정보를 조회할 수 있습니다", "Allows access to server member info")}
+                  </li>
+                  <li>
+                    <strong>PRESENCE</strong>
+                    {" — "}
+                    {tr("멤버 온라인 상태를 확인할 수 있습니다", "Allows reading member online status")}
+                  </li>
+                </ul>
+              </li>
               <li>{tr("아래에 토큰을 붙여넣고 검증하면, 서버 초대 링크가 자동 생성됩니다", "Paste tokens below and validate — invite links are generated automatically")}</li>
             </ol>
           </div>

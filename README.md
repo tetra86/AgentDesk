@@ -45,6 +45,8 @@ Create Discord bots in the [Discord Developer Portal](https://discord.com/develo
 | **Communication Bot** | Agent-to-agent messaging + channel management | Administrator (simplest) or Manage Channels + Manage Roles |
 | **Notification Bot** *(optional)* | System alerts (agents don't respond to this bot) | Send Messages |
 
+**Important:** On the Bot tab, enable all three **Privileged Gateway Intents** — MESSAGE CONTENT, SERVER MEMBERS, and PRESENCE. Without these, bots cannot read message content or detect members properly.
+
 After entering and validating each bot token, the wizard generates OAuth2 invite links with the correct permissions pre-configured — just click to invite each bot to your Discord server.
 
 ### Step 2: Provider Verification
