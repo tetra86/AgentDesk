@@ -244,12 +244,7 @@ pub(super) fn load_shared_prompt() -> Option<String> {
 /// #119: Load review tuning guidance from the well-known runtime file.
 /// Returns None if file doesn't exist or is empty.
 pub(super) fn load_review_tuning_guidance() -> Option<String> {
-    let root = std::env::var("AGENTDESK_ROOT_DIR")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .map(std::path::PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|h| h.join(".adk").join("release")))
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let root = super::runtime_store::agentdesk_root()?;
     let path = root.join("runtime").join("review-tuning-guidance.txt");
     let content = fs::read_to_string(path).ok()?;
     if content.trim().is_empty() {

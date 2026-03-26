@@ -385,33 +385,12 @@ pub async fn submit_verdict(
         });
     }
 
-    // #119: Record true_negative outcome for pass verdicts
-    if body.overall == "pass" || body.overall == "approved" {
-        if let Some(ref cid) = card_id {
-            let review_round: Option<i64> = state
-                .db
-                .lock()
-                .ok()
-                .and_then(|conn| {
-                    conn.query_row(
-                        "SELECT review_round FROM card_review_state WHERE card_id = ?1",
-                        [cid],
-                        |row| row.get(0),
-                    )
-                    .ok()
-                });
-            record_tuning_outcome(
-                &state.db,
-                cid,
-                Some(&body.dispatch_id),
-                review_round,
-                &body.overall,
-                None,
-                "true_negative",
-                None,
-            );
-        }
+    // #119: Do NOT record true_negative at pass-verdict time — the pass is unverified
+    // until the card reaches done without post-pass bugs. TN is recorded by the
+    // OnCardTerminal hook path (transition_status → done) after a pass verdict instead.
+    // Recording here would inflate TN counts with unverified assumptions.
 
+    if body.overall == "pass" || body.overall == "approved" {
         // When review passes, stamp a marker so promote-release.sh can verify
         stamp_review_passed_marker(effective_commit.as_deref());
     }
@@ -714,8 +693,8 @@ pub async fn submit_review_decision(
     // #117: Update canonical review state for all decision paths
     update_card_review_state(&state.db, &body.card_id, &body.decision, pending_rd_id.as_deref());
 
-    // #119: Record tuning outcome based on decision type
-    if body.decision == "accept" || body.decision == "dismiss" {
+    // #119: Record tuning outcome for all decision types (accept, dismiss, dispute)
+    {
         let (review_round, last_verdict, finding_cats) = state
             .db
             .lock()
@@ -766,10 +745,11 @@ pub async fn submit_review_decision(
             })
             .unwrap_or((None, None, None));
 
-        let outcome = if body.decision == "accept" {
-            "true_positive"
-        } else {
-            "false_positive"
+        let outcome = match body.decision.as_str() {
+            "accept" => "true_positive",  // review correctly found issue
+            "dismiss" => "false_positive", // review incorrectly flagged
+            "dispute" => "disputed",       // agent disagrees, needs re-review
+            _ => "unknown",
         };
         record_tuning_outcome(
             &state.db,
@@ -783,6 +763,9 @@ pub async fn submit_review_decision(
         );
     }
 
+    // #119: Auto-trigger aggregation after each decision to keep guidance fresh
+    spawn_aggregate_if_needed(&state.db);
+
     (
         StatusCode::OK,
         Json(json!({
@@ -795,27 +778,42 @@ pub async fn submit_review_decision(
 
 // ── #119: Review tuning aggregation ──────────────────────────────────────────
 
-/// POST /api/review-tuning/aggregate
-///
-/// Aggregates review tuning outcomes (FP/FN rates per finding category)
-/// and writes tuning guidance to kv_meta + a file for prompt injection.
-pub async fn aggregate_review_tuning(
-    State(state): State<AppState>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    let conn = match state.db.lock() {
-        Ok(c) => c,
-        Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "db lock failed"})),
-            )
+/// Minimum total outcomes required before generating any guidance.
+/// Prevents misleading guidance from tiny sample sizes.
+const MIN_OUTCOMES_FOR_GUIDANCE: i64 = 5;
+
+/// Minimum outcomes per category before including it in guidance.
+const MIN_CATEGORY_OUTCOMES: i64 = 3;
+
+/// Spawn a background task to re-aggregate review tuning data.
+/// Uses a lightweight debounce: skips if the last aggregate was < 60s ago.
+fn spawn_aggregate_if_needed(db: &crate::db::Db) {
+    let db = db.clone();
+    tokio::spawn(async move {
+        // Debounce: check if guidance file was written recently
+        let path = review_tuning_guidance_path();
+        if let Ok(meta) = std::fs::metadata(&path) {
+            if let Ok(modified) = meta.modified() {
+                if modified.elapsed().map_or(false, |d| d.as_secs() < 60) {
+                    return; // aggregated < 60s ago, skip
+                }
+            }
         }
+        aggregate_review_tuning_core(&db);
+    });
+}
+
+/// Core aggregation logic shared by the HTTP endpoint and background trigger.
+fn aggregate_review_tuning_core(db: &crate::db::Db) -> (i64, i64, i64, i64, usize) {
+    let conn = match db.lock() {
+        Ok(c) => c,
+        Err(_) => return (0, 0, 0, 0, 0),
     };
 
-    // Aggregate outcomes — collect all rows into a Vec first to release the borrow
     let mut total_tp = 0i64;
     let mut total_fp = 0i64;
     let mut total_tn = 0i64;
+    let mut total_disputed = 0i64;
     let mut fp_categories: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
     let mut tp_categories: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
 
@@ -826,12 +824,7 @@ pub async fn aggregate_review_tuning(
              WHERE created_at > datetime('now', '-30 days')",
         ) {
             Ok(s) => s,
-            Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("query failed: {e}")})),
-                )
-            }
+            Err(_) => return (0, 0, 0, 0, 0),
         };
 
         let rows: Vec<(String, Option<String>)> = stmt
@@ -851,6 +844,7 @@ pub async fn aggregate_review_tuning(
                 "true_positive" => total_tp += 1,
                 "false_positive" => total_fp += 1,
                 "true_negative" => total_tn += 1,
+                "disputed" => total_disputed += 1,
                 _ => {}
             }
             if let Some(cats) = cats_json {
@@ -870,29 +864,30 @@ pub async fn aggregate_review_tuning(
         }
     }
 
-    // Build tuning guidance text
-    let total = total_tp + total_fp + total_tn;
+    let total = total_tp + total_fp + total_tn + total_disputed;
     let mut guidance_lines: Vec<String> = Vec::new();
 
-    if total > 0 {
-        let fp_rate = if total_tp + total_fp > 0 {
-            total_fp as f64 / (total_tp + total_fp) as f64
+    // Only generate guidance when we have enough data to be meaningful
+    if total >= MIN_OUTCOMES_FOR_GUIDANCE {
+        let actionable = total_tp + total_fp;
+        let fp_rate = if actionable > 0 {
+            total_fp as f64 / actionable as f64
         } else {
             0.0
         };
 
         guidance_lines.push(format!(
-            "지난 30일 리뷰 통계: 전체 {}건 (정탐 {}건, 오탐 {}건, 정상 {}건, 오탐률 {:.0}%)",
-            total, total_tp, total_fp, total_tn, fp_rate * 100.0
+            "지난 30일 리뷰 통계: 전체 {}건 (정탐 {}건, 오탐 {}건, 정상 {}건, 반박 {}건, 오탐률 {:.0}%)",
+            total, total_tp, total_fp, total_tn, total_disputed, fp_rate * 100.0
         ));
 
-        // High FP categories
+        // High FP categories (min sample guard)
         let mut fp_sorted: Vec<_> = fp_categories.iter().collect();
         fp_sorted.sort_by(|a, b| b.1.cmp(a.1));
         for (cat, count) in fp_sorted.iter().take(5) {
             let tp_count = tp_categories.get(*cat).copied().unwrap_or(0);
             let cat_total = *count + tp_count;
-            if cat_total > 0 && **count as f64 / cat_total as f64 > 0.5 {
+            if cat_total >= MIN_CATEGORY_OUTCOMES && **count as f64 / cat_total as f64 > 0.5 {
                 guidance_lines.push(format!(
                     "- 과도 지적 카테고리 '{}': 오탐 {}건/전체 {}건 — 이 유형은 엄격도를 낮춰라",
                     cat, count, cat_total
@@ -900,13 +895,13 @@ pub async fn aggregate_review_tuning(
             }
         }
 
-        // High TP categories (categories reviewers correctly catch)
+        // High TP categories (min sample guard)
         let mut tp_sorted: Vec<_> = tp_categories.iter().collect();
         tp_sorted.sort_by(|a, b| b.1.cmp(a.1));
         for (cat, count) in tp_sorted.iter().take(3) {
             let fp_count = fp_categories.get(*cat).copied().unwrap_or(0);
             let cat_total = *count + fp_count;
-            if cat_total >= 2 && **count as f64 / cat_total as f64 > 0.7 {
+            if cat_total >= MIN_CATEGORY_OUTCOMES && **count as f64 / cat_total as f64 > 0.7 {
                 guidance_lines.push(format!(
                     "- 정탐 빈출 카테고리 '{}': 정탐 {}건/전체 {}건 — 이 유형은 계속 주의 깊게 확인하라",
                     cat, count, cat_total
@@ -935,11 +930,26 @@ pub async fn aggregate_review_tuning(
         let _ = std::fs::create_dir_all(parent);
     }
     let _ = std::fs::write(&guidance_path, &guidance);
+
+    let lines = guidance_lines.len();
     tracing::info!(
-        "[review-tuning] #119 aggregation complete: tp={total_tp} fp={total_fp} tn={total_tn}, guidance written to {}",
+        "[review-tuning] #119 aggregation: tp={total_tp} fp={total_fp} tn={total_tn} disputed={total_disputed}, {lines} guidance lines → {}",
         guidance_path.display()
     );
 
+    (total_tp, total_fp, total_tn, total_disputed, lines)
+}
+
+/// POST /api/review-tuning/aggregate
+///
+/// Aggregates review tuning outcomes (FP/FN rates per finding category)
+/// and writes tuning guidance to kv_meta + a file for prompt injection.
+pub async fn aggregate_review_tuning(
+    State(state): State<AppState>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let (total_tp, total_fp, total_tn, total_disputed, guidance_lines) =
+        aggregate_review_tuning_core(&state.db);
+    let total = total_tp + total_fp + total_tn + total_disputed;
     (
         StatusCode::OK,
         Json(json!({
@@ -948,7 +958,8 @@ pub async fn aggregate_review_tuning(
             "true_positive": total_tp,
             "false_positive": total_fp,
             "true_negative": total_tn,
-            "guidance_lines": guidance_lines.len(),
+            "disputed": total_disputed,
+            "guidance_lines": guidance_lines,
         })),
     )
 }
