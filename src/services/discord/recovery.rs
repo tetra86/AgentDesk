@@ -243,29 +243,81 @@ pub(super) async fn restore_inflight_turns(
                 super::formatting::remove_reaction_raw(http, channel_id, user_msg_id, '⏳').await;
                 super::formatting::add_reaction_raw(http, channel_id, user_msg_id, '✅').await;
                 // Complete the dispatch if this was a dispatch turn — the normal
-                // idle→auto_complete path was lost when dcserver restarted.
+                // completion path was lost when dcserver restarted.
+                // #142: Check dispatch type — implementation/rework need explicit completion,
+                // review can use idle auto-complete.
                 let recovered_dispatch_id = parse_dispatch_id(&state.user_text);
                 if let Some(ref did) = recovered_dispatch_id {
-                    let adk_session_key =
-                        build_adk_session_key(shared, ChannelId::new(state.channel_id), provider)
-                            .await;
-                    post_adk_session_status(
-                        adk_session_key.as_deref(),
-                        state.channel_name.as_deref(),
-                        Some(provider.as_str()),
-                        "idle",
-                        provider,
-                        None,
-                        None,
-                        None,
-                        Some(did),
-                        shared.api_port,
-                    )
-                    .await;
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    println!(
-                        "  [{ts}] ✓ posted idle with dispatch_id {did} for completed-during-downtime recovery"
+                    // #142: For implementation/rework, idle won't auto-complete (#115).
+                    // Use PATCH /api/dispatches/:id to complete directly.
+                    // For review, idle auto-complete works fine.
+                    let complete_url = format!(
+                        "http://127.0.0.1:{}/api/dispatches/{}",
+                        shared.api_port, did
                     );
+                    let client = reqwest::Client::new();
+                    let patch_result = client
+                        .patch(&complete_url)
+                        .json(&serde_json::json!({
+                            "status": "completed",
+                            "result": {"completion_source": "recovery_completed_during_downtime"},
+                        }))
+                        .send()
+                        .await;
+                    match patch_result {
+                        Ok(resp) if resp.status().is_success() => {
+                            let ts = chrono::Local::now().format("%H:%M:%S");
+                            println!(
+                                "  [{ts}] ✓ recovery: completed dispatch {did} via API (completed-during-downtime)"
+                            );
+                        }
+                        Ok(resp) => {
+                            let ts = chrono::Local::now().format("%H:%M:%S");
+                            let status = resp.status();
+                            println!(
+                                "  [{ts}] ⚠ recovery: dispatch {did} API completion failed ({status}), falling back to idle"
+                            );
+                            // Fallback: post idle (works for review type)
+                            let adk_session_key =
+                                build_adk_session_key(shared, ChannelId::new(state.channel_id), provider)
+                                    .await;
+                            post_adk_session_status(
+                                adk_session_key.as_deref(),
+                                state.channel_name.as_deref(),
+                                Some(provider.as_str()),
+                                "idle",
+                                provider,
+                                None,
+                                None,
+                                None,
+                                Some(did),
+                                shared.api_port,
+                            )
+                            .await;
+                        }
+                        Err(e) => {
+                            let ts = chrono::Local::now().format("%H:%M:%S");
+                            println!(
+                                "  [{ts}] ⚠ recovery: dispatch {did} API call failed ({e}), falling back to idle"
+                            );
+                            let adk_session_key =
+                                build_adk_session_key(shared, ChannelId::new(state.channel_id), provider)
+                                    .await;
+                            post_adk_session_status(
+                                adk_session_key.as_deref(),
+                                state.channel_name.as_deref(),
+                                Some(provider.as_str()),
+                                "idle",
+                                provider,
+                                None,
+                                None,
+                                None,
+                                Some(did),
+                                shared.api_port,
+                            )
+                            .await;
+                        }
+                    }
                 }
                 super::restart_report::clear_restart_report(provider, state.channel_id);
                 clear_inflight_state(provider, state.channel_id);
