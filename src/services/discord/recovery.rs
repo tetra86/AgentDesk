@@ -6,6 +6,11 @@ use crate::services::tmux_common::tmux_exact_target;
 use crate::services::tmux_diagnostics::{build_tmux_death_diagnostic, tmux_session_has_live_pane};
 
 #[cfg(not(unix))]
+fn tmux_exact_target(session_name: &str) -> String {
+    format!("={}", session_name)
+}
+
+#[cfg(not(unix))]
 fn tmux_session_has_live_pane(_name: &str) -> bool {
     false
 }
