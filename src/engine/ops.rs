@@ -264,6 +264,13 @@ fn register_log_ops<'js>(ctx: &Ctx<'js>) -> JsResult<()> {
         })?,
     )?;
 
+    log_obj.set(
+        "debug",
+        Function::new(ctx.clone(), |msg: String| {
+            tracing::debug!(target: "policy", "{}", msg);
+        })?,
+    )?;
+
     ad.set("log", log_obj)?;
     Ok(())
 }
